@@ -1,74 +1,10 @@
 from flask import Flask, request, jsonify
 import os
 import requests
-import json
-from datetime import datetime
 
 app = Flask(__name__)
 
-# --- Configuration ---
-API_KEY = os.getenv("OPENROUTER_API_KEY")
-if not API_KEY:
-    raise ValueError("Missing OPENROUTER_API_KEY — export it first.")
-
-# Optional: simple API key auth for subscribers
-SUBSCRIBER_KEY = os.getenv("LEGAL_SMEGAL_SUB_KEY", "demo-key")
-
-# --- Helper: call OpenRouter directly ---
-def ask_openrouter(prompt: str):
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://legal-smegal.ai",
-        "X-Title": "Legal Smegal"
-    }
-    data = {
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}],
-    }
-
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(data))
-        response.raise_for_status()
-        payload = response.json()
-
-        if "choices" in payload and len(payload["choices"]) > 0:
-            return payload["choices"][0]["message"]["content"]
-        else:
-            return f"[Unexpected response format]\n{json.dumps(payload, indent=2)}"
-
-    except requests.exceptions.RequestException as e:
-        return f"[HTTP error] {str(e)}"
-    except json.JSONDecodeError:
-        return f"[Invalid JSON] Raw response:\n{response.text}"
-
-
-# --- API Routes ---
-@app.route("/ask", methods=["POST"])
-def ask():
-    # Authentication
-    client_key = request.headers.get("x-api-key")
-    if client_key != SUBSCRIBER_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    data = request.get_json(silent=True)
-    if not data or "question" not in data:
-        return jsonify({"error": "Missing question"}), 400
-
-    question = data["question"].strip()
-    if not question:
-        return jsonify({"error": "Empty question"}), 400
-
-    answer = ask_openrouter(question)
-
-    # Log each query to a simple text file
-    with open("queries.log", "a") as f:
-        f.write(f"[{datetime.now().isoformat()}] Q: {question}\nA: {answer}\n\n")
-
-    return jsonify({"answer": answer})
-
-
+# --- Root route (status check) ---
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -77,7 +13,56 @@ def home():
         "usage": "POST /ask with JSON {'question': '...'} and header x-api-key"
     })
 
+# --- Main /ask endpoint ---
+@app.route("/ask", methods=["POST"])
+def ask():
+    # Validate subscription key
+    client_key = request.headers.get("x-api-key")
+    server_key = os.getenv("LEGAL_SMEGAL_SUB_KEY")
 
+    if not client_key or client_key != server_key:
+        return jsonify({"error": "Unauthorized: invalid or missing API key"}), 401
+
+    # Parse JSON input
+    data = request.get_json(silent=True)
+    if not data or "question" not in data:
+        return jsonify({"error": "Missing 'question' field in JSON body"}), 400
+
+    question = data["question"]
+
+    # Prepare OpenRouter call
+    try:
+        headers = {
+            "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You are Legal Smegal, a UK legal explainer bot."},
+                {"role": "user", "content": question}
+            ]
+        }
+
+        # Send request to OpenRouter API
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+        data = response.json()
+
+        # Handle valid and error responses
+        if response.status_code == 200 and "choices" in data:
+            answer = data["choices"][0]["message"]["content"]
+            return jsonify({"answer": answer})
+        else:
+            return jsonify({
+                "error": "OpenRouter API error",
+                "details": data
+            }), response.status_code
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# --- Run Flask app ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5050)
-
+    port = int(os.environ.get("PORT", 10000))  # default for Render
+    app.run(host="0.0.0.0", port=port)
