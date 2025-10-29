@@ -1,13 +1,7 @@
 flask==3.0.3
 gunicorn==21.2.0
 requests==2.31.0
-
-# Core LLM and retrieval stack
-langchain==0.2.11
-langchain-community==0.2.11
-langchain-openai==0.2.11
+langchain==0.2.12
+langchain-community==0.2.12
 chromadb==0.5.3
-
-# Optional but recommended for dataset integration
-tiktoken==0.7.0
-numpy==1.26.4
+flask-cors==4.0.0
