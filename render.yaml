@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: legal-smegal-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    plan: free
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
