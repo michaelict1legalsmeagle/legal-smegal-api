@@ -1,7 +1,7 @@
 flask==3.0.3
 gunicorn==21.2.0
 requests==2.31.0
-langchain==0.2.13
-langchain-community==0.2.13
+langchain==0.2.15
+langchain-community==0.2.15
 chromadb==0.5.3
 flask-cors==4.0.0
