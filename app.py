@@ -1,8 +1,10 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+from flask_cors import CORS   # ✅ Added
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)  # ✅ Added
 
 # --- Environment Variables ---
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -74,11 +76,19 @@ def call_openrouter(messages, model="gpt-4o-mini"):
         "temperature": 0.4,
         "max_tokens": 700,
     }
-    resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
-                         headers=headers, json=data, timeout=60)
-    resp.raise_for_status()
-    j = resp.json()
-    return j.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers, json=data, timeout=25  # ✅ Shorter timeout
+        )
+        resp.raise_for_status()
+        j = resp.json()
+        return j.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    except requests.Timeout:
+        return "The Legal Smegal service is currently busy. Please try again shortly."  # ✅ Added
+    except Exception as e:
+        print("OpenRouter API error:", str(e))  # ✅ Added
+        return "An error occurred connecting to Legal Smegal service."  # ✅ Added
 
 # ============================================================
 #  ROUTES
