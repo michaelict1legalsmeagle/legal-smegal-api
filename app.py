@@ -20,6 +20,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+print("🟢 Using Supabase Key Prefix:", SUPABASE_KEY[:20])
+
 
 # ============================================================
 #  PROMPT BUILDERS
