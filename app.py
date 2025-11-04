@@ -6,6 +6,7 @@ import requests
 import os
 import json
 import uuid
+import time
 from flask_cors import CORS
 from supabase import create_client, Client
 
@@ -24,7 +25,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 print("🟢 Using Supabase Key Prefix:", SUPABASE_KEY[:20])
-
 
 # ============================================================
 #  PROMPT BUILDERS
@@ -83,38 +83,75 @@ Context: {context}
 """
 
 # ============================================================
-#  OPENROUTER API WRAPPER
+#  OPENROUTER API WRAPPER (HARDENED)
 # ============================================================
 
 def call_openrouter(messages, model="gpt-4o-mini"):
-    """Generic OpenRouter API call wrapper."""
+    """Robust OpenRouter API call with retry + fallback models."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "HTTP-Referer": "https://legal-smegal-api-final.onrender.com",
         "Content-Type": "application/json",
     }
+
+    model_chain = [model, "gpt-4o", "mistral-nemo:latest"]
     data = {
-        "model": model,
         "messages": messages,
         "temperature": 0.4,
         "max_tokens": 700,
     }
-    try:
-        print("🔹 Sending request to OpenRouter...")
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers, json=data, timeout=60
-        )
-        print(f"🔹 OpenRouter response status: {resp.status_code}")
-        resp.raise_for_status()
-        j = resp.json()
-        content = j.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        return content or "No response from Legal Smegal AI."
-    except requests.Timeout:
-        return "⏱ Legal Smegal service timed out. Please retry shortly."
-    except Exception as e:
-        print("❌ OpenRouter API error:", str(e))
-        return "An internal AI communication error occurred."
+
+    for current_model in model_chain:
+        data["model"] = current_model
+        for attempt in range(3):
+            try:
+                print(f"🔹 Trying model {current_model} (attempt {attempt+1})...")
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers, json=data, timeout=60
+                )
+
+                if resp.status_code == 200:
+                    j = resp.json()
+                    content = (
+                        j.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        .strip()
+                    )
+                    if content:
+                        return content
+
+                elif resp.status_code == 503:
+                    print("⚠️ Model overloaded (503). Retrying...")
+                    time.sleep(2 ** attempt)
+                    continue
+
+                else:
+                    print(f"❌ Model {current_model} returned {resp.status_code}")
+                    break
+
+            except requests.Timeout:
+                print(f"⏱ Timeout from {current_model}, retrying...")
+                time.sleep(2 ** attempt)
+                continue
+
+            except Exception as e:
+                print(f"⚠️ Unexpected error with {current_model}: {e}")
+                break
+
+        print(f"❌ All retries failed for {current_model}, trying next model...")
+
+    fallback_error = {
+        "error": {
+            "code": 503,
+            "message": "All AI models are currently overloaded. Please retry shortly.",
+            "source": "openrouter",
+            "status": "unavailable",
+        }
+    }
+    print("🚨 All models failed. Returning fallback JSON.")
+    return json.dumps(fallback_error)
 
 # ============================================================
 #  ROUTES
@@ -160,7 +197,7 @@ def save_analysis():
     """Save analysis data to Supabase with UUID auto-generation."""
     data = request.get_json() or {}
     title = data.get("title", "Untitled Analysis")
-    user_id = str(uuid.uuid4())  # ✅ Auto-generate valid UUID
+    user_id = str(uuid.uuid4())
     summary = data.get("summary", "")
     score = data.get("score", 0)
     risks = data.get("risks", "")
@@ -190,12 +227,9 @@ def get_analyses():
     try:
         response = supabase.table("analyses").select("*").order("created_at", desc=True).limit(10).execute()
         data = response.data
-
         if not data:
             return jsonify({"analyses": [], "message": "No analyses found", "status": "empty"}), 200
-
         return jsonify({"analyses": data, "status": "success"}), 200
-
     except Exception as e:
         print("❌ Error in /get-analyses:", str(e))
         return jsonify({"error": str(e), "status": "failed"}), 500
