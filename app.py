@@ -1,3 +1,6 @@
+# ============================================================
+#  IMPORTS
+# ============================================================
 from flask import Flask, request, jsonify
 import requests
 import os
@@ -181,6 +184,23 @@ def save_analysis():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/get-analyses", methods=["GET"])
+def get_analyses():
+    """Retrieve recent analyses from Supabase."""
+    try:
+        response = supabase.table("analyses").select("*").order("created_at", desc=True).limit(10).execute()
+        data = response.data
+
+        if not data:
+            return jsonify({"analyses": [], "message": "No analyses found", "status": "empty"}), 200
+
+        return jsonify({"analyses": data, "status": "success"}), 200
+
+    except Exception as e:
+        print("❌ Error in /get-analyses:", str(e))
+        return jsonify({"error": str(e), "status": "failed"}), 500
+
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -189,7 +209,8 @@ def home():
         "routes": {
             "POST /ask": "{ 'question': '...', 'context': 'optional', 'mode': 'concise|professional|detailed' }",
             "POST /generate-email": "{ 'analysisData': '...', 'mode': 'professional' }",
-            "POST /save-analysis": "{ 'title': '...', 'summary': '...', 'score': 0, 'risks': '...', 'analysis': {...} }"
+            "POST /save-analysis": "{ 'title': '...', 'summary': '...', 'score': 0, 'risks': '...', 'analysis': {...} }",
+            "GET /get-analyses": "Retrieves the 10 most recent analyses from Supabase"
         }
     })
 
