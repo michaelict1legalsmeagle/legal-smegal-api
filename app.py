@@ -65,6 +65,59 @@ def safe_float(v: Any) -> Optional[float]:
         return None
 
 
+def _first_source_url(sources: Any) -> str:
+    """Compatibility helper for frontend that expects sourceUrl."""
+    if isinstance(sources, list) and sources:
+        s0 = sources[0]
+        if isinstance(s0, dict):
+            u = s0.get("url")
+            if isinstance(u, str) and u.strip():
+                return u.strip()
+    return ""
+
+
+def metric_ok(summary: str, value: Any, sources: list, retrieved_at: str, confidence: float) -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "summary": summary or "",
+        "value": value,
+        "metrics": {},
+        "sources": sources or [],
+        "sourceUrl": _first_source_url(sources),
+        "retrievedAtISO": retrieved_at,
+        "confidenceValue": float(confidence) if confidence is not None else 0.0,
+        "needsEvidence": False if (confidence and confidence > 0) else True,
+    }
+
+
+def metric_missing_provider(summary: str, sources: list, retrieved_at: str, extra_metrics: Optional[dict] = None) -> Dict[str, Any]:
+    return {
+        "status": "missing_provider",
+        "summary": summary or "",
+        "value": None,
+        "metrics": extra_metrics or {},
+        "sources": sources or [],
+        "sourceUrl": _first_source_url(sources),
+        "retrievedAtISO": retrieved_at,
+        "confidenceValue": 0.0,
+        "needsEvidence": True,
+    }
+
+
+def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_metrics: Optional[dict] = None) -> Dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "summary": summary or "",
+        "value": None,
+        "metrics": extra_metrics or {},
+        "sources": sources or [],
+        "sourceUrl": _first_source_url(sources),
+        "retrievedAtISO": retrieved_at,
+        "confidenceValue": 0.0,
+        "needsEvidence": True,
+    }
+
+
 def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
     """
     Postcode -> lat/lng via Nominatim (OpenStreetMap).
@@ -124,15 +177,17 @@ def summarise_counts(title: str, counts: Dict[str, int], top_names: Optional[lis
 
 def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
+    docs_url = "https://data.police.uk/docs/"
+    base_sources = [
+        {"label": "UK Police Data API docs", "url": docs_url},
+    ]
+
     if lat is None or lng is None:
-        return {
-            "summary": "Crime data not available: postcode could not be geocoded to coordinates.",
-            "metrics": {},
-            "sources": [{"label": "UK Police Data API", "url": "https://data.police.uk/docs/"}],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.0,
-            "needsEvidence": True,
-        }
+        return metric_unavailable(
+            "Crime data not available: postcode could not be geocoded to coordinates.",
+            base_sources,
+            retrieved,
+        )
 
     url = f"https://data.police.uk/api/crimes-street/all-crime?lat={lat}&lng={lng}"
     try:
@@ -147,36 +202,40 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
             cat = (c or {}).get("category") or "unknown"
             counts[cat] = counts.get(cat, 0) + 1
 
-        # A simple summary that is factual: counts only, no claims.
         summary = summarise_counts("Crimes (street-level)", counts)
 
-        return {
-            "summary": summary if crimes else "No crime records returned for this location/time window.",
-            "metrics": {
-                "total": len(crimes),
-                "categories": counts,
-                "radius_hint": "Police API uses a fixed area around the point; see documentation.",
-            },
-            "sources": [
-                {"label": "UK Police Data API (crimes-street)", "url": url},
-                {"label": "UK Police Data API docs", "url": "https://data.police.uk/docs/"},
-            ],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.95 if len(crimes) > 0 else 0.0,
-            "needsEvidence": False if len(crimes) > 0 else True,
+        # IMPORTANT: Provide `value` as an array so frontend summariser can use it.
+        # Keep it bounded to avoid huge payloads.
+        bounded = crimes[:300]
+
+        sources = [
+            {"label": "UK Police Data API (crimes-street)", "url": url},
+            {"label": "UK Police Data API docs", "url": docs_url},
+        ]
+
+        out = metric_ok(
+            summary if crimes else "No crime records returned for this location/time window.",
+            bounded,
+            sources,
+            retrieved,
+            0.95 if len(crimes) > 0 else 0.0,
+        )
+        out["metrics"] = {
+            "total": len(crimes),
+            "categories": counts,
+            "radius_hint": "Police API uses a fixed area around the point; see documentation.",
         }
+        return out
+
     except Exception as e:
-        return {
-            "summary": f"Crime data fetch failed: {str(e)}",
-            "metrics": {},
-            "sources": [{"label": "UK Police Data API", "url": "https://data.police.uk/docs/"}],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.0,
-            "needsEvidence": True,
-        }
+        return metric_unavailable(
+            f"Crime data fetch failed: {str(e)}",
+            base_sources,
+            retrieved,
+        )
 
 
-def overpass_query(lat: float, lng: float, radius_m: int, selectors: str) -> Dict[str, Any]:
+def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
     q = f"""
 [out:json];
 (
@@ -195,18 +254,17 @@ out body;
 
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
+    base_sources = [
+        {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
+        {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
+    ]
+
     if lat is None or lng is None:
-        return {
-            "summary": "Transport data not available: postcode could not be geocoded to coordinates.",
-            "metrics": {},
-            "sources": [
-                {"label": "OpenStreetMap (Overpass)", "url": "https://overpass-api.de/"},
-                {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
-            ],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.0,
-            "needsEvidence": True,
-        }
+        return metric_unavailable(
+            "Transport data not available: postcode could not be geocoded to coordinates.",
+            base_sources,
+            retrieved,
+        )
 
     radius = 1200
     selectors = f"""
@@ -215,7 +273,7 @@ node["railway"="station"](around:{radius},{lat},{lng});
 node["highway"="bus_stop"](around:{radius},{lat},{lng});
 """
     try:
-        payload = overpass_query(lat, lng, radius, selectors)
+        payload = overpass_query(lat, lng, selectors)
         elements = payload.get("elements", []) if isinstance(payload, dict) else []
         if not isinstance(elements, list):
             elements = []
@@ -238,45 +296,40 @@ node["highway"="bus_stop"](around:{radius},{lat},{lng});
 
         summary = summarise_counts("Transport (OSM within ~1.2km)", counts, top_names=names)
 
-        return {
-            "summary": summary if elements else "No transport features returned from OSM for this area.",
-            "metrics": {"radiusMeters": radius, "counts": counts},
-            "sources": [
-                {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
-                {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
-            ],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.90 if elements else 0.0,
-            "needsEvidence": False if elements else True,
-        }
+        # IMPORTANT: Provide `value` as a list of names (strings) for frontend.
+        value = names[:200]
+
+        out = metric_ok(
+            summary if elements else "No transport features returned from OSM for this area.",
+            value,
+            base_sources,
+            retrieved,
+            0.90 if elements else 0.0,
+        )
+        out["metrics"] = {"radiusMeters": radius, "counts": counts, "totalElements": len(elements)}
+        return out
+
     except Exception as e:
-        return {
-            "summary": f"Transport data fetch failed: {str(e)}",
-            "metrics": {},
-            "sources": [
-                {"label": "OpenStreetMap (Overpass)", "url": "https://overpass-api.de/"},
-                {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
-            ],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.0,
-            "needsEvidence": True,
-        }
+        return metric_unavailable(
+            f"Transport data fetch failed: {str(e)}",
+            base_sources,
+            retrieved,
+        )
 
 
 def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
+    base_sources = [
+        {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
+        {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
+    ]
+
     if lat is None or lng is None:
-        return {
-            "summary": "Amenities data not available: postcode could not be geocoded to coordinates.",
-            "metrics": {},
-            "sources": [
-                {"label": "OpenStreetMap (Overpass)", "url": "https://overpass-api.de/"},
-                {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
-            ],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.0,
-            "needsEvidence": True,
-        }
+        return metric_unavailable(
+            "Amenities data not available: postcode could not be geocoded to coordinates.",
+            base_sources,
+            retrieved,
+        )
 
     radius = 1200
     selectors = f"""
@@ -285,7 +338,7 @@ node["shop"](around:{radius},{lat},{lng});
 node["leisure"](around:{radius},{lat},{lng});
 """
     try:
-        payload = overpass_query(lat, lng, radius, selectors)
+        payload = overpass_query(lat, lng, selectors)
         elements = payload.get("elements", []) if isinstance(payload, dict) else []
         if not isinstance(elements, list):
             elements = []
@@ -311,95 +364,91 @@ node["leisure"](around:{radius},{lat},{lng});
             if isinstance(nm, str) and nm.strip():
                 names.append(nm.strip())
 
-        # Compress counts into top categories
         top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:8]
         top_counts = {k: v for k, v in top}
 
         summary = summarise_counts("Amenities (OSM within ~1.2km)", top_counts, top_names=names)
 
-        return {
-            "summary": summary if elements else "No amenities returned from OSM for this area.",
-            "metrics": {"radiusMeters": radius, "topCategories": top_counts, "totalElements": len(elements)},
-            "sources": [
-                {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
-                {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
-            ],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.90 if elements else 0.0,
-            "needsEvidence": False if elements else True,
-        }
+        # IMPORTANT: Provide `value` as list of POI names for frontend.
+        value = names[:250]
+
+        out = metric_ok(
+            summary if elements else "No amenities returned from OSM for this area.",
+            value,
+            base_sources,
+            retrieved,
+            0.90 if elements else 0.0,
+        )
+        out["metrics"] = {"radiusMeters": radius, "topCategories": top_counts, "totalElements": len(elements)}
+        return out
+
     except Exception as e:
-        return {
-            "summary": f"Amenities data fetch failed: {str(e)}",
-            "metrics": {},
-            "sources": [
-                {"label": "OpenStreetMap (Overpass)", "url": "https://overpass-api.de/"},
-                {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
-            ],
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.0,
-            "needsEvidence": True,
-        }
+        return metric_unavailable(
+            f"Amenities data fetch failed: {str(e)}",
+            base_sources,
+            retrieved,
+        )
 
 
 def get_schools_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
     # No invented schools. Provider integration required.
-    return {
-        "summary": "Schools data provider not configured. Add an integration (e.g., DfE / Ofsted datasets or a commercial provider) to populate current nearby schools.",
-        "metrics": {"postcode": pc} if pc else {},
-        "sources": [
+    return metric_missing_provider(
+        "Schools data provider not configured. Add an integration (DfE/Ofsted dataset or a commercial provider) to populate nearby schools.",
+        [
             {"label": "Ofsted reports", "url": "https://reports.ofsted.gov.uk/"},
             {"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"},
         ],
-        "retrievedAtISO": retrieved,
-        "confidenceValue": 0.0,
-        "needsEvidence": True,
-    }
+        retrieved,
+        extra_metrics={"postcode": pc} if pc else {},
+    )
 
 
 def get_broadband_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
     # No invented broadband. Provider integration required.
-    return {
-        "summary": "Broadband data provider not configured. Add an integration (e.g., ThinkBroadband/Ofcom datasets or a commercial checker) to populate current speeds and availability.",
-        "metrics": {"postcode": pc} if pc else {},
-        "sources": [
+    return metric_missing_provider(
+        "Broadband data provider not configured. Add an integration (Ofcom/ThinkBroadband dataset or a commercial checker) to populate speeds and availability.",
+        [
             {"label": "Ofcom", "url": "https://www.ofcom.org.uk/"},
             {"label": "ThinkBroadband", "url": "https://www.thinkbroadband.com/"},
         ],
-        "retrievedAtISO": retrieved,
-        "confidenceValue": 0.0,
-        "needsEvidence": True,
-    }
+        retrieved,
+        extra_metrics={"postcode": pc} if pc else {},
+    )
 
 
 def get_housing_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
     # No invented housing figures. Provider integration required for "current market" signals.
-    return {
-        "summary": "Housing data provider not configured. For investor-grade 'current market' signals, integrate a property data API (sales/rents/listings) and return evidence-linked comps.",
-        "metrics": {"postcode": pc} if pc else {},
-        "sources": [
+    return metric_missing_provider(
+        "Housing market provider not configured. For investor-grade 'current market' signals, integrate a sales/rents/listings API and return evidence-linked comps.",
+        [
             {"label": "UK House Price Index (GOV.UK)", "url": "https://www.gov.uk/government/collections/uk-house-price-index-reports"},
-            {"label": "HM Land Registry", "url": "https://landregistry.data.gov.uk/"},
+            {"label": "HM Land Registry (open data)", "url": "https://landregistry.data.gov.uk/"},
         ],
-        "retrievedAtISO": retrieved,
+        retrieved,
+        extra_metrics={"postcode": pc} if pc else {},
+    )
+
+
+def get_zoopla_comps(postcode: str) -> Dict[str, Any]:
+    """
+    No fake comps. Until a real provider is configured, return a stable object.
+    Frontend analysisService expects comparableProperties.forSale (array).
+    """
+    return {
+        "forSale": [],
+        "sourceUrl": "",
+        "sources": [],
+        "retrievedAtISO": now_iso(),
         "confidenceValue": 0.0,
-        "needsEvidence": True,
+        "status": "missing_provider",
+        "summary": "Comparable sales/listings provider not configured.",
     }
-
-
-def get_zoopla_comps(postcode: str) -> Any:
-    """
-    No fake comps. Until a real provider is configured, return an empty list.
-    Frontend expects an array of comparable items (or []), not a made-up pack.
-    """
-    pc = normalize_postcode(postcode)
-    return []
 
 
 @app.route("/market-insights", methods=["POST"])
@@ -421,7 +470,10 @@ def market_insights():
         if (lat is None or lng is None) and postcode:
             lat, lng, geo_meta = geocode_postcode(postcode)
 
+        # IMPORTANT: localAreaAnalysis is a fixed schema with stable keys.
         local_area = {
+            "retrievedAtISO": now_iso(),
+            "postcode": postcode,
             "schools": get_schools_data(postcode),
             "housing": get_housing_data(postcode),
             "transport": get_transport_data(lat, lng),
