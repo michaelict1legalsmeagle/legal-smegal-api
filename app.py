@@ -1,3 +1,5 @@
+# app.py
+
 from flask import Flask, request, jsonify
 import requests
 import os
@@ -435,6 +437,158 @@ def get_housing_data(postcode: str) -> Dict[str, Any]:
     )
 
 
+# ----------------------------
+# REAL SOLD COMPS (Land Registry)
+# ----------------------------
+
+def _sparql_query(endpoint: str, query: str, timeout: int = 25) -> dict:
+    r = requests.get(
+        endpoint,
+        params={"query": query, "format": "application/sparql-results+json"},
+        headers={"User-Agent": HTTP_USER_AGENT},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _format_gbp(n: Optional[float]) -> str:
+    try:
+        if n is None:
+            return ""
+        return f"£{int(round(float(n))):,}"
+    except Exception:
+        return ""
+
+
+def get_land_registry_sold_comps(postcode: str, limit: int = 6) -> Dict[str, Any]:
+    """
+    Pull recent SOLD transactions from HM Land Registry (open data, Price Paid).
+    Returns compatible object where frontend expects comparableProperties.forSale (array).
+    """
+    retrieved = now_iso()
+    pc = normalize_postcode(postcode)
+    sources = [
+        {"label": "HM Land Registry (Linked Data) — Price Paid", "url": "https://landregistry.data.gov.uk/"},
+    ]
+
+    if not pc:
+        return {
+            "forSale": [],
+            "sourceUrl": _first_source_url(sources),
+            "sources": sources,
+            "retrievedAtISO": retrieved,
+            "confidenceValue": 0.0,
+            "status": "unavailable",
+            "summary": "No postcode provided for Land Registry comps.",
+        }
+
+    # postcode district = first token before space (e.g. "B1")
+    district = pc.split(" ")[0] if " " in pc else pc
+
+    endpoint = "https://landregistry.data.gov.uk/landregistry/query"
+
+    # Defensive query (schema can be fiddly; fail-closed if it breaks)
+    query = f"""
+PREFIX lrppi: <http://landregistry.data.gov.uk/def/ppi/>
+
+SELECT ?price ?date ?paon ?saon ?street ?town ?postcode ?propertyType
+WHERE {{
+  ?tx a lrppi:TransactionRecord .
+  ?tx lrppi:pricePaid ?price .
+  ?tx lrppi:transactionDate ?date .
+  OPTIONAL {{ ?tx lrppi:paon ?paon . }}
+  OPTIONAL {{ ?tx lrppi:saon ?saon . }}
+  OPTIONAL {{ ?tx lrppi:street ?street . }}
+  OPTIONAL {{ ?tx lrppi:town ?town . }}
+  OPTIONAL {{ ?tx lrppi:postcode ?postcode . }}
+  OPTIONAL {{ ?tx lrppi:propertyType ?propertyType . }}
+
+  FILTER(BOUND(?postcode))
+  FILTER(STRSTARTS(UCASE(STR(?postcode)), UCASE("{district}")))
+}}
+ORDER BY DESC(?date)
+LIMIT {int(limit)}
+""".strip()
+
+    try:
+        payload = _sparql_query(endpoint, query, timeout=25)
+        rows = payload.get("results", {}).get("bindings", [])
+        if not isinstance(rows, list):
+            rows = []
+
+        comps = []
+        for r in rows:
+            def _g(k: str) -> str:
+                v = (r.get(k) or {}).get("value")
+                return v.strip() if isinstance(v, str) else ""
+
+            price_raw = _g("price")
+            date_raw = _g("date")
+            paon = _g("paon")
+            saon = _g("saon")
+            street = _g("street")
+            town = _g("town")
+            pc_row = _g("postcode")
+            ptype = _g("propertyType")
+
+            price_num = safe_float(price_raw)
+            price_gbp = _format_gbp(price_num)
+
+            address_parts = [saon, paon, street, town, pc_row]
+            address = ", ".join([p for p in address_parts if isinstance(p, str) and p.strip()])
+
+            desc_bits = []
+            if date_raw:
+                desc_bits.append(f"Sold {date_raw[:10]}")
+            if price_gbp:
+                desc_bits.append(price_gbp)
+            if ptype:
+                desc_bits.append(ptype.split("/")[-1])
+            description = " • ".join(desc_bits) if desc_bits else "Sold transaction (Land Registry)."
+
+            comps.append({
+                "address": address or f"{district} (exact address not provided)",
+                "description": description,
+                "distance": "",  # do not invent
+                "source": "HM Land Registry (sold prices)",
+                "estimatedValue": price_gbp or "",
+                "sourceUrl": "https://landregistry.data.gov.uk/",
+                "confidenceValue": 0.95,
+            })
+
+        summary = (
+            f"Recent sold transactions found for {district} (sample: {len(comps)}). Source: HM Land Registry Price Paid."
+            if comps else
+            f"No recent sold transactions returned for {district} from Land Registry."
+        )
+
+        return {
+            "forSale": comps,
+            "sourceUrl": _first_source_url(sources),
+            "sources": sources,
+            "retrievedAtISO": retrieved,
+            "confidenceValue": 0.95 if comps else 0.0,
+            "status": "ok" if comps else "unavailable",
+            "summary": summary,
+            "postcodeDistrict": district,
+            "postcode": pc,
+        }
+
+    except Exception as e:
+        return {
+            "forSale": [],
+            "sourceUrl": _first_source_url(sources),
+            "sources": sources,
+            "retrievedAtISO": retrieved,
+            "confidenceValue": 0.0,
+            "status": "unavailable",
+            "summary": f"Land Registry comps fetch failed: {str(e)}",
+            "postcodeDistrict": district,
+            "postcode": pc,
+        }
+
+
 def get_zoopla_comps(postcode: str) -> Dict[str, Any]:
     """
     No fake comps. Until a real provider is configured, return a stable object.
@@ -470,12 +624,30 @@ def market_insights():
         if (lat is None or lng is None) and postcode:
             lat, lng, geo_meta = geocode_postcode(postcode)
 
+        # SOLD comps (real evidence) — used for comparableProperties + can drive housing metric if present
+        sold_comps = get_land_registry_sold_comps(postcode)
+
+        # Housing metric: become REAL when sold comps exist; otherwise keep missing-provider stub.
+        if sold_comps.get("status") == "ok" and sold_comps.get("forSale"):
+            housing_metric = metric_ok(
+                sold_comps.get("summary", ""),
+                {
+                    "soldCount": len(sold_comps.get("forSale", [])),
+                    "postcodeDistrict": sold_comps.get("postcodeDistrict", ""),
+                },
+                sold_comps.get("sources", []),
+                sold_comps.get("retrievedAtISO", now_iso()),
+                0.95,
+            )
+        else:
+            housing_metric = get_housing_data(postcode)
+
         # IMPORTANT: localAreaAnalysis is a fixed schema with stable keys.
         local_area = {
             "retrievedAtISO": now_iso(),
             "postcode": postcode,
             "schools": get_schools_data(postcode),
-            "housing": get_housing_data(postcode),
+            "housing": housing_metric,
             "transport": get_transport_data(lat, lng),
             "amenities": get_amenities_data(lat, lng),
             "crime": get_crime_data(lat, lng),
@@ -490,7 +662,9 @@ def market_insights():
                 "geocodeMeta": geo_meta,
             },
             "localAreaAnalysis": local_area,
-            "comparableProperties": get_zoopla_comps(postcode),
+
+            # Keep contract name so frontend analysisService remains unchanged
+            "comparableProperties": sold_comps,
         }
 
         cache_set(cache_key, results)
