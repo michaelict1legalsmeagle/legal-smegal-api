@@ -4,9 +4,10 @@ from flask import Flask, request, jsonify
 import requests
 import os
 import time
+import json
 from flask_cors import CORS
 from supabase import create_client, Client
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -15,7 +16,9 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# Simple in-memory cache (postcode-keyed) with TTL
+# ----------------------------
+# Caching (in-memory, TTL)
+# ----------------------------
 _CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL_SECONDS = int(os.getenv("MARKET_INSIGHTS_CACHE_TTL_SECONDS", "21600"))  # default 6 hours
 
@@ -25,6 +28,25 @@ HTTP_USER_AGENT = os.getenv(
     "LegalSmegal/1.0 (market-insights; contact=admin@example.com)"
 )
 
+# Safety + stability: bound payload sizes
+MAX_CRIMES = int(os.getenv("MAX_CRIMES", "300"))
+MAX_OSM_NAMES = int(os.getenv("MAX_OSM_NAMES", "250"))
+DEFAULT_OSM_RADIUS = int(os.getenv("OSM_RADIUS_METERS", "1200"))
+
+# Provider toggles
+BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()  # e.g. "thinkbroadband"
+SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()      # e.g. "dfe"
+HOUSING_PROVIDER = os.getenv("HOUSING_PROVIDER", "").strip().lower()      # e.g. "landregistry_only"
+
+# Generic provider config (no assumptions)
+BROADBAND_API_URL = os.getenv("BROADBAND_API_URL", "").strip()            # you supply
+BROADBAND_API_KEY = os.getenv("BROADBAND_API_KEY", "").strip()            # you supply
+SCHOOLS_API_URL = os.getenv("SCHOOLS_API_URL", "").strip()                # you supply
+SCHOOLS_API_KEY = os.getenv("SCHOOLS_API_KEY", "").strip()                # you supply
+
+# Optional: stricter confidence
+MIN_VERIFIED = float(os.getenv("MIN_VERIFIED_CONFIDENCE", "0.95"))
+
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -33,6 +55,9 @@ else:
     print("🔴 Supabase env vars not set. Supabase features (save-analysis, logs) are DISABLED locally.")
 
 
+# ----------------------------
+# Helpers
+# ----------------------------
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -79,6 +104,7 @@ def _first_source_url(sources: Any) -> str:
 
 
 def metric_ok(summary: str, value: Any, sources: list, retrieved_at: str, confidence: float) -> Dict[str, Any]:
+    cv = float(confidence) if confidence is not None else 0.0
     return {
         "status": "ok",
         "summary": summary or "",
@@ -87,8 +113,8 @@ def metric_ok(summary: str, value: Any, sources: list, retrieved_at: str, confid
         "sources": sources or [],
         "sourceUrl": _first_source_url(sources),
         "retrievedAtISO": retrieved_at,
-        "confidenceValue": float(confidence) if confidence is not None else 0.0,
-        "needsEvidence": False if (confidence and confidence > 0) else True,
+        "confidenceValue": cv,
+        "needsEvidence": False if (cv and cv > 0) else True,
     }
 
 
@@ -120,6 +146,28 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
     }
 
 
+def _http_get_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None, timeout: int = 20) -> Tuple[int, Any]:
+    h = {"User-Agent": HTTP_USER_AGENT}
+    if headers:
+        h.update(headers)
+    r = requests.get(url, params=params or {}, headers=h, timeout=timeout)
+    try:
+        return r.status_code, r.json()
+    except Exception:
+        return r.status_code, None
+
+
+def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeout: int = 30) -> Tuple[int, str]:
+    h = {"User-Agent": HTTP_USER_AGENT}
+    if headers:
+        h.update(headers)
+    r = requests.post(url, data=data, headers=h, timeout=timeout)
+    return r.status_code, r.text or ""
+
+
+# ----------------------------
+# Geocoding (Nominatim)
+# ----------------------------
 def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
     """
     Postcode -> lat/lng via Nominatim (OpenStreetMap).
@@ -128,9 +176,7 @@ def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], D
     pc = normalize_postcode(postcode)
     meta = {
         "retrievedAtISO": now_iso(),
-        "sources": [
-            {"label": "OpenStreetMap Nominatim", "url": "https://nominatim.openstreetmap.org/"}
-        ],
+        "sources": [{"label": "OpenStreetMap Nominatim", "url": "https://nominatim.openstreetmap.org/"}],
         "referenceLinks": [],
         "notes": "",
     }
@@ -142,12 +188,11 @@ def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], D
     try:
         url = "https://nominatim.openstreetmap.org/search"
         params = {"q": pc, "format": "json", "limit": 1, "addressdetails": 0}
-        resp = requests.get(url, params=params, headers={"User-Agent": HTTP_USER_AGENT}, timeout=15)
-        if resp.status_code != 200:
-            meta["notes"] = f"Nominatim error: HTTP {resp.status_code}"
+        status, payload = _http_get_json(url, params=params, timeout=15)
+        if status != 200:
+            meta["notes"] = f"Nominatim error: HTTP {status}"
             return None, None, meta
 
-        payload = resp.json() if resp.text else []
         if not isinstance(payload, list) or not payload:
             meta["notes"] = "Nominatim returned no results for postcode."
             return None, None, meta
@@ -165,6 +210,9 @@ def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], D
         return None, None, meta
 
 
+# ----------------------------
+# Summaries
+# ----------------------------
 def summarise_counts(title: str, counts: Dict[str, int], top_names: Optional[list] = None) -> str:
     parts = []
     for k in sorted(counts.keys()):
@@ -177,12 +225,13 @@ def summarise_counts(title: str, counts: Dict[str, int], top_names: Optional[lis
     return headline
 
 
+# ----------------------------
+# Crime (UK Police)
+# ----------------------------
 def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
     docs_url = "https://data.police.uk/docs/"
-    base_sources = [
-        {"label": "UK Police Data API docs", "url": docs_url},
-    ]
+    base_sources = [{"label": "UK Police Data API docs", "url": docs_url}]
 
     if lat is None or lng is None:
         return metric_unavailable(
@@ -193,12 +242,10 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
 
     url = f"https://data.police.uk/api/crimes-street/all-crime?lat={lat}&lng={lng}"
     try:
-        resp = requests.get(url, headers={"User-Agent": HTTP_USER_AGENT}, timeout=20)
-        crimes = resp.json() if resp.status_code == 200 else []
-        if not isinstance(crimes, list):
+        status, crimes = _http_get_json(url, timeout=20)
+        if status != 200 or not isinstance(crimes, list):
             crimes = []
 
-        # Count categories
         counts: Dict[str, int] = {}
         for c in crimes:
             cat = (c or {}).get("category") or "unknown"
@@ -206,9 +253,7 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
 
         summary = summarise_counts("Crimes (street-level)", counts)
 
-        # IMPORTANT: Provide `value` as an array so frontend summariser can use it.
-        # Keep it bounded to avoid huge payloads.
-        bounded = crimes[:300]
+        bounded = crimes[:MAX_CRIMES]
 
         sources = [
             {"label": "UK Police Data API (crimes-street)", "url": url},
@@ -220,7 +265,7 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
             bounded,
             sources,
             retrieved,
-            0.95 if len(crimes) > 0 else 0.0,
+            MIN_VERIFIED if len(crimes) > 0 else 0.0,
         )
         out["metrics"] = {
             "total": len(crimes),
@@ -237,6 +282,9 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
         )
 
 
+# ----------------------------
+# OSM (Overpass) Utilities
+# ----------------------------
 def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
     q = f"""
 [out:json];
@@ -244,14 +292,23 @@ def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
   {selectors}
 );
 out body;
-"""
-    r = requests.post(
+""".strip()
+
+    status, text = _http_post_text(
         "https://overpass-api.de/api/interpreter",
         data=q.encode("utf-8"),
-        headers={"User-Agent": HTTP_USER_AGENT},
+        headers={"Content-Type": "text/plain"},
         timeout=30,
     )
-    return r.json() if r.status_code == 200 else {"elements": []}
+    if status != 200 or not text:
+        return {"elements": []}
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
+        return {"elements": []}
+    except Exception:
+        return {"elements": []}
 
 
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
@@ -268,7 +325,7 @@ def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
             retrieved,
         )
 
-    radius = 1200
+    radius = DEFAULT_OSM_RADIUS
     selectors = f"""
 node["public_transport"](around:{radius},{lat},{lng});
 node["railway"="station"](around:{radius},{lat},{lng});
@@ -281,7 +338,7 @@ node["highway"="bus_stop"](around:{radius},{lat},{lng});
             elements = []
 
         counts: Dict[str, int] = {"public_transport": 0, "stations": 0, "bus_stops": 0}
-        names = []
+        names: List[str] = []
         for e in elements:
             tags = (e or {}).get("tags") or {}
             if not isinstance(tags, dict):
@@ -297,16 +354,14 @@ node["highway"="bus_stop"](around:{radius},{lat},{lng});
                 names.append(nm.strip())
 
         summary = summarise_counts("Transport (OSM within ~1.2km)", counts, top_names=names)
-
-        # IMPORTANT: Provide `value` as a list of names (strings) for frontend.
-        value = names[:200]
+        value = names[: min(MAX_OSM_NAMES, 200)]
 
         out = metric_ok(
             summary if elements else "No transport features returned from OSM for this area.",
             value,
             base_sources,
             retrieved,
-            0.90 if elements else 0.0,
+            0.90 if elements else 0.0,  # honest: OSM completeness varies
         )
         out["metrics"] = {"radiusMeters": radius, "counts": counts, "totalElements": len(elements)}
         return out
@@ -333,7 +388,7 @@ def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
             retrieved,
         )
 
-    radius = 1200
+    radius = DEFAULT_OSM_RADIUS
     selectors = f"""
 node["amenity"](around:{radius},{lat},{lng});
 node["shop"](around:{radius},{lat},{lng});
@@ -346,7 +401,7 @@ node["leisure"](around:{radius},{lat},{lng});
             elements = []
 
         counts: Dict[str, int] = {}
-        names = []
+        names: List[str] = []
         for e in elements:
             tags = (e or {}).get("tags") or {}
             if not isinstance(tags, dict):
@@ -370,9 +425,7 @@ node["leisure"](around:{radius},{lat},{lng});
         top_counts = {k: v for k, v in top}
 
         summary = summarise_counts("Amenities (OSM within ~1.2km)", top_counts, top_names=names)
-
-        # IMPORTANT: Provide `value` as list of POI names for frontend.
-        value = names[:250]
+        value = names[:MAX_OSM_NAMES]
 
         out = metric_ok(
             summary if elements else "No amenities returned from OSM for this area.",
@@ -392,10 +445,58 @@ node["leisure"](around:{radius},{lat},{lng});
         )
 
 
+# ----------------------------
+# Schools (provider-ready)
+# ----------------------------
 def get_schools_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
-    # No invented schools. Provider integration required.
+
+    # Provider-ready pattern:
+    # - if configured: fetch real data, return metric_ok with ≥0.95 only when objective dataset is used
+    # - if not configured: return missing_provider (no lies)
+
+    if SCHOOLS_PROVIDER and SCHOOLS_API_URL and SCHOOLS_API_KEY and pc:
+        try:
+            # You define your provider contract; we fail-closed.
+            # Expected to return something like:
+            # {
+            #   "schools": [...],
+            #   "summary": "...",
+            #   "metrics": {...}
+            # }
+            status, payload = _http_get_json(
+                SCHOOLS_API_URL,
+                params={"postcode": pc},
+                headers={"Authorization": f"Bearer {SCHOOLS_API_KEY}"},
+                timeout=20,
+            )
+            if status == 200 and isinstance(payload, dict):
+                summary = str(payload.get("summary") or "").strip()
+                schools = payload.get("schools")
+                metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+                sources = payload.get("sources") if isinstance(payload.get("sources"), list) else [
+                    {"label": "Schools provider", "url": SCHOOLS_API_URL}
+                ]
+
+                out = metric_ok(
+                    summary or "Schools data returned by provider.",
+                    schools if schools is not None else [],
+                    sources,
+                    retrieved,
+                    MIN_VERIFIED,
+                )
+                out["metrics"] = metrics
+                return out
+        except Exception as e:
+            return metric_unavailable(
+                f"Schools provider call failed: {str(e)}",
+                [{"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"}],
+                retrieved,
+                extra_metrics={"postcode": pc} if pc else {},
+            )
+
+    # Default: missing provider
     return metric_missing_provider(
         "Schools data provider not configured. Add an integration (DfE/Ofsted dataset or a commercial provider) to populate nearby schools.",
         [
@@ -407,10 +508,56 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
     )
 
 
+# ----------------------------
+# Broadband (provider-ready)
+# ----------------------------
 def get_broadband_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
-    # No invented broadband. Provider integration required.
+
+    # Provider-ready pattern (same as schools).
+    # You plug in a provider endpoint that returns objective measures.
+
+    if BROADBAND_PROVIDER and BROADBAND_API_URL and BROADBAND_API_KEY and pc:
+        try:
+            status, payload = _http_get_json(
+                BROADBAND_API_URL,
+                params={"postcode": pc},
+                headers={"Authorization": f"Bearer {BROADBAND_API_KEY}"},
+                timeout=20,
+            )
+            if status == 200 and isinstance(payload, dict):
+                # Recommended provider contract:
+                # payload = {
+                #   "summary": "Average download 74 Mbps, upload 18 Mbps. Full fibre availability 62%.",
+                #   "broadband": { "downloadMbps": 74, "uploadMbps": 18, "fullFibrePct": 62, "providers": [...] },
+                #   "metrics": {...},
+                #   "sources": [{label,url},...]
+                # }
+                summary = str(payload.get("summary") or "").strip()
+                broadband = payload.get("broadband")
+                metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+                sources = payload.get("sources") if isinstance(payload.get("sources"), list) else [
+                    {"label": "Broadband provider", "url": BROADBAND_API_URL}
+                ]
+
+                out = metric_ok(
+                    summary or "Broadband data returned by provider.",
+                    broadband if broadband is not None else payload,
+                    sources,
+                    retrieved,
+                    MIN_VERIFIED,
+                )
+                out["metrics"] = metrics
+                return out
+        except Exception as e:
+            return metric_unavailable(
+                f"Broadband provider call failed: {str(e)}",
+                [{"label": "Ofcom", "url": "https://www.ofcom.org.uk/"}],
+                retrieved,
+                extra_metrics={"postcode": pc} if pc else {},
+            )
+
     return metric_missing_provider(
         "Broadband data provider not configured. Add an integration (Ofcom/ThinkBroadband dataset or a commercial checker) to populate speeds and availability.",
         [
@@ -422,10 +569,12 @@ def get_broadband_data(postcode: str) -> Dict[str, Any]:
     )
 
 
+# ----------------------------
+# Housing (baseline stub)
+# ----------------------------
 def get_housing_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
-    # No invented housing figures. Provider integration required for "current market" signals.
     return metric_missing_provider(
         "Housing market provider not configured. For investor-grade 'current market' signals, integrate a sales/rents/listings API and return evidence-linked comps.",
         [
@@ -438,9 +587,8 @@ def get_housing_data(postcode: str) -> Dict[str, Any]:
 
 
 # ----------------------------
-# REAL SOLD COMPS (Land Registry)
+# Land Registry SOLD COMPS (open data)
 # ----------------------------
-
 def _sparql_query(endpoint: str, query: str, timeout: int = 25) -> dict:
     r = requests.get(
         endpoint,
@@ -461,16 +609,15 @@ def _format_gbp(n: Optional[float]) -> str:
         return ""
 
 
-def get_land_registry_sold_comps(postcode: str, limit: int = 6) -> Dict[str, Any]:
+def get_land_registry_sold_comps(postcode: str, limit: int = 8) -> Dict[str, Any]:
     """
     Pull recent SOLD transactions from HM Land Registry (open data, Price Paid).
     Returns compatible object where frontend expects comparableProperties.forSale (array).
+    NOTE: Uses postcode district filter (fast + robust), NOT exact postcode (LR data varies).
     """
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
-    sources = [
-        {"label": "HM Land Registry (Linked Data) — Price Paid", "url": "https://landregistry.data.gov.uk/"},
-    ]
+    sources = [{"label": "HM Land Registry (Linked Data) — Price Paid", "url": "https://landregistry.data.gov.uk/"}]
 
     if not pc:
         return {
@@ -483,12 +630,9 @@ def get_land_registry_sold_comps(postcode: str, limit: int = 6) -> Dict[str, Any
             "summary": "No postcode provided for Land Registry comps.",
         }
 
-    # postcode district = first token before space (e.g. "B1")
     district = pc.split(" ")[0] if " " in pc else pc
-
     endpoint = "https://landregistry.data.gov.uk/landregistry/query"
 
-    # Defensive query (schema can be fiddly; fail-closed if it breaks)
     query = f"""
 PREFIX lrppi: <http://landregistry.data.gov.uk/def/ppi/>
 
@@ -554,7 +698,7 @@ LIMIT {int(limit)}
                 "source": "HM Land Registry (sold prices)",
                 "estimatedValue": price_gbp or "",
                 "sourceUrl": "https://landregistry.data.gov.uk/",
-                "confidenceValue": 0.95,
+                "confidenceValue": MIN_VERIFIED,
             })
 
         summary = (
@@ -568,7 +712,7 @@ LIMIT {int(limit)}
             "sourceUrl": _first_source_url(sources),
             "sources": sources,
             "retrievedAtISO": retrieved,
-            "confidenceValue": 0.95 if comps else 0.0,
+            "confidenceValue": MIN_VERIFIED if comps else 0.0,
             "status": "ok" if comps else "unavailable",
             "summary": summary,
             "postcodeDistrict": district,
@@ -589,11 +733,8 @@ LIMIT {int(limit)}
         }
 
 
+# Backwards-compatible stub (kept, but unused once LR comps are used)
 def get_zoopla_comps(postcode: str) -> Dict[str, Any]:
-    """
-    No fake comps. Until a real provider is configured, return a stable object.
-    Frontend analysisService expects comparableProperties.forSale (array).
-    """
     return {
         "forSale": [],
         "sourceUrl": "",
@@ -605,16 +746,19 @@ def get_zoopla_comps(postcode: str) -> Dict[str, Any]:
     }
 
 
+# ----------------------------
+# Route: /market-insights
+# ----------------------------
 @app.route("/market-insights", methods=["POST"])
 def market_insights():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     postcode = normalize_postcode(data.get("postcode", "") or "")
 
-    # Accept optional lat/lng. If missing, geocode from postcode.
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
-    cache_key = f"market-insights::{postcode}" if postcode else "market-insights::no-postcode"
+    # cache key respects explicit lat/lng (if provided)
+    cache_key = f"market-insights::{postcode}::{lat or ''}::{lng or ''}" if postcode else "market-insights::no-postcode"
     cached = cache_get(cache_key)
     if cached:
         return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
@@ -624,10 +768,10 @@ def market_insights():
         if (lat is None or lng is None) and postcode:
             lat, lng, geo_meta = geocode_postcode(postcode)
 
-        # SOLD comps (real evidence) — used for comparableProperties + can drive housing metric if present
+        # SOLD comps (real evidence)
         sold_comps = get_land_registry_sold_comps(postcode)
 
-        # Housing metric: become REAL when sold comps exist; otherwise keep missing-provider stub.
+        # Housing metric becomes REAL when sold comps exist (still not "market today", but factual sold evidence)
         if sold_comps.get("status") == "ok" and sold_comps.get("forSale"):
             housing_metric = metric_ok(
                 sold_comps.get("summary", ""),
@@ -637,12 +781,11 @@ def market_insights():
                 },
                 sold_comps.get("sources", []),
                 sold_comps.get("retrievedAtISO", now_iso()),
-                0.95,
+                MIN_VERIFIED,
             )
         else:
             housing_metric = get_housing_data(postcode)
 
-        # IMPORTANT: localAreaAnalysis is a fixed schema with stable keys.
         local_area = {
             "retrievedAtISO": now_iso(),
             "postcode": postcode,
@@ -656,14 +799,9 @@ def market_insights():
 
         results = {
             "postcode": postcode,
-            "location": {
-                "lat": lat,
-                "lng": lng,
-                "geocodeMeta": geo_meta,
-            },
+            "location": {"lat": lat, "lng": lng, "geocodeMeta": geo_meta},
             "localAreaAnalysis": local_area,
-
-            # Keep contract name so frontend analysisService remains unchanged
+            # Keep contract name unchanged for frontend
             "comparableProperties": sold_comps,
         }
 
