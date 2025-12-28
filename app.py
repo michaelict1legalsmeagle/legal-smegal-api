@@ -28,24 +28,27 @@ HTTP_USER_AGENT = os.getenv(
     "LegalSmegal/1.0 (market-insights; contact=admin@example.com)"
 )
 
+# ----------------------------
 # Safety + stability: bound payload sizes
+# ----------------------------
 MAX_CRIMES = int(os.getenv("MAX_CRIMES", "300"))
 MAX_OSM_NAMES = int(os.getenv("MAX_OSM_NAMES", "250"))
 DEFAULT_OSM_RADIUS = int(os.getenv("OSM_RADIUS_METERS", "1200"))
 
-# Provider toggles
-BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()  # e.g. "thinkbroadband"
-SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()      # e.g. "dfe"
-HOUSING_PROVIDER = os.getenv("HOUSING_PROVIDER", "").strip().lower()      # e.g. "landregistry_only"
-
-# Generic provider config (no assumptions)
-BROADBAND_API_URL = os.getenv("BROADBAND_API_URL", "").strip()            # you supply
-BROADBAND_API_KEY = os.getenv("BROADBAND_API_KEY", "").strip()            # you supply
-SCHOOLS_API_URL = os.getenv("SCHOOLS_API_URL", "").strip()                # you supply
-SCHOOLS_API_KEY = os.getenv("SCHOOLS_API_KEY", "").strip()                # you supply
-
-# Optional: stricter confidence
+# ----------------------------
+# Provider toggles + configs (adapter pattern)
+# ----------------------------
 MIN_VERIFIED = float(os.getenv("MIN_VERIFIED_CONFIDENCE", "0.95"))
+
+# You choose providers by setting these + URLs + keys
+SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()        # "adapter" (recommended) or ""
+BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()    # "adapter" (recommended) or ""
+
+SCHOOLS_API_URL = os.getenv("SCHOOLS_API_URL", "").strip()
+SCHOOLS_API_KEY = os.getenv("SCHOOLS_API_KEY", "").strip()
+
+BROADBAND_API_URL = os.getenv("BROADBAND_API_URL", "").strip()
+BROADBAND_API_KEY = os.getenv("BROADBAND_API_KEY", "").strip()
 
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -93,7 +96,6 @@ def safe_float(v: Any) -> Optional[float]:
 
 
 def _first_source_url(sources: Any) -> str:
-    """Compatibility helper for frontend that expects sourceUrl."""
     if isinstance(sources, list) and sources:
         s0 = sources[0]
         if isinstance(s0, dict):
@@ -165,14 +167,36 @@ def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeo
     return r.status_code, r.text or ""
 
 
+def _call_adapter(api_url: str, api_key: str, postcode: str, timeout: int = 20) -> Tuple[bool, Dict[str, Any], List[Dict[str, str]], str]:
+    """
+    Generic adapter call.
+    Expected adapter contract (recommended):
+      {
+        "summary": "...",
+        "value": <any>,
+        "metrics": {...},
+        "sources": [{"label": "...", "url": "..."}]
+      }
+    Returns: (ok, payload, sources, error)
+    """
+    if not api_url or not api_key:
+        return False, {}, [], "adapter not configured"
+    status, payload = _http_get_json(
+        api_url,
+        params={"postcode": postcode},
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=timeout,
+    )
+    if status != 200 or not isinstance(payload, dict):
+        return False, {}, [], f"adapter http {status}"
+    sources = payload.get("sources") if isinstance(payload.get("sources"), list) else [{"label": "Adapter", "url": api_url}]
+    return True, payload, sources, ""
+
+
 # ----------------------------
 # Geocoding (Nominatim)
 # ----------------------------
 def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
-    """
-    Postcode -> lat/lng via Nominatim (OpenStreetMap).
-    We DO NOT invent coords. If geocode fails, lat/lng remain None.
-    """
     pc = normalize_postcode(postcode)
     meta = {
         "retrievedAtISO": now_iso(),
@@ -252,7 +276,6 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
             counts[cat] = counts.get(cat, 0) + 1
 
         summary = summarise_counts("Crimes (street-level)", counts)
-
         bounded = crimes[:MAX_CRIMES]
 
         sources = [
@@ -283,7 +306,7 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
 
 
 # ----------------------------
-# OSM (Overpass) Utilities
+# OSM (Overpass)
 # ----------------------------
 def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
     q = f"""
@@ -304,9 +327,7 @@ out body;
         return {"elements": []}
     try:
         payload = json.loads(text)
-        if isinstance(payload, dict):
-            return payload
-        return {"elements": []}
+        return payload if isinstance(payload, dict) else {"elements": []}
     except Exception:
         return {"elements": []}
 
@@ -361,7 +382,7 @@ node["highway"="bus_stop"](around:{radius},{lat},{lng});
             value,
             base_sources,
             retrieved,
-            0.90 if elements else 0.0,  # honest: OSM completeness varies
+            0.90 if elements else 0.0,
         )
         out["metrics"] = {"radiusMeters": radius, "counts": counts, "totalElements": len(elements)}
         return out
@@ -446,120 +467,122 @@ node["leisure"](around:{radius},{lat},{lng});
 
 
 # ----------------------------
-# Schools (provider-ready)
+# Schools
+#   - Adapter if configured (Verified)
+#   - OSM fallback if not (Unverified but working)
 # ----------------------------
-def get_schools_data(postcode: str) -> Dict[str, Any]:
+def get_schools_data(postcode: str, lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
 
-    # Provider-ready pattern:
-    # - if configured: fetch real data, return metric_ok with ≥0.95 only when objective dataset is used
-    # - if not configured: return missing_provider (no lies)
+    # 1) Adapter path (recommended)
+    if SCHOOLS_PROVIDER == "adapter" and SCHOOLS_API_URL and SCHOOLS_API_KEY and pc:
+        ok, payload, sources, err = _call_adapter(SCHOOLS_API_URL, SCHOOLS_API_KEY, pc, timeout=20)
+        if ok:
+            summary = str(payload.get("summary") or "Schools data returned by adapter.").strip()
+            value = payload.get("value", payload.get("schools", []))
+            metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+            out = metric_ok(summary, value, sources, retrieved, MIN_VERIFIED)
+            out["metrics"] = metrics
+            return out
+        return metric_unavailable(
+            f"Schools adapter call failed ({err}).",
+            [{"label": "Schools adapter", "url": SCHOOLS_API_URL}],
+            retrieved,
+            extra_metrics={"postcode": pc},
+        )
 
-    if SCHOOLS_PROVIDER and SCHOOLS_API_URL and SCHOOLS_API_KEY and pc:
-        try:
-            # You define your provider contract; we fail-closed.
-            # Expected to return something like:
-            # {
-            #   "schools": [...],
-            #   "summary": "...",
-            #   "metrics": {...}
-            # }
-            status, payload = _http_get_json(
-                SCHOOLS_API_URL,
-                params={"postcode": pc},
-                headers={"Authorization": f"Bearer {SCHOOLS_API_KEY}"},
-                timeout=20,
-            )
-            if status == 200 and isinstance(payload, dict):
-                summary = str(payload.get("summary") or "").strip()
-                schools = payload.get("schools")
-                metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
-                sources = payload.get("sources") if isinstance(payload.get("sources"), list) else [
-                    {"label": "Schools provider", "url": SCHOOLS_API_URL}
-                ]
+    # 2) Free fallback: OSM "amenity=school" (works, but not Verified)
+    base_sources = [
+        {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
+        {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
+    ]
+    if lat is None or lng is None:
+        return metric_missing_provider(
+            "Schools provider not configured. (Fallback requires coordinates; geocoding failed.) Add SCHOOLS_PROVIDER=adapter + SCHOOLS_API_URL + SCHOOLS_API_KEY for verified data.",
+            [
+                {"label": "Ofsted reports", "url": "https://reports.ofsted.gov.uk/"},
+                {"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"},
+            ],
+            retrieved,
+            extra_metrics={"postcode": pc} if pc else {},
+        )
 
-                out = metric_ok(
-                    summary or "Schools data returned by provider.",
-                    schools if schools is not None else [],
-                    sources,
-                    retrieved,
-                    MIN_VERIFIED,
-                )
-                out["metrics"] = metrics
-                return out
-        except Exception as e:
-            return metric_unavailable(
-                f"Schools provider call failed: {str(e)}",
-                [{"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"}],
-                retrieved,
-                extra_metrics={"postcode": pc} if pc else {},
-            )
+    try:
+        radius = DEFAULT_OSM_RADIUS
+        selectors = f"""
+node["amenity"="school"](around:{radius},{lat},{lng});
+node["amenity"="college"](around:{radius},{lat},{lng});
+node["amenity"="university"](around:{radius},{lat},{lng});
+"""
+        payload = overpass_query(lat, lng, selectors)
+        elements = payload.get("elements", []) if isinstance(payload, dict) else []
+        if not isinstance(elements, list):
+            elements = []
 
-    # Default: missing provider
-    return metric_missing_provider(
-        "Schools data provider not configured. Add an integration (DfE/Ofsted dataset or a commercial provider) to populate nearby schools.",
-        [
-            {"label": "Ofsted reports", "url": "https://reports.ofsted.gov.uk/"},
-            {"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"},
-        ],
-        retrieved,
-        extra_metrics={"postcode": pc} if pc else {},
-    )
+        names: List[str] = []
+        counts = {"school": 0, "college": 0, "university": 0}
+        for e in elements:
+            tags = (e or {}).get("tags") or {}
+            if not isinstance(tags, dict):
+                continue
+            a = tags.get("amenity")
+            if a in counts:
+                counts[a] += 1
+            nm = tags.get("name")
+            if isinstance(nm, str) and nm.strip():
+                names.append(nm.strip())
+
+        value = names[: min(MAX_OSM_NAMES, 120)]
+        summary = summarise_counts("Schools (OSM within ~1.2km)", counts, top_names=names)
+
+        out = metric_ok(
+            summary if elements else "No schools returned from OSM for this area.",
+            value,
+            base_sources,
+            retrieved,
+            0.90 if elements else 0.0,
+        )
+        out["metrics"] = {"radiusMeters": radius, "counts": counts, "totalElements": len(elements)}
+        return out
+
+    except Exception as e:
+        return metric_unavailable(
+            f"Schools fallback (OSM) failed: {str(e)}",
+            base_sources,
+            retrieved,
+            extra_metrics={"postcode": pc} if pc else {},
+        )
 
 
 # ----------------------------
-# Broadband (provider-ready)
+# Broadband
+#   - Adapter only (Verified)
+#   - No scraping / no invented speeds
 # ----------------------------
 def get_broadband_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
 
-    # Provider-ready pattern (same as schools).
-    # You plug in a provider endpoint that returns objective measures.
+    if BROADBAND_PROVIDER == "adapter" and BROADBAND_API_URL and BROADBAND_API_KEY and pc:
+        ok, payload, sources, err = _call_adapter(BROADBAND_API_URL, BROADBAND_API_KEY, pc, timeout=20)
+        if ok:
+            summary = str(payload.get("summary") or "Broadband data returned by adapter.").strip()
+            value = payload.get("value", payload.get("broadband", payload))
+            metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+            out = metric_ok(summary, value, sources, retrieved, MIN_VERIFIED)
+            out["metrics"] = metrics
+            return out
 
-    if BROADBAND_PROVIDER and BROADBAND_API_URL and BROADBAND_API_KEY and pc:
-        try:
-            status, payload = _http_get_json(
-                BROADBAND_API_URL,
-                params={"postcode": pc},
-                headers={"Authorization": f"Bearer {BROADBAND_API_KEY}"},
-                timeout=20,
-            )
-            if status == 200 and isinstance(payload, dict):
-                # Recommended provider contract:
-                # payload = {
-                #   "summary": "Average download 74 Mbps, upload 18 Mbps. Full fibre availability 62%.",
-                #   "broadband": { "downloadMbps": 74, "uploadMbps": 18, "fullFibrePct": 62, "providers": [...] },
-                #   "metrics": {...},
-                #   "sources": [{label,url},...]
-                # }
-                summary = str(payload.get("summary") or "").strip()
-                broadband = payload.get("broadband")
-                metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
-                sources = payload.get("sources") if isinstance(payload.get("sources"), list) else [
-                    {"label": "Broadband provider", "url": BROADBAND_API_URL}
-                ]
-
-                out = metric_ok(
-                    summary or "Broadband data returned by provider.",
-                    broadband if broadband is not None else payload,
-                    sources,
-                    retrieved,
-                    MIN_VERIFIED,
-                )
-                out["metrics"] = metrics
-                return out
-        except Exception as e:
-            return metric_unavailable(
-                f"Broadband provider call failed: {str(e)}",
-                [{"label": "Ofcom", "url": "https://www.ofcom.org.uk/"}],
-                retrieved,
-                extra_metrics={"postcode": pc} if pc else {},
-            )
+        return metric_unavailable(
+            f"Broadband adapter call failed ({err}).",
+            [{"label": "Broadband adapter", "url": BROADBAND_API_URL}],
+            retrieved,
+            extra_metrics={"postcode": pc} if pc else {},
+        )
 
     return metric_missing_provider(
-        "Broadband data provider not configured. Add an integration (Ofcom/ThinkBroadband dataset or a commercial checker) to populate speeds and availability.",
+        "Broadband provider not configured. Set BROADBAND_PROVIDER=adapter and supply BROADBAND_API_URL + BROADBAND_API_KEY to return objective speeds/availability.",
         [
             {"label": "Ofcom", "url": "https://www.ofcom.org.uk/"},
             {"label": "ThinkBroadband", "url": "https://www.thinkbroadband.com/"},
@@ -610,11 +633,6 @@ def _format_gbp(n: Optional[float]) -> str:
 
 
 def get_land_registry_sold_comps(postcode: str, limit: int = 8) -> Dict[str, Any]:
-    """
-    Pull recent SOLD transactions from HM Land Registry (open data, Price Paid).
-    Returns compatible object where frontend expects comparableProperties.forSale (array).
-    NOTE: Uses postcode district filter (fast + robust), NOT exact postcode (LR data varies).
-    """
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
     sources = [{"label": "HM Land Registry (Linked Data) — Price Paid", "url": "https://landregistry.data.gov.uk/"}]
@@ -694,7 +712,7 @@ LIMIT {int(limit)}
             comps.append({
                 "address": address or f"{district} (exact address not provided)",
                 "description": description,
-                "distance": "",  # do not invent
+                "distance": "",
                 "source": "HM Land Registry (sold prices)",
                 "estimatedValue": price_gbp or "",
                 "sourceUrl": "https://landregistry.data.gov.uk/",
@@ -733,19 +751,6 @@ LIMIT {int(limit)}
         }
 
 
-# Backwards-compatible stub (kept, but unused once LR comps are used)
-def get_zoopla_comps(postcode: str) -> Dict[str, Any]:
-    return {
-        "forSale": [],
-        "sourceUrl": "",
-        "sources": [],
-        "retrievedAtISO": now_iso(),
-        "confidenceValue": 0.0,
-        "status": "missing_provider",
-        "summary": "Comparable sales/listings provider not configured.",
-    }
-
-
 # ----------------------------
 # Route: /market-insights
 # ----------------------------
@@ -757,7 +762,7 @@ def market_insights():
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
-    # cache key respects explicit lat/lng (if provided)
+    # cache key respects explicit lat/lng
     cache_key = f"market-insights::{postcode}::{lat or ''}::{lng or ''}" if postcode else "market-insights::no-postcode"
     cached = cache_get(cache_key)
     if cached:
@@ -771,7 +776,7 @@ def market_insights():
         # SOLD comps (real evidence)
         sold_comps = get_land_registry_sold_comps(postcode)
 
-        # Housing metric becomes REAL when sold comps exist (still not "market today", but factual sold evidence)
+        # Housing metric becomes REAL when sold comps exist (factual sold evidence)
         if sold_comps.get("status") == "ok" and sold_comps.get("forSale"):
             housing_metric = metric_ok(
                 sold_comps.get("summary", ""),
@@ -789,7 +794,7 @@ def market_insights():
         local_area = {
             "retrievedAtISO": now_iso(),
             "postcode": postcode,
-            "schools": get_schools_data(postcode),
+            "schools": get_schools_data(postcode, lat, lng),
             "housing": housing_metric,
             "transport": get_transport_data(lat, lng),
             "amenities": get_amenities_data(lat, lng),
@@ -801,7 +806,6 @@ def market_insights():
             "postcode": postcode,
             "location": {"lat": lat, "lng": lng, "geocodeMeta": geo_meta},
             "localAreaAnalysis": local_area,
-            # Keep contract name unchanged for frontend
             "comparableProperties": sold_comps,
         }
 
