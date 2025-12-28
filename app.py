@@ -5,6 +5,7 @@ import requests
 import os
 import time
 import json
+import re
 from flask_cors import CORS
 from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
@@ -72,9 +73,17 @@ def now_iso() -> str:
 
 
 def normalize_postcode(pc: str) -> str:
+    """UK canonical display format: uppercase, single internal spaces."""
     if not isinstance(pc, str):
         return ""
     return " ".join(pc.strip().upper().split())
+
+
+def normalize_postcode_nospace(pc: str) -> str:
+    """UK canonical lookup key: uppercase, remove all whitespace."""
+    if not isinstance(pc, str):
+        return ""
+    return re.sub(r"\s+", "", pc.strip().upper())
 
 
 def postcode_district(pc: str) -> str:
@@ -181,7 +190,66 @@ def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeo
 
 
 # ----------------------------
-# Geocoding (Nominatim)
+# NSPL (Supabase view) postcode -> lat/lng
+# Requires: public.nspl_lookup(pcd_nospace, lat, lng)
+# ----------------------------
+def nspl_lookup_latlng(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
+    """
+    Returns (lat, lng, meta). Meta mirrors geocode meta shape used by existing code.
+    """
+    meta = {
+        "retrievedAtISO": now_iso(),
+        "sources": [],
+        "referenceLinks": [],
+        "notes": "",
+        "provider": "nspl_lookup",
+    }
+
+    pc_key = normalize_postcode_nospace(postcode)
+    if not pc_key:
+        meta["notes"] = "No postcode provided."
+        return None, None, meta
+
+    if not supabase:
+        meta["notes"] = "Supabase not configured; cannot query nspl_lookup."
+        meta["provider"] = "nspl_lookup_unavailable"
+        meta["sources"] = [{"label": "Supabase", "url": "https://supabase.com/"}]
+        return None, None, meta
+
+    try:
+        res = (
+            supabase.table("nspl_lookup")
+            .select("lat,lng")
+            .eq("pcd_nospace", pc_key)
+            .limit(1)
+            .execute()
+        )
+
+        rows = res.data if hasattr(res, "data") else None
+        if not isinstance(rows, list) or not rows:
+            meta["notes"] = f"NSPL lookup returned no rows for {pc_key}."
+            meta["sources"] = [{"label": "Supabase (nspl_lookup)", "url": f"{SUPABASE_URL}"}]
+            return None, None, meta
+
+        lat = safe_float(rows[0].get("lat"))
+        lng = safe_float(rows[0].get("lng"))
+        if lat is None or lng is None:
+            meta["notes"] = "NSPL lookup returned invalid coordinates."
+            meta["sources"] = [{"label": "Supabase (nspl_lookup)", "url": f"{SUPABASE_URL}"}]
+            return None, None, meta
+
+        meta["notes"] = "Resolved from NSPL."
+        meta["sources"] = [{"label": "Supabase (nspl_lookup)", "url": f"{SUPABASE_URL}"}]
+        return lat, lng, meta
+
+    except Exception as e:
+        meta["notes"] = f"NSPL lookup exception: {str(e)}"
+        meta["sources"] = [{"label": "Supabase (nspl_lookup)", "url": f"{SUPABASE_URL}"}]
+        return None, None, meta
+
+
+# ----------------------------
+# Geocoding (Nominatim) fallback only
 # ----------------------------
 def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
     pc = normalize_postcode(postcode)
@@ -190,6 +258,7 @@ def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], D
         "sources": [{"label": "OpenStreetMap Nominatim", "url": "https://nominatim.openstreetmap.org/"}],
         "referenceLinks": [],
         "notes": "",
+        "provider": "nominatim",
     }
 
     if not pc:
@@ -246,7 +315,7 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
 
     if lat is None or lng is None:
         return metric_unavailable(
-            "Crime data not available: postcode could not be geocoded to coordinates.",
+            "Crime data not available: postcode could not be resolved to coordinates.",
             base_sources,
             retrieved,
         )
@@ -330,7 +399,7 @@ def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
 
     if lat is None or lng is None:
         return metric_unavailable(
-            "Transport data not available: postcode could not be geocoded to coordinates.",
+            "Transport data not available: postcode could not be resolved to coordinates.",
             base_sources,
             retrieved,
         )
@@ -393,7 +462,7 @@ def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
 
     if lat is None or lng is None:
         return metric_unavailable(
-            "Amenities data not available: postcode could not be geocoded to coordinates.",
+            "Amenities data not available: postcode could not be resolved to coordinates.",
             base_sources,
             retrieved,
         )
@@ -565,9 +634,6 @@ def get_broadband_data(postcode: str) -> Dict[str, Any]:
             )
 
         try:
-            # Recommended schema for broadband_by_postcode:
-            # postcode (text), download_mbps (numeric), upload_mbps (numeric),
-            # full_fibre_pct (numeric), provider (text), updated_at (timestamptz)
             q = (
                 supabase.table(BROADBAND_SUPABASE_TABLE)
                 .select("*")
@@ -629,7 +695,6 @@ def get_broadband_data(postcode: str) -> Dict[str, Any]:
 
 # ----------------------------
 # Housing (baseline stub + Land Registry sold comps already elsewhere in your codebase)
-# Keep your existing Land Registry function if present; this file focuses on fixing schools/broadband integration.
 # ----------------------------
 def get_housing_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
@@ -677,8 +742,15 @@ def market_insights():
 
     try:
         geo_meta = None
+
+        # ✅ Prefer NSPL (Supabase) for postcode → coords, fallback to Nominatim only if needed
         if (lat is None or lng is None) and postcode:
-            lat, lng, geo_meta = geocode_postcode(postcode)
+            lat2, lng2, nspl_meta = nspl_lookup_latlng(postcode)
+            if lat2 is not None and lng2 is not None:
+                lat, lng, geo_meta = lat2, lng2, nspl_meta
+            else:
+                # Fallback to Nominatim if NSPL not available or missing row
+                lat, lng, geo_meta = geocode_postcode(postcode)
 
         # Local area analysis: schools/broadband do NOT depend on geocode now.
         local_area = {
@@ -696,7 +768,6 @@ def market_insights():
             "postcode": postcode,
             "location": {"lat": lat, "lng": lng, "geocodeMeta": geo_meta},
             "localAreaAnalysis": local_area,
-            # Keep contract name if your frontend expects it; supply empty if you haven't wired comps here.
             "comparableProperties": {
                 "forSale": [],
                 "sourceUrl": "",
@@ -734,6 +805,7 @@ def home():
             "SCHOOLS_SUPABASE_VIEW": "e.g. schools_clean",
             "BROADBAND_PROVIDER": "set to 'supabase' to enable",
             "BROADBAND_SUPABASE_TABLE": "e.g. broadband_by_postcode",
+            "NSPL": "requires view public.nspl_lookup(pcd_nospace, lat, lng) for postcode->coords",
         }
     })
 
