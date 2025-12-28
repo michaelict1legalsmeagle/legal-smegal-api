@@ -13,8 +13,15 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+# ---- Supabase env hardening (support legacy names) ----
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
+SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+
+# Some deployments used SUPABASE_KEY previously; accept as fallback.
+SUPABASE_KEY_FALLBACK = (os.getenv("SUPABASE_KEY") or "").strip()
+
+SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
 
 # ----------------------------
 # Caching (in-memory, TTL)
@@ -28,34 +35,33 @@ HTTP_USER_AGENT = os.getenv(
     "LegalSmegal/1.0 (market-insights; contact=admin@example.com)"
 )
 
-# ----------------------------
 # Safety + stability: bound payload sizes
-# ----------------------------
 MAX_CRIMES = int(os.getenv("MAX_CRIMES", "300"))
 MAX_OSM_NAMES = int(os.getenv("MAX_OSM_NAMES", "250"))
 DEFAULT_OSM_RADIUS = int(os.getenv("OSM_RADIUS_METERS", "1200"))
 
-# ----------------------------
-# Provider toggles + configs (adapter pattern)
-# ----------------------------
+# Confidence rules
 MIN_VERIFIED = float(os.getenv("MIN_VERIFIED_CONFIDENCE", "0.95"))
 
-# You choose providers by setting these + URLs + keys
-SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()        # "adapter" (recommended) or ""
-BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()    # "adapter" (recommended) or ""
+# Provider toggles
+SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()          # "supabase" or ""
+BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()      # "supabase" or ""
 
-SCHOOLS_API_URL = os.getenv("SCHOOLS_API_URL", "").strip()
-SCHOOLS_API_KEY = os.getenv("SCHOOLS_API_KEY", "").strip()
+# Supabase-backed adapters
+SCHOOLS_SUPABASE_VIEW = os.getenv("SCHOOLS_SUPABASE_VIEW", "schools_clean").strip()
+SCHOOLS_MAX_RESULTS = int(os.getenv("SCHOOLS_MAX_RESULTS", "20"))
+SCHOOLS_CONFIDENCE_VALUE = float(os.getenv("SCHOOLS_CONFIDENCE_VALUE", "0.90"))
 
-BROADBAND_API_URL = os.getenv("BROADBAND_API_URL", "").strip()
-BROADBAND_API_KEY = os.getenv("BROADBAND_API_KEY", "").strip()
+BROADBAND_SUPABASE_TABLE = os.getenv("BROADBAND_SUPABASE_TABLE", "").strip()  # e.g. "broadband_by_postcode"
+BROADBAND_MAX_RESULTS = int(os.getenv("BROADBAND_MAX_RESULTS", "5"))
+BROADBAND_CONFIDENCE_VALUE = float(os.getenv("BROADBAND_CONFIDENCE_VALUE", "0.90"))
 
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("🟢 Supabase enabled. Key prefix:", SUPABASE_KEY[:20])
+    print("🟢 Supabase enabled. URL:", SUPABASE_URL)
 else:
-    print("🔴 Supabase env vars not set. Supabase features (save-analysis, logs) are DISABLED locally.")
+    print("🔴 Supabase env vars not set. Supabase features are DISABLED.")
 
 
 # ----------------------------
@@ -69,6 +75,13 @@ def normalize_postcode(pc: str) -> str:
     if not isinstance(pc, str):
         return ""
     return " ".join(pc.strip().upper().split())
+
+
+def postcode_district(pc: str) -> str:
+    pc = normalize_postcode(pc)
+    if not pc:
+        return ""
+    return pc.split(" ")[0] if " " in pc else pc
 
 
 def cache_get(key: str) -> Optional[Dict[str, Any]]:
@@ -165,32 +178,6 @@ def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeo
         h.update(headers)
     r = requests.post(url, data=data, headers=h, timeout=timeout)
     return r.status_code, r.text or ""
-
-
-def _call_adapter(api_url: str, api_key: str, postcode: str, timeout: int = 20) -> Tuple[bool, Dict[str, Any], List[Dict[str, str]], str]:
-    """
-    Generic adapter call.
-    Expected adapter contract (recommended):
-      {
-        "summary": "...",
-        "value": <any>,
-        "metrics": {...},
-        "sources": [{"label": "...", "url": "..."}]
-      }
-    Returns: (ok, payload, sources, error)
-    """
-    if not api_url or not api_key:
-        return False, {}, [], "adapter not configured"
-    status, payload = _http_get_json(
-        api_url,
-        params={"postcode": postcode},
-        headers={"Authorization": f"Bearer {api_key}"},
-        timeout=timeout,
-    )
-    if status != 200 or not isinstance(payload, dict):
-        return False, {}, [], f"adapter http {status}"
-    sources = payload.get("sources") if isinstance(payload.get("sources"), list) else [{"label": "Adapter", "url": api_url}]
-    return True, payload, sources, ""
 
 
 # ----------------------------
@@ -306,7 +293,7 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
 
 
 # ----------------------------
-# OSM (Overpass)
+# OSM (Overpass) Utilities
 # ----------------------------
 def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
     q = f"""
@@ -327,7 +314,9 @@ out body;
         return {"elements": []}
     try:
         payload = json.loads(text)
-        return payload if isinstance(payload, dict) else {"elements": []}
+        if isinstance(payload, dict):
+            return payload
+        return {"elements": []}
     except Exception:
         return {"elements": []}
 
@@ -467,139 +456,186 @@ node["leisure"](around:{radius},{lat},{lng});
 
 
 # ----------------------------
-# Schools
-#   - Adapter if configured (Verified)
-#   - OSM fallback if not (Unverified but working)
+# Schools (Supabase adapter)
 # ----------------------------
-def get_schools_data(postcode: str, lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
+def get_schools_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
+    district = postcode_district(pc)
 
-    # 1) Adapter path (recommended)
-    if SCHOOLS_PROVIDER == "adapter" and SCHOOLS_API_URL and SCHOOLS_API_KEY and pc:
-        ok, payload, sources, err = _call_adapter(SCHOOLS_API_URL, SCHOOLS_API_KEY, pc, timeout=20)
-        if ok:
-            summary = str(payload.get("summary") or "Schools data returned by adapter.").strip()
-            value = payload.get("value", payload.get("schools", []))
-            metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
-            out = metric_ok(summary, value, sources, retrieved, MIN_VERIFIED)
-            out["metrics"] = metrics
+    if not pc:
+        return metric_unavailable(
+            "Schools data not available: no postcode provided.",
+            [{"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"}],
+            retrieved,
+        )
+
+    if SCHOOLS_PROVIDER == "supabase":
+        if not supabase:
+            return metric_unavailable(
+                "Schools provider set to supabase but Supabase is not configured on server.",
+                [{"label": "Supabase", "url": "https://supabase.com/"}],
+                retrieved,
+                extra_metrics={"postcode": pc},
+            )
+
+        # Query by district prefix to avoid strict formatting issues.
+        try:
+            cols = "urn,name,postcode,phase,type,status,easting,northing"
+            q = (
+                supabase.table(SCHOOLS_SUPABASE_VIEW)
+                .select(cols)
+                .ilike("postcode", f"{district}%")
+                .limit(SCHOOLS_MAX_RESULTS)
+            )
+            res = q.execute()
+            rows = res.data if hasattr(res, "data") else None
+            if not isinstance(rows, list):
+                rows = []
+
+            summary = (
+                f"Schools found for postcode district {district}: {len(rows)} (from Supabase view {SCHOOLS_SUPABASE_VIEW})."
+                if rows else
+                f"No schools found for postcode district {district} in Supabase view {SCHOOLS_SUPABASE_VIEW}."
+            )
+
+            sources = [
+                {"label": "Supabase (schools view)", "url": f"{SUPABASE_URL}"},
+            ]
+
+            out = metric_ok(summary, rows, sources, retrieved, SCHOOLS_CONFIDENCE_VALUE if rows else 0.0)
+            out["metrics"] = {
+                "provider": "supabase",
+                "view": SCHOOLS_SUPABASE_VIEW,
+                "district": district,
+                "limit": SCHOOLS_MAX_RESULTS,
+            }
             return out
-        return metric_unavailable(
-            f"Schools adapter call failed ({err}).",
-            [{"label": "Schools adapter", "url": SCHOOLS_API_URL}],
-            retrieved,
-            extra_metrics={"postcode": pc},
-        )
 
-    # 2) Free fallback: OSM "amenity=school" (works, but not Verified)
-    base_sources = [
-        {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
-        {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
-    ]
-    if lat is None or lng is None:
-        return metric_missing_provider(
-            "Schools provider not configured. (Fallback requires coordinates; geocoding failed.) Add SCHOOLS_PROVIDER=adapter + SCHOOLS_API_URL + SCHOOLS_API_KEY for verified data.",
-            [
-                {"label": "Ofsted reports", "url": "https://reports.ofsted.gov.uk/"},
-                {"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"},
-            ],
-            retrieved,
-            extra_metrics={"postcode": pc} if pc else {},
-        )
+        except Exception as e:
+            return metric_unavailable(
+                f"Schools Supabase query failed: {str(e)}",
+                [{"label": "Supabase", "url": "https://supabase.com/"}],
+                retrieved,
+                extra_metrics={"postcode": pc, "district": district, "view": SCHOOLS_SUPABASE_VIEW},
+            )
 
-    try:
-        radius = DEFAULT_OSM_RADIUS
-        selectors = f"""
-node["amenity"="school"](around:{radius},{lat},{lng});
-node["amenity"="college"](around:{radius},{lat},{lng});
-node["amenity"="university"](around:{radius},{lat},{lng});
-"""
-        payload = overpass_query(lat, lng, selectors)
-        elements = payload.get("elements", []) if isinstance(payload, dict) else []
-        if not isinstance(elements, list):
-            elements = []
-
-        names: List[str] = []
-        counts = {"school": 0, "college": 0, "university": 0}
-        for e in elements:
-            tags = (e or {}).get("tags") or {}
-            if not isinstance(tags, dict):
-                continue
-            a = tags.get("amenity")
-            if a in counts:
-                counts[a] += 1
-            nm = tags.get("name")
-            if isinstance(nm, str) and nm.strip():
-                names.append(nm.strip())
-
-        value = names[: min(MAX_OSM_NAMES, 120)]
-        summary = summarise_counts("Schools (OSM within ~1.2km)", counts, top_names=names)
-
-        out = metric_ok(
-            summary if elements else "No schools returned from OSM for this area.",
-            value,
-            base_sources,
-            retrieved,
-            0.90 if elements else 0.0,
-        )
-        out["metrics"] = {"radiusMeters": radius, "counts": counts, "totalElements": len(elements)}
-        return out
-
-    except Exception as e:
-        return metric_unavailable(
-            f"Schools fallback (OSM) failed: {str(e)}",
-            base_sources,
-            retrieved,
-            extra_metrics={"postcode": pc} if pc else {},
-        )
+    # Default: missing provider
+    return metric_missing_provider(
+        "Schools provider not configured. Set SCHOOLS_PROVIDER=supabase and SCHOOLS_SUPABASE_VIEW=schools_clean (or configure an API provider).",
+        [
+            {"label": "Ofsted reports", "url": "https://reports.ofsted.gov.uk/"},
+            {"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"},
+        ],
+        retrieved,
+        extra_metrics={"postcode": pc, "district": district},
+    )
 
 
 # ----------------------------
-# Broadband
-#   - Adapter only (Verified)
-#   - No scraping / no invented speeds
+# Broadband (Supabase adapter - optional)
 # ----------------------------
 def get_broadband_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
+    district = postcode_district(pc)
 
-    if BROADBAND_PROVIDER == "adapter" and BROADBAND_API_URL and BROADBAND_API_KEY and pc:
-        ok, payload, sources, err = _call_adapter(BROADBAND_API_URL, BROADBAND_API_KEY, pc, timeout=20)
-        if ok:
-            summary = str(payload.get("summary") or "Broadband data returned by adapter.").strip()
-            value = payload.get("value", payload.get("broadband", payload))
-            metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
-            out = metric_ok(summary, value, sources, retrieved, MIN_VERIFIED)
-            out["metrics"] = metrics
-            return out
-
+    if not pc:
         return metric_unavailable(
-            f"Broadband adapter call failed ({err}).",
-            [{"label": "Broadband adapter", "url": BROADBAND_API_URL}],
+            "Broadband data not available: no postcode provided.",
+            [{"label": "Ofcom", "url": "https://www.ofcom.org.uk/"}],
             retrieved,
-            extra_metrics={"postcode": pc} if pc else {},
         )
 
+    if BROADBAND_PROVIDER == "supabase":
+        if not supabase:
+            return metric_unavailable(
+                "Broadband provider set to supabase but Supabase is not configured on server.",
+                [{"label": "Supabase", "url": "https://supabase.com/"}],
+                retrieved,
+                extra_metrics={"postcode": pc},
+            )
+
+        if not BROADBAND_SUPABASE_TABLE:
+            return metric_missing_provider(
+                "Broadband provider set to supabase, but BROADBAND_SUPABASE_TABLE is not set.",
+                [{"label": "Ofcom", "url": "https://www.ofcom.org.uk/"}],
+                retrieved,
+                extra_metrics={"postcode": pc},
+            )
+
+        try:
+            # Recommended schema for broadband_by_postcode:
+            # postcode (text), download_mbps (numeric), upload_mbps (numeric),
+            # full_fibre_pct (numeric), provider (text), updated_at (timestamptz)
+            q = (
+                supabase.table(BROADBAND_SUPABASE_TABLE)
+                .select("*")
+                .eq("postcode", pc)
+                .limit(BROADBAND_MAX_RESULTS)
+            )
+            res = q.execute()
+            rows = res.data if hasattr(res, "data") else None
+            if not isinstance(rows, list):
+                rows = []
+
+            # Fallback: try district prefix if exact postcode not found (optional)
+            if not rows and district:
+                q2 = (
+                    supabase.table(BROADBAND_SUPABASE_TABLE)
+                    .select("*")
+                    .ilike("postcode", f"{district}%")
+                    .limit(BROADBAND_MAX_RESULTS)
+                )
+                res2 = q2.execute()
+                rows = res2.data if hasattr(res2, "data") else rows
+                if not isinstance(rows, list):
+                    rows = []
+
+            summary = (
+                f"Broadband records found for {pc}: {len(rows)} (from Supabase table {BROADBAND_SUPABASE_TABLE})."
+                if rows else
+                f"No broadband records found for {pc} in Supabase table {BROADBAND_SUPABASE_TABLE}."
+            )
+
+            sources = [{"label": "Supabase (broadband table)", "url": f"{SUPABASE_URL}"}]
+            out = metric_ok(summary, rows, sources, retrieved, BROADBAND_CONFIDENCE_VALUE if rows else 0.0)
+            out["metrics"] = {
+                "provider": "supabase",
+                "table": BROADBAND_SUPABASE_TABLE,
+                "district": district,
+                "limit": BROADBAND_MAX_RESULTS,
+            }
+            return out
+
+        except Exception as e:
+            return metric_unavailable(
+                f"Broadband Supabase query failed: {str(e)}",
+                [{"label": "Supabase", "url": "https://supabase.com/"}],
+                retrieved,
+                extra_metrics={"postcode": pc, "district": district, "table": BROADBAND_SUPABASE_TABLE},
+            )
+
     return metric_missing_provider(
-        "Broadband provider not configured. Set BROADBAND_PROVIDER=adapter and supply BROADBAND_API_URL + BROADBAND_API_KEY to return objective speeds/availability.",
+        "Broadband provider not configured. Set BROADBAND_PROVIDER=supabase and BROADBAND_SUPABASE_TABLE=broadband_by_postcode (or configure a provider).",
         [
             {"label": "Ofcom", "url": "https://www.ofcom.org.uk/"},
             {"label": "ThinkBroadband", "url": "https://www.thinkbroadband.com/"},
         ],
         retrieved,
-        extra_metrics={"postcode": pc} if pc else {},
+        extra_metrics={"postcode": pc, "district": district},
     )
 
 
 # ----------------------------
-# Housing (baseline stub)
+# Housing (baseline stub + Land Registry sold comps already elsewhere in your codebase)
+# Keep your existing Land Registry function if present; this file focuses on fixing schools/broadband integration.
 # ----------------------------
 def get_housing_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
     return metric_missing_provider(
-        "Housing market provider not configured. For investor-grade 'current market' signals, integrate a sales/rents/listings API and return evidence-linked comps.",
+        "Housing market provider not configured. Integrate sales/rents/listings API and return evidence-linked comps.",
         [
             {"label": "UK House Price Index (GOV.UK)", "url": "https://www.gov.uk/government/collections/uk-house-price-index-reports"},
             {"label": "HM Land Registry (open data)", "url": "https://landregistry.data.gov.uk/"},
@@ -610,145 +646,18 @@ def get_housing_data(postcode: str) -> Dict[str, Any]:
 
 
 # ----------------------------
-# Land Registry SOLD COMPS (open data)
+# Route: Adapter endpoints (useful for debugging)
 # ----------------------------
-def _sparql_query(endpoint: str, query: str, timeout: int = 25) -> dict:
-    r = requests.get(
-        endpoint,
-        params={"query": query, "format": "application/sparql-results+json"},
-        headers={"User-Agent": HTTP_USER_AGENT},
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    return r.json()
+@app.route("/adapters/schools", methods=["GET"])
+def adapter_schools():
+    postcode = normalize_postcode(request.args.get("postcode", "") or "")
+    return jsonify(get_schools_data(postcode))
 
 
-def _format_gbp(n: Optional[float]) -> str:
-    try:
-        if n is None:
-            return ""
-        return f"£{int(round(float(n))):,}"
-    except Exception:
-        return ""
-
-
-def get_land_registry_sold_comps(postcode: str, limit: int = 8) -> Dict[str, Any]:
-    retrieved = now_iso()
-    pc = normalize_postcode(postcode)
-    sources = [{"label": "HM Land Registry (Linked Data) — Price Paid", "url": "https://landregistry.data.gov.uk/"}]
-
-    if not pc:
-        return {
-            "forSale": [],
-            "sourceUrl": _first_source_url(sources),
-            "sources": sources,
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.0,
-            "status": "unavailable",
-            "summary": "No postcode provided for Land Registry comps.",
-        }
-
-    district = pc.split(" ")[0] if " " in pc else pc
-    endpoint = "https://landregistry.data.gov.uk/landregistry/query"
-
-    query = f"""
-PREFIX lrppi: <http://landregistry.data.gov.uk/def/ppi/>
-
-SELECT ?price ?date ?paon ?saon ?street ?town ?postcode ?propertyType
-WHERE {{
-  ?tx a lrppi:TransactionRecord .
-  ?tx lrppi:pricePaid ?price .
-  ?tx lrppi:transactionDate ?date .
-  OPTIONAL {{ ?tx lrppi:paon ?paon . }}
-  OPTIONAL {{ ?tx lrppi:saon ?saon . }}
-  OPTIONAL {{ ?tx lrppi:street ?street . }}
-  OPTIONAL {{ ?tx lrppi:town ?town . }}
-  OPTIONAL {{ ?tx lrppi:postcode ?postcode . }}
-  OPTIONAL {{ ?tx lrppi:propertyType ?propertyType . }}
-
-  FILTER(BOUND(?postcode))
-  FILTER(STRSTARTS(UCASE(STR(?postcode)), UCASE("{district}")))
-}}
-ORDER BY DESC(?date)
-LIMIT {int(limit)}
-""".strip()
-
-    try:
-        payload = _sparql_query(endpoint, query, timeout=25)
-        rows = payload.get("results", {}).get("bindings", [])
-        if not isinstance(rows, list):
-            rows = []
-
-        comps = []
-        for r in rows:
-            def _g(k: str) -> str:
-                v = (r.get(k) or {}).get("value")
-                return v.strip() if isinstance(v, str) else ""
-
-            price_raw = _g("price")
-            date_raw = _g("date")
-            paon = _g("paon")
-            saon = _g("saon")
-            street = _g("street")
-            town = _g("town")
-            pc_row = _g("postcode")
-            ptype = _g("propertyType")
-
-            price_num = safe_float(price_raw)
-            price_gbp = _format_gbp(price_num)
-
-            address_parts = [saon, paon, street, town, pc_row]
-            address = ", ".join([p for p in address_parts if isinstance(p, str) and p.strip()])
-
-            desc_bits = []
-            if date_raw:
-                desc_bits.append(f"Sold {date_raw[:10]}")
-            if price_gbp:
-                desc_bits.append(price_gbp)
-            if ptype:
-                desc_bits.append(ptype.split("/")[-1])
-            description = " • ".join(desc_bits) if desc_bits else "Sold transaction (Land Registry)."
-
-            comps.append({
-                "address": address or f"{district} (exact address not provided)",
-                "description": description,
-                "distance": "",
-                "source": "HM Land Registry (sold prices)",
-                "estimatedValue": price_gbp or "",
-                "sourceUrl": "https://landregistry.data.gov.uk/",
-                "confidenceValue": MIN_VERIFIED,
-            })
-
-        summary = (
-            f"Recent sold transactions found for {district} (sample: {len(comps)}). Source: HM Land Registry Price Paid."
-            if comps else
-            f"No recent sold transactions returned for {district} from Land Registry."
-        )
-
-        return {
-            "forSale": comps,
-            "sourceUrl": _first_source_url(sources),
-            "sources": sources,
-            "retrievedAtISO": retrieved,
-            "confidenceValue": MIN_VERIFIED if comps else 0.0,
-            "status": "ok" if comps else "unavailable",
-            "summary": summary,
-            "postcodeDistrict": district,
-            "postcode": pc,
-        }
-
-    except Exception as e:
-        return {
-            "forSale": [],
-            "sourceUrl": _first_source_url(sources),
-            "sources": sources,
-            "retrievedAtISO": retrieved,
-            "confidenceValue": 0.0,
-            "status": "unavailable",
-            "summary": f"Land Registry comps fetch failed: {str(e)}",
-            "postcodeDistrict": district,
-            "postcode": pc,
-        }
+@app.route("/adapters/broadband", methods=["GET"])
+def adapter_broadband():
+    postcode = normalize_postcode(request.args.get("postcode", "") or "")
+    return jsonify(get_broadband_data(postcode))
 
 
 # ----------------------------
@@ -758,11 +667,9 @@ LIMIT {int(limit)}
 def market_insights():
     data = request.get_json(silent=True) or {}
     postcode = normalize_postcode(data.get("postcode", "") or "")
-
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
-    # cache key respects explicit lat/lng
     cache_key = f"market-insights::{postcode}::{lat or ''}::{lng or ''}" if postcode else "market-insights::no-postcode"
     cached = cache_get(cache_key)
     if cached:
@@ -773,29 +680,12 @@ def market_insights():
         if (lat is None or lng is None) and postcode:
             lat, lng, geo_meta = geocode_postcode(postcode)
 
-        # SOLD comps (real evidence)
-        sold_comps = get_land_registry_sold_comps(postcode)
-
-        # Housing metric becomes REAL when sold comps exist (factual sold evidence)
-        if sold_comps.get("status") == "ok" and sold_comps.get("forSale"):
-            housing_metric = metric_ok(
-                sold_comps.get("summary", ""),
-                {
-                    "soldCount": len(sold_comps.get("forSale", [])),
-                    "postcodeDistrict": sold_comps.get("postcodeDistrict", ""),
-                },
-                sold_comps.get("sources", []),
-                sold_comps.get("retrievedAtISO", now_iso()),
-                MIN_VERIFIED,
-            )
-        else:
-            housing_metric = get_housing_data(postcode)
-
+        # Local area analysis: schools/broadband do NOT depend on geocode now.
         local_area = {
             "retrievedAtISO": now_iso(),
             "postcode": postcode,
-            "schools": get_schools_data(postcode, lat, lng),
-            "housing": housing_metric,
+            "schools": get_schools_data(postcode),
+            "housing": get_housing_data(postcode),
             "transport": get_transport_data(lat, lng),
             "amenities": get_amenities_data(lat, lng),
             "crime": get_crime_data(lat, lng),
@@ -806,7 +696,16 @@ def market_insights():
             "postcode": postcode,
             "location": {"lat": lat, "lng": lng, "geocodeMeta": geo_meta},
             "localAreaAnalysis": local_area,
-            "comparableProperties": sold_comps,
+            # Keep contract name if your frontend expects it; supply empty if you haven't wired comps here.
+            "comparableProperties": {
+                "forSale": [],
+                "sourceUrl": "",
+                "sources": [],
+                "retrievedAtISO": now_iso(),
+                "confidenceValue": 0.0,
+                "status": "missing_provider",
+                "summary": "Comparable properties provider not configured in this build.",
+            },
         }
 
         cache_set(cache_key, results)
@@ -824,7 +723,17 @@ def home():
         "status": "active",
         "supabaseEnabled": bool(supabase),
         "routes": {
-            "POST /market-insights": "{ 'postcode': 'B1 1AA' }  // optional: lat/lng"
+            "POST /market-insights": "{ 'postcode': 'EC3A 5DE' }  // optional: lat/lng",
+            "GET /adapters/schools?postcode=EC3A%205DE": "debug schools adapter",
+            "GET /adapters/broadband?postcode=EC3A%205DE": "debug broadband adapter",
+        },
+        "envHints": {
+            "SUPABASE_URL": "required for supabase providers",
+            "SUPABASE_SERVICE_ROLE_KEY": "preferred (server-only). SUPABASE_KEY also supported as fallback.",
+            "SCHOOLS_PROVIDER": "set to 'supabase' to enable",
+            "SCHOOLS_SUPABASE_VIEW": "e.g. schools_clean",
+            "BROADBAND_PROVIDER": "set to 'supabase' to enable",
+            "BROADBAND_SUPABASE_TABLE": "e.g. broadband_by_postcode",
         }
     })
 
