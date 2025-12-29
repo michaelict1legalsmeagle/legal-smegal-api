@@ -49,8 +49,10 @@ SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()          # 
 BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()      # "supabase" or ""
 
 # Supabase-backed adapters
-# ✅ Default to the district view you created: public.schools_by_district
+# ✅ Prefer the district view, but we will FALL BACK if PostgREST can’t see it
 SCHOOLS_SUPABASE_VIEW = os.getenv("SCHOOLS_SUPABASE_VIEW", "schools_by_district").strip()
+SCHOOLS_SUPABASE_FALLBACK_TABLE = os.getenv("SCHOOLS_SUPABASE_FALLBACK_TABLE", "schools_clean_v2").strip()
+
 SCHOOLS_MAX_RESULTS = int(os.getenv("SCHOOLS_MAX_RESULTS", "20"))
 SCHOOLS_CONFIDENCE_VALUE = float(os.getenv("SCHOOLS_CONFIDENCE_VALUE", "0.90"))
 
@@ -195,9 +197,6 @@ def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeo
 # Requires: public.nspl_lookup(pcd_nospace, lat, lng)
 # ----------------------------
 def nspl_lookup_latlng(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
-    """
-    Returns (lat, lng, meta). Meta mirrors geocode meta shape used by existing code.
-    """
     meta = {
         "retrievedAtISO": now_iso(),
         "sources": [],
@@ -549,66 +548,96 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
                 extra_metrics={"postcode": pc},
             )
 
-        # ✅ Query the district-indexed view by postcode_district (exact + fast).
-        # NOTE: schools_by_district has columns:
-        # postcode_district, urn, name, establishment_type, phase, local_authority, town, postcode, status, telephone, website
+        sources = [{"label": "Supabase", "url": f"{SUPABASE_URL}"}]
+
+        # 1) FAST PATH: schools_by_district view (postcode_district indexed)
         try:
-            cols = "postcode_district,urn,name,establishment_type,phase,local_authority,town,postcode,status,telephone,website"
-            q = (
+            cols_view = "postcode_district,urn,name,establishment_type,phase,local_authority,town,postcode,status,telephone,website"
+            res = (
                 supabase.table(SCHOOLS_SUPABASE_VIEW)
-                .select(cols)
+                .select(cols_view)
                 .eq("postcode_district", district)
                 .limit(SCHOOLS_MAX_RESULTS)
+                .execute()
             )
-            res = q.execute()
             rows = res.data if hasattr(res, "data") else None
             if not isinstance(rows, list):
                 rows = []
 
+            # Normalize: ensure postcode_district exists even if the view returns nulls
+            for r in rows:
+                if isinstance(r, dict):
+                    r.setdefault("postcode_district", postcode_district(r.get("postcode", "") or ""))
+
             if rows:
-                summary = (
-                    f"Schools found for postcode district {district}: {len(rows)} "
-                    f"(from Supabase view {SCHOOLS_SUPABASE_VIEW})."
+                out = metric_ok(
+                    f"Schools found for postcode district {district}: {len(rows)} (from Supabase view {SCHOOLS_SUPABASE_VIEW}).",
+                    rows,
+                    sources,
+                    retrieved,
+                    SCHOOLS_CONFIDENCE_VALUE,
                 )
-                confidence = SCHOOLS_CONFIDENCE_VALUE
-                status = "ok"
-                needs_evidence = False
-            else:
-                summary = (
-                    f"No schools returned for postcode district {district} "
-                    f"(Supabase view {SCHOOLS_SUPABASE_VIEW}). Data coverage may be incomplete."
+                out["metrics"] = {"provider": "supabase", "mode": "view", "view": SCHOOLS_SUPABASE_VIEW, "district": district, "limit": SCHOOLS_MAX_RESULTS}
+                return out
+
+            # Empty from view is possible (coverage), so fall through to fallback table for safety
+        except Exception as e:
+            # If PostgREST can't see the view, it throws PGRST205 ("not in schema cache") etc.
+            view_err = str(e)
+            # We'll keep going into fallback.
+
+            pass
+
+        # 2) FALLBACK: base table (schools_clean_v2) via ilike(postcode, 'B34%')
+        try:
+            cols_tbl = "urn,name,postcode,phase,establishment_type,local_authority,town,status,telephone,website"
+            res2 = (
+                supabase.table(SCHOOLS_SUPABASE_FALLBACK_TABLE)
+                .select(cols_tbl)
+                .ilike("postcode", f"{district}%")
+                .limit(SCHOOLS_MAX_RESULTS)
+                .execute()
+            )
+            rows2 = res2.data if hasattr(res2, "data") else None
+            if not isinstance(rows2, list):
+                rows2 = []
+
+            # Add derived district so UI + downstream can rely on it
+            for r in rows2:
+                if isinstance(r, dict):
+                    r["postcode_district"] = postcode_district(r.get("postcode", "") or "")
+
+            if rows2:
+                out = metric_ok(
+                    f"Schools found for postcode district {district}: {len(rows2)} (from Supabase table {SCHOOLS_SUPABASE_FALLBACK_TABLE}).",
+                    rows2,
+                    sources,
+                    retrieved,
+                    SCHOOLS_CONFIDENCE_VALUE,
                 )
-                confidence = 0.0
-                status = "unavailable"
-                needs_evidence = True
+                out["metrics"] = {"provider": "supabase", "mode": "fallback_table", "table": SCHOOLS_SUPABASE_FALLBACK_TABLE, "district": district, "limit": SCHOOLS_MAX_RESULTS}
+                return out
 
-            sources = [{"label": "Supabase (schools view)", "url": f"{SUPABASE_URL}"}]
-
-            out = metric_ok(summary, rows, sources, retrieved, confidence)
-            # Override for empty case: don't lie with "ok" when it's a coverage gap.
-            out["status"] = status
-            out["needsEvidence"] = needs_evidence
-            out["metrics"] = {
-                "provider": "supabase",
-                "view": SCHOOLS_SUPABASE_VIEW,
-                "district": district,
-                "limit": SCHOOLS_MAX_RESULTS,
-                "queryMode": "eq(postcode_district)",
-                "coverageLevel": "district",
-            }
+            # Truly none found
+            out = metric_unavailable(
+                f"No schools returned for postcode district {district} (tried {SCHOOLS_SUPABASE_VIEW} then {SCHOOLS_SUPABASE_FALLBACK_TABLE}).",
+                sources,
+                retrieved,
+                extra_metrics={"district": district, "view": SCHOOLS_SUPABASE_VIEW, "fallbackTable": SCHOOLS_SUPABASE_FALLBACK_TABLE},
+            )
             return out
 
-        except Exception as e:
+        except Exception as e2:
             return metric_unavailable(
-                f"Schools Supabase query failed: {str(e)}",
+                f"Schools Supabase query failed (view + fallback): {str(e2)}",
                 [{"label": "Supabase", "url": "https://supabase.com/"}],
                 retrieved,
-                extra_metrics={"postcode": pc, "district": district, "view": SCHOOLS_SUPABASE_VIEW},
+                extra_metrics={"postcode": pc, "district": district, "view": SCHOOLS_SUPABASE_VIEW, "fallbackTable": SCHOOLS_SUPABASE_FALLBACK_TABLE},
             )
 
     # Default: missing provider
     return metric_missing_provider(
-        "Schools provider not configured. Set SCHOOLS_PROVIDER=supabase and SCHOOLS_SUPABASE_VIEW=schools_by_district (or configure an API provider).",
+        "Schools provider not configured. Set SCHOOLS_PROVIDER=supabase and (optionally) SCHOOLS_SUPABASE_VIEW=schools_by_district.",
         [
             {"label": "Ofsted reports", "url": "https://reports.ofsted.gov.uk/"},
             {"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"},
@@ -662,7 +691,6 @@ def get_broadband_data(postcode: str) -> Dict[str, Any]:
             if not isinstance(rows, list):
                 rows = []
 
-            # Fallback: try district prefix if exact postcode not found (optional)
             if not rows and district:
                 q2 = (
                     supabase.table(BROADBAND_SUPABASE_TABLE)
@@ -760,16 +788,13 @@ def market_insights():
     try:
         geo_meta = None
 
-        # ✅ Prefer NSPL (Supabase) for postcode → coords, fallback to Nominatim only if needed
         if (lat is None or lng is None) and postcode:
             lat2, lng2, nspl_meta = nspl_lookup_latlng(postcode)
             if lat2 is not None and lng2 is not None:
                 lat, lng, geo_meta = lat2, lng2, nspl_meta
             else:
-                # Fallback to Nominatim if NSPL not available or missing row
                 lat, lng, geo_meta = geocode_postcode(postcode)
 
-        # Local area analysis: schools/broadband do NOT depend on geocode now.
         local_area = {
             "retrievedAtISO": now_iso(),
             "postcode": postcode,
@@ -820,6 +845,7 @@ def home():
             "SUPABASE_SERVICE_ROLE_KEY": "preferred (server-only). SUPABASE_KEY also supported as fallback.",
             "SCHOOLS_PROVIDER": "set to 'supabase' to enable",
             "SCHOOLS_SUPABASE_VIEW": "e.g. schools_by_district (recommended)",
+            "SCHOOLS_SUPABASE_FALLBACK_TABLE": "e.g. schools_clean_v2 (fallback if view not exposed)",
             "BROADBAND_PROVIDER": "set to 'supabase' to enable",
             "BROADBAND_SUPABASE_TABLE": "e.g. broadband_by_postcode",
             "NSPL": "requires view public.nspl_lookup(pcd_nospace, lat, lng) for postcode->coords",
