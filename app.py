@@ -49,7 +49,8 @@ SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()          # 
 BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()      # "supabase" or ""
 
 # Supabase-backed adapters
-SCHOOLS_SUPABASE_VIEW = os.getenv("SCHOOLS_SUPABASE_VIEW", "schools_clean").strip()
+# ✅ Default to the district view you created: public.schools_by_district
+SCHOOLS_SUPABASE_VIEW = os.getenv("SCHOOLS_SUPABASE_VIEW", "schools_by_district").strip()
 SCHOOLS_MAX_RESULTS = int(os.getenv("SCHOOLS_MAX_RESULTS", "20"))
 SCHOOLS_CONFIDENCE_VALUE = float(os.getenv("SCHOOLS_CONFIDENCE_VALUE", "0.90"))
 
@@ -548,13 +549,15 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
                 extra_metrics={"postcode": pc},
             )
 
-        # Query by district prefix to avoid strict formatting issues.
+        # ✅ Query the district-indexed view by postcode_district (exact + fast).
+        # NOTE: schools_by_district has columns:
+        # postcode_district, urn, name, establishment_type, phase, local_authority, town, postcode, status, telephone, website
         try:
-            cols = "urn,name,postcode,phase,type,status,easting,northing"
+            cols = "postcode_district,urn,name,establishment_type,phase,local_authority,town,postcode,status,telephone,website"
             q = (
                 supabase.table(SCHOOLS_SUPABASE_VIEW)
                 .select(cols)
-                .ilike("postcode", f"{district}%")
+                .eq("postcode_district", district)
                 .limit(SCHOOLS_MAX_RESULTS)
             )
             res = q.execute()
@@ -562,22 +565,36 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             if not isinstance(rows, list):
                 rows = []
 
-            summary = (
-                f"Schools found for postcode district {district}: {len(rows)} (from Supabase view {SCHOOLS_SUPABASE_VIEW})."
-                if rows else
-                f"No schools found for postcode district {district} in Supabase view {SCHOOLS_SUPABASE_VIEW}."
-            )
+            if rows:
+                summary = (
+                    f"Schools found for postcode district {district}: {len(rows)} "
+                    f"(from Supabase view {SCHOOLS_SUPABASE_VIEW})."
+                )
+                confidence = SCHOOLS_CONFIDENCE_VALUE
+                status = "ok"
+                needs_evidence = False
+            else:
+                summary = (
+                    f"No schools returned for postcode district {district} "
+                    f"(Supabase view {SCHOOLS_SUPABASE_VIEW}). Data coverage may be incomplete."
+                )
+                confidence = 0.0
+                status = "unavailable"
+                needs_evidence = True
 
-            sources = [
-                {"label": "Supabase (schools view)", "url": f"{SUPABASE_URL}"},
-            ]
+            sources = [{"label": "Supabase (schools view)", "url": f"{SUPABASE_URL}"}]
 
-            out = metric_ok(summary, rows, sources, retrieved, SCHOOLS_CONFIDENCE_VALUE if rows else 0.0)
+            out = metric_ok(summary, rows, sources, retrieved, confidence)
+            # Override for empty case: don't lie with "ok" when it's a coverage gap.
+            out["status"] = status
+            out["needsEvidence"] = needs_evidence
             out["metrics"] = {
                 "provider": "supabase",
                 "view": SCHOOLS_SUPABASE_VIEW,
                 "district": district,
                 "limit": SCHOOLS_MAX_RESULTS,
+                "queryMode": "eq(postcode_district)",
+                "coverageLevel": "district",
             }
             return out
 
@@ -591,7 +608,7 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
 
     # Default: missing provider
     return metric_missing_provider(
-        "Schools provider not configured. Set SCHOOLS_PROVIDER=supabase and SCHOOLS_SUPABASE_VIEW=schools_clean (or configure an API provider).",
+        "Schools provider not configured. Set SCHOOLS_PROVIDER=supabase and SCHOOLS_SUPABASE_VIEW=schools_by_district (or configure an API provider).",
         [
             {"label": "Ofsted reports", "url": "https://reports.ofsted.gov.uk/"},
             {"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"},
@@ -802,7 +819,7 @@ def home():
             "SUPABASE_URL": "required for supabase providers",
             "SUPABASE_SERVICE_ROLE_KEY": "preferred (server-only). SUPABASE_KEY also supported as fallback.",
             "SCHOOLS_PROVIDER": "set to 'supabase' to enable",
-            "SCHOOLS_SUPABASE_VIEW": "e.g. schools_clean",
+            "SCHOOLS_SUPABASE_VIEW": "e.g. schools_by_district (recommended)",
             "BROADBAND_PROVIDER": "set to 'supabase' to enable",
             "BROADBAND_SUPABASE_TABLE": "e.g. broadband_by_postcode",
             "NSPL": "requires view public.nspl_lookup(pcd_nospace, lat, lng) for postcode->coords",
