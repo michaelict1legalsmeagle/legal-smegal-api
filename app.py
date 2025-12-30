@@ -18,10 +18,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # ---- Supabase env hardening (support legacy names) ----
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-
-# Some deployments used SUPABASE_KEY previously; accept as fallback.
 SUPABASE_KEY_FALLBACK = (os.getenv("SUPABASE_KEY") or "").strip()
-
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
 
 # ----------------------------
@@ -48,15 +45,22 @@ MIN_VERIFIED = float(os.getenv("MIN_VERIFIED_CONFIDENCE", "0.95"))
 SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()          # "supabase" or ""
 BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()      # "supabase" or ""
 
+# Housing provider (new)
+HOUSING_PROVIDER = os.getenv("HOUSING_PROVIDER", "supabase_rpc").strip().lower()   # "supabase_rpc" or ""
+HOUSING_RPC_NAME = os.getenv("HOUSING_RPC_NAME", "housing_comps_v1").strip()
+HOUSING_MAX_LIMIT = int(os.getenv("HOUSING_MAX_LIMIT", "50"))
+HOUSING_DEFAULT_LIMIT = int(os.getenv("HOUSING_DEFAULT_LIMIT", "20"))
+HOUSING_DEFAULT_RADIUS_MILES = float(os.getenv("HOUSING_DEFAULT_RADIUS_MILES", "3"))
+HOUSING_CONFIDENCE_VALUE = float(os.getenv("HOUSING_CONFIDENCE_VALUE", "0.96"))
+
 # Supabase-backed adapters
-# ✅ Prefer the district view, but we will FALL BACK if PostgREST can’t see it
 SCHOOLS_SUPABASE_VIEW = os.getenv("SCHOOLS_SUPABASE_VIEW", "schools_by_district").strip()
 SCHOOLS_SUPABASE_FALLBACK_TABLE = os.getenv("SCHOOLS_SUPABASE_FALLBACK_TABLE", "schools_clean_v2").strip()
 
 SCHOOLS_MAX_RESULTS = int(os.getenv("SCHOOLS_MAX_RESULTS", "20"))
 SCHOOLS_CONFIDENCE_VALUE = float(os.getenv("SCHOOLS_CONFIDENCE_VALUE", "0.90"))
 
-BROADBAND_SUPABASE_TABLE = os.getenv("BROADBAND_SUPABASE_TABLE", "").strip()  # e.g. "broadband_by_postcode"
+BROADBAND_SUPABASE_TABLE = os.getenv("BROADBAND_SUPABASE_TABLE", "").strip()
 BROADBAND_MAX_RESULTS = int(os.getenv("BROADBAND_MAX_RESULTS", "5"))
 BROADBAND_CONFIDENCE_VALUE = float(os.getenv("BROADBAND_CONFIDENCE_VALUE", "0.90"))
 
@@ -116,6 +120,14 @@ def safe_float(v: Any) -> Optional[float]:
         if f != f:  # NaN
             return None
         return f
+    except Exception:
+        return None
+
+
+def safe_int(v: Any) -> Optional[int]:
+    try:
+        i = int(v)
+        return i
     except Exception:
         return None
 
@@ -550,7 +562,6 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
 
         sources = [{"label": "Supabase", "url": f"{SUPABASE_URL}"}]
 
-        # 1) FAST PATH: schools_by_district view (postcode_district indexed)
         try:
             cols_view = "postcode_district,urn,name,establishment_type,phase,local_authority,town,postcode,status,telephone,website"
             res = (
@@ -564,31 +575,24 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             if not isinstance(rows, list):
                 rows = []
 
-            # Normalize: ensure postcode_district exists even if the view returns nulls
             for r in rows:
                 if isinstance(r, dict):
                     r.setdefault("postcode_district", postcode_district(r.get("postcode", "") or ""))
 
             if rows:
                 out = metric_ok(
-                    f"Schools found for postcode district {district}: {len(rows)} (from Supabase view {SCHOOLS_SUPABASE_VIEW}).",
+                    f"Schools found for postcode district {district}: {len(rows)}.",
                     rows,
                     sources,
                     retrieved,
                     SCHOOLS_CONFIDENCE_VALUE,
                 )
-                out["metrics"] = {"provider": "supabase", "mode": "view", "view": SCHOOLS_SUPABASE_VIEW, "district": district, "limit": SCHOOLS_MAX_RESULTS}
+                out["metrics"] = {"provider": "supabase", "mode": "view", "district": district, "limit": SCHOOLS_MAX_RESULTS}
                 return out
 
-            # Empty from view is possible (coverage), so fall through to fallback table for safety
-        except Exception as e:
-            # If PostgREST can't see the view, it throws PGRST205 ("not in schema cache") etc.
-            view_err = str(e)
-            # We'll keep going into fallback.
-
+        except Exception:
             pass
 
-        # 2) FALLBACK: base table (schools_clean_v2) via ilike(postcode, 'B34%')
         try:
             cols_tbl = "urn,name,postcode,phase,establishment_type,local_authority,town,status,telephone,website"
             res2 = (
@@ -602,42 +606,39 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             if not isinstance(rows2, list):
                 rows2 = []
 
-            # Add derived district so UI + downstream can rely on it
             for r in rows2:
                 if isinstance(r, dict):
                     r["postcode_district"] = postcode_district(r.get("postcode", "") or "")
 
             if rows2:
                 out = metric_ok(
-                    f"Schools found for postcode district {district}: {len(rows2)} (from Supabase table {SCHOOLS_SUPABASE_FALLBACK_TABLE}).",
+                    f"Schools found for postcode district {district}: {len(rows2)}.",
                     rows2,
                     sources,
                     retrieved,
                     SCHOOLS_CONFIDENCE_VALUE,
                 )
-                out["metrics"] = {"provider": "supabase", "mode": "fallback_table", "table": SCHOOLS_SUPABASE_FALLBACK_TABLE, "district": district, "limit": SCHOOLS_MAX_RESULTS}
+                out["metrics"] = {"provider": "supabase", "mode": "fallback_table", "district": district, "limit": SCHOOLS_MAX_RESULTS}
                 return out
 
-            # Truly none found
             out = metric_unavailable(
-                f"No schools returned for postcode district {district} (tried {SCHOOLS_SUPABASE_VIEW} then {SCHOOLS_SUPABASE_FALLBACK_TABLE}).",
+                f"No schools returned for postcode district {district}.",
                 sources,
                 retrieved,
-                extra_metrics={"district": district, "view": SCHOOLS_SUPABASE_VIEW, "fallbackTable": SCHOOLS_SUPABASE_FALLBACK_TABLE},
+                extra_metrics={"district": district},
             )
             return out
 
         except Exception as e2:
             return metric_unavailable(
-                f"Schools Supabase query failed (view + fallback): {str(e2)}",
+                f"Schools Supabase query failed: {str(e2)}",
                 [{"label": "Supabase", "url": "https://supabase.com/"}],
                 retrieved,
-                extra_metrics={"postcode": pc, "district": district, "view": SCHOOLS_SUPABASE_VIEW, "fallbackTable": SCHOOLS_SUPABASE_FALLBACK_TABLE},
+                extra_metrics={"postcode": pc, "district": district},
             )
 
-    # Default: missing provider
     return metric_missing_provider(
-        "Schools provider not configured. Set SCHOOLS_PROVIDER=supabase and (optionally) SCHOOLS_SUPABASE_VIEW=schools_by_district.",
+        "Schools provider not configured. Set SCHOOLS_PROVIDER=supabase.",
         [
             {"label": "Ofsted reports", "url": "https://reports.ofsted.gov.uk/"},
             {"label": "DfE Find and Compare Schools", "url": "https://www.compare-school-performance.service.gov.uk/"},
@@ -704,16 +705,15 @@ def get_broadband_data(postcode: str) -> Dict[str, Any]:
                     rows = []
 
             summary = (
-                f"Broadband records found for {pc}: {len(rows)} (from Supabase table {BROADBAND_SUPABASE_TABLE})."
+                f"Broadband records found for {pc}: {len(rows)}."
                 if rows else
-                f"No broadband records found for {pc} in Supabase table {BROADBAND_SUPABASE_TABLE}."
+                f"No broadband records found for {pc}."
             )
 
             sources = [{"label": "Supabase (broadband table)", "url": f"{SUPABASE_URL}"}]
             out = metric_ok(summary, rows, sources, retrieved, BROADBAND_CONFIDENCE_VALUE if rows else 0.0)
             out["metrics"] = {
                 "provider": "supabase",
-                "table": BROADBAND_SUPABASE_TABLE,
                 "district": district,
                 "limit": BROADBAND_MAX_RESULTS,
             }
@@ -728,7 +728,7 @@ def get_broadband_data(postcode: str) -> Dict[str, Any]:
             )
 
     return metric_missing_provider(
-        "Broadband provider not configured. Set BROADBAND_PROVIDER=supabase and BROADBAND_SUPABASE_TABLE=broadband_by_postcode (or configure a provider).",
+        "Broadband provider not configured. Set BROADBAND_PROVIDER=supabase and BROADBAND_SUPABASE_TABLE=... ",
         [
             {"label": "Ofcom", "url": "https://www.ofcom.org.uk/"},
             {"label": "ThinkBroadband", "url": "https://www.thinkbroadband.com/"},
@@ -739,20 +739,133 @@ def get_broadband_data(postcode: str) -> Dict[str, Any]:
 
 
 # ----------------------------
-# Housing (baseline stub + Land Registry sold comps already elsewhere in your codebase)
+# Housing (SOLD COMPS via Supabase RPC)
 # ----------------------------
-def get_housing_data(postcode: str) -> Dict[str, Any]:
+def _median_int(values: List[int]) -> Optional[int]:
+    if not values:
+        return None
+    vs = sorted([v for v in values if isinstance(v, int)])
+    if not vs:
+        return None
+    mid = len(vs) // 2
+    if len(vs) % 2 == 1:
+        return vs[mid]
+    return int((vs[mid - 1] + vs[mid]) / 2)
+
+
+def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
-    return metric_missing_provider(
-        "Housing market provider not configured. Integrate sales/rents/listings API and return evidence-linked comps.",
-        [
-            {"label": "UK House Price Index (GOV.UK)", "url": "https://www.gov.uk/government/collections/uk-house-price-index-reports"},
-            {"label": "HM Land Registry (open data)", "url": "https://landregistry.data.gov.uk/"},
-        ],
-        retrieved,
-        extra_metrics={"postcode": pc} if pc else {},
-    )
+
+    if not pc:
+        return metric_unavailable(
+            "Housing data not available: no postcode provided.",
+            [{"label": "HM Land Registry (Price Paid)", "url": "https://www.gov.uk/government/collections/price-paid-data"}],
+            retrieved,
+        )
+
+    r_miles = radius_miles if isinstance(radius_miles, (int, float)) and radius_miles > 0 else HOUSING_DEFAULT_RADIUS_MILES
+    lim = limit if isinstance(limit, int) and limit > 0 else HOUSING_DEFAULT_LIMIT
+    lim = max(1, min(lim, HOUSING_MAX_LIMIT))
+    r_miles = max(0.25, min(float(r_miles), 10.0))  # sanity bounds
+
+    sources = [
+        {"label": "HM Land Registry (Price Paid)", "url": "https://www.gov.uk/government/collections/price-paid-data"},
+        {"label": "Supabase (Postgres)", "url": f"{SUPABASE_URL}" if SUPABASE_URL else "https://supabase.com/"},
+    ]
+
+    if HOUSING_PROVIDER != "supabase_rpc":
+        return metric_missing_provider(
+            "Housing provider not configured. Set HOUSING_PROVIDER=supabase_rpc.",
+            sources,
+            retrieved,
+            extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
+        )
+
+    if not supabase:
+        return metric_unavailable(
+            "Housing provider set to supabase_rpc but Supabase is not configured on server.",
+            [{"label": "Supabase", "url": "https://supabase.com/"}],
+            retrieved,
+            extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
+        )
+
+    # RPC contract expected:
+    # housing_comps_v1(postcode text, radius_miles numeric, limit_n int)
+    # returns rows with: date_of_transfer, price, property_type, street, town_city, postcode, miles
+    try:
+        payload = {"postcode": pc, "radius_miles": r_miles, "limit_n": lim}
+        res = supabase.rpc(HOUSING_RPC_NAME, payload).execute()
+        rows = res.data if hasattr(res, "data") else None
+        if not isinstance(rows, list):
+            rows = []
+
+        if not rows:
+            out = metric_unavailable(
+                f"No sold comparables returned within {r_miles} miles for {pc}.",
+                sources,
+                retrieved,
+                extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim, "rpc": HOUSING_RPC_NAME},
+            )
+            return out
+
+        # metrics
+        prices: List[int] = []
+        ptypes: Dict[str, int] = {}
+        miles: List[float] = []
+        dates: List[str] = []
+
+        for r in rows:
+            if isinstance(r, dict):
+                pr = safe_int(r.get("price"))
+                if isinstance(pr, int):
+                    prices.append(pr)
+                pt = (r.get("property_type") or "").strip()
+                if pt:
+                    ptypes[pt] = ptypes.get(pt, 0) + 1
+                mi = safe_float(r.get("miles"))
+                if isinstance(mi, float):
+                    miles.append(mi)
+                dt = (r.get("date_of_transfer") or "").strip()
+                if dt:
+                    dates.append(dt)
+
+        med = _median_int(prices)
+        min_m = min(miles) if miles else None
+        max_m = max(miles) if miles else None
+
+        # compact summary
+        pt_parts = []
+        for k in sorted(ptypes.keys()):
+            pt_parts.append(f"{k}:{ptypes[k]}")
+        pt_str = ", ".join(pt_parts) if pt_parts else "n/a"
+
+        summary = f"{len(rows)} sold comparables within {r_miles} miles. Median price: {med if med is not None else 'n/a'}. Types: {pt_str}."
+        out = metric_ok(summary, rows, sources, retrieved, HOUSING_CONFIDENCE_VALUE)
+        out["metrics"] = {
+            "provider": "supabase_rpc",
+            "rpc": HOUSING_RPC_NAME,
+            "postcode": pc,
+            "radius_miles": r_miles,
+            "limit": lim,
+            "count": len(rows),
+            "median_price": med,
+            "min_miles": min_m,
+            "max_miles": max_m,
+            "property_type_counts": ptypes,
+        }
+        return out
+
+    except Exception as e:
+        # Most common failure: RPC function doesn't exist / not exposed.
+        msg = str(e) or "Unknown error"
+        out = metric_missing_provider(
+            f"Housing RPC not available. Create Supabase function '{HOUSING_RPC_NAME}' then retry. Error: {msg}",
+            sources,
+            retrieved,
+            extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim, "rpc": HOUSING_RPC_NAME},
+        )
+        return out
 
 
 # ----------------------------
@@ -768,6 +881,14 @@ def adapter_schools():
 def adapter_broadband():
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
     return jsonify(get_broadband_data(postcode))
+
+
+@app.route("/adapters/housing/comps", methods=["GET"])
+def adapter_housing_comps():
+    postcode = normalize_postcode(request.args.get("postcode", "") or "")
+    radius_miles = safe_float(request.args.get("radius_miles"))
+    limit = safe_int(request.args.get("limit"))
+    return jsonify(get_housing_data(postcode, radius_miles=radius_miles, limit=limit))
 
 
 # ----------------------------
@@ -839,6 +960,7 @@ def home():
             "POST /market-insights": "{ 'postcode': 'EC3A 5DE' }  // optional: lat/lng",
             "GET /adapters/schools?postcode=EC3A%205DE": "debug schools adapter",
             "GET /adapters/broadband?postcode=EC3A%205DE": "debug broadband adapter",
+            "GET /adapters/housing/comps?postcode=EC3A%205DE&radius_miles=3&limit=20": "debug housing sold comps (RPC)",
         },
         "envHints": {
             "SUPABASE_URL": "required for supabase providers",
@@ -849,6 +971,8 @@ def home():
             "BROADBAND_PROVIDER": "set to 'supabase' to enable",
             "BROADBAND_SUPABASE_TABLE": "e.g. broadband_by_postcode",
             "NSPL": "requires view public.nspl_lookup(pcd_nospace, lat, lng) for postcode->coords",
+            "HOUSING_PROVIDER": "set to 'supabase_rpc' to enable sold comps",
+            "HOUSING_RPC_NAME": "defaults to housing_comps_v1",
         }
     })
 
