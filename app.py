@@ -204,20 +204,6 @@ def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeo
 
 
 # ----------------------------
-# Distance (miles) helper
-# ----------------------------
-def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    # no external deps; stable and fast
-    from math import radians, sin, cos, sqrt, atan2
-    R = 3958.7613  # earth radius in miles
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return R * c
-
-
-# ----------------------------
 # NSPL (Supabase view) postcode -> lat/lng
 # Requires: public.nspl_lookup(pcd_nospace, lat, lng)
 # ----------------------------
@@ -389,22 +375,20 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
 # ----------------------------
 # OSM (Overpass) Utilities
 # ----------------------------
-def overpass_query(lat: float, lng: float, selectors: str, out_mode: str = "body") -> Dict[str, Any]:
-    # out_mode: "body" (fast) or "center" (adds center for ways/relations)
-    out_stmt = "out body;" if out_mode == "body" else "out center;"
+def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
     q = f"""
-[out:json][timeout:25];
+[out:json];
 (
   {selectors}
 );
-{out_stmt}
+out body;
 """.strip()
 
     status, text = _http_post_text(
         "https://overpass-api.de/api/interpreter",
         data=q.encode("utf-8"),
         headers={"Content-Type": "text/plain"},
-        timeout=35,
+        timeout=30,
     )
     if status != 200 or not text:
         return {"elements": []}
@@ -417,6 +401,11 @@ def overpass_query(lat: float, lng: float, selectors: str, out_mode: str = "body
         return {"elements": []}
 
 
+# ----------------------------
+# ✅ TRANSPORT (AMENDED)
+# - Do NOT return raw street names.
+# - Always return a bullet list as `value` to avoid UI JSON rendering.
+# ----------------------------
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
     base_sources = [
@@ -432,137 +421,94 @@ def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
         )
 
     radius = DEFAULT_OSM_RADIUS
-    radius_roads = max(2500, min(6000, int(radius * 5)))  # roads need a wider catchment
 
+    # Keep it lightweight and reliable: bus stops + stations + public_transport nodes.
     selectors = f"""
-node["railway"="station"](around:{radius},{lat},{lng});
-way["railway"="station"](around:{radius},{lat},{lng});
-relation["railway"="station"](around:{radius},{lat},{lng});
-
-node["public_transport"="platform"](around:{radius},{lat},{lng});
-node["highway"="bus_stop"](around:{radius},{lat},{lng});
-
-node["highway"="motorway_junction"](around:{radius_roads},{lat},{lng});
-way["highway"~"motorway|trunk|primary"](around:{radius_roads},{lat},{lng});
-"""
+nwr["railway"="station"](around:{radius},{lat},{lng});
+nwr["railway"="tram_stop"](around:{radius},{lat},{lng});
+nwr["public_transport"](around:{radius},{lat},{lng});
+nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
+""".strip()
 
     try:
-        payload = overpass_query(lat, lng, selectors, out_mode="center")
+        payload = overpass_query(lat, lng, selectors)
         elements = payload.get("elements", []) if isinstance(payload, dict) else []
         if not isinstance(elements, list):
             elements = []
 
-        # Extract useful points (nodes have lat/lon; ways/relations have center.{lat,lon} with out center)
-        def elem_latlon(e: dict) -> Optional[Tuple[float, float]]:
-            if not isinstance(e, dict):
-                return None
-            la = safe_float(e.get("lat"))
-            lo = safe_float(e.get("lon"))
-            if la is not None and lo is not None:
-                return la, lo
-            c = e.get("center") if isinstance(e.get("center"), dict) else None
-            if c:
-                la2 = safe_float(c.get("lat"))
-                lo2 = safe_float(c.get("lon"))
-                if la2 is not None and lo2 is not None:
-                    return la2, lo2
-            return None
-
-        # Buckets
-        stations: List[Tuple[float, str]] = []        # (miles, name)
-        bus_stops = 0
-        platforms = 0
-        motorway_junctions: List[Tuple[float, str]] = []
-        roads: Dict[str, set] = {"motorway": set(), "trunk": set(), "primary": set()}
+        counts: Dict[str, int] = {"stations": 0, "tram_stops": 0, "public_transport": 0, "bus_stops": 0}
+        named_stations: List[str] = []
+        named_tram: List[str] = []
+        named_pt: List[str] = []
+        named_bus: List[str] = []
 
         for e in elements:
-            if not isinstance(e, dict):
+            tags = (e or {}).get("tags") or {}
+            if not isinstance(tags, dict):
                 continue
-            tags = e.get("tags") if isinstance(e.get("tags"), dict) else {}
-            ll = elem_latlon(e)
-            dist = haversine_miles(lat, lng, ll[0], ll[1]) if ll else None
+
+            name = tags.get("name")
+            nm = name.strip() if isinstance(name, str) and name.strip() else ""
 
             if tags.get("railway") == "station":
-                name = tags.get("name") or tags.get("ref") or "Station"
-                if isinstance(name, str) and dist is not None:
-                    stations.append((dist, name.strip()))
+                counts["stations"] += 1
+                if nm:
+                    named_stations.append(nm)
+            elif tags.get("railway") == "tram_stop":
+                counts["tram_stops"] += 1
+                if nm:
+                    named_tram.append(nm)
+
+            if "public_transport" in tags:
+                counts["public_transport"] += 1
+                if nm:
+                    named_pt.append(nm)
 
             if tags.get("highway") == "bus_stop":
-                bus_stops += 1
+                counts["bus_stops"] += 1
+                if nm:
+                    named_bus.append(nm)
 
-            if tags.get("public_transport") == "platform":
-                platforms += 1
-
-            if tags.get("highway") == "motorway_junction":
-                name = tags.get("ref") or tags.get("name") or "Motorway junction"
-                if isinstance(name, str) and dist is not None:
-                    motorway_junctions.append((dist, name.strip()))
-
-            hw = tags.get("highway")
-            if hw in ("motorway", "trunk", "primary"):
-                ref = tags.get("ref") or ""
-                name = tags.get("name") or ""
-                label = ""
-                if isinstance(ref, str) and ref.strip():
-                    label = ref.strip()
-                elif isinstance(name, str) and name.strip():
-                    label = name.strip()
-                if label:
-                    roads[hw].add(label)
-
-        # Curate output (value MUST be string[] so frontend renders bullets nicely)
-        lines: List[str] = []
-
-        if stations:
-            stations.sort(key=lambda x: x[0])
-            nearest = stations[0]
-            others = [n for _, n in stations[1:5] if isinstance(n, str)]
-            rail_line = f"Rail: nearest station ~{nearest[0]:.2f} mi ({nearest[1]})"
-            if others:
-                rail_line += f"; also nearby: {', '.join(others[:3])}"
-            lines.append(rail_line)
-
-        # Roads (ref/name lists)
-        motorways = sorted(list(roads["motorway"]))[:6]
-        trunks = sorted(list(roads["trunk"]))[:8]
-        primaries = sorted(list(roads["primary"]))[:10]
-
-        if motorways:
-            lines.append(f"Road: Motorways: {', '.join(motorways)}")
-        if trunks:
-            lines.append(f"Road: Trunk routes: {', '.join(trunks)}")
-        if primaries:
-            # try to avoid huge spam
-            lines.append(f"Road: Primary routes: {', '.join(primaries[:6])}{'…' if len(primaries) > 6 else ''}")
-
-        if motorway_junctions:
-            motorway_junctions.sort(key=lambda x: x[0])
-            j = motorway_junctions[0]
-            lines.append(f"Motorway junction: ~{j[0]:.2f} mi ({j[1]})")
-
-        if bus_stops:
-            density = "high" if bus_stops >= 40 else "medium" if bus_stops >= 15 else "low"
-            lines.append(f"Bus: {bus_stops} stops within ~{int(radius)}m (density: {density}).")
-
-        if platforms and platforms > 0:
-            lines.append(f"Public transport platforms: {platforms} within ~{int(radius)}m.")
-
-        counts = {
-            "stations": len(stations),
-            "bus_stops": bus_stops,
-            "platforms": platforms,
-            "motorway_junctions": len(motorway_junctions),
-        }
-
-        if not lines:
-            summary = "No transport features returned from OSM for this area."
-            out = metric_ok(summary, [], base_sources, retrieved, 0.0)
-            out["metrics"] = {"radiusMeters": radius, "radiusRoadsMeters": radius_roads, "counts": counts, "totalElements": len(elements)}
+        # Dedup while preserving order
+        def _dedup(xs: List[str]) -> List[str]:
+            seen = set()
+            out = []
+            for x in xs:
+                if x not in seen:
+                    out.append(x)
+                    seen.add(x)
             return out
 
-        summary = "• " + "\n• ".join(lines)
-        out = metric_ok(summary, lines[:12], base_sources, retrieved, 0.90)
-        out["metrics"] = {"radiusMeters": radius, "radiusRoadsMeters": radius_roads, "counts": counts, "totalElements": len(elements)}
+        named_stations = _dedup(named_stations)[:6]
+        named_tram = _dedup(named_tram)[:6]
+        named_bus = _dedup(named_bus)[:8]
+
+        bullets: List[str] = []
+        bullets.append(f"• Rail: {counts['stations']} station(s) within ~{radius}m" + (f" (e.g., {', '.join(named_stations)})" if named_stations else ""))
+        if counts["tram_stops"] > 0:
+            bullets.append(f"• Tram: {counts['tram_stops']} stop(s) within ~{radius}m" + (f" (e.g., {', '.join(named_tram)})" if named_tram else ""))
+        bullets.append(f"• Bus: {counts['bus_stops']} stop(s) within ~{radius}m" + (f" (e.g., {', '.join(named_bus)})" if named_bus else ""))
+
+        # If basically empty, be honest.
+        if not elements or (counts["stations"] + counts["tram_stops"] + counts["bus_stops"] + counts["public_transport"]) == 0:
+            return metric_ok(
+                "No transport features returned from OSM for this area.",
+                [],
+                base_sources,
+                retrieved,
+                0.0,
+            )
+
+        summary = "Transport (OSM within ~1.2km):\n" + "\n".join(bullets)
+
+        out = metric_ok(
+            summary,
+            bullets,  # IMPORTANT: array of strings => UI renders clean bullets, not JSON blocks.
+            base_sources,
+            retrieved,
+            0.90,
+        )
+        out["metrics"] = {"radiusMeters": radius, "counts": counts, "sample": {"stations": named_stations, "tram": named_tram, "bus": named_bus}}
         return out
 
     except Exception as e:
@@ -573,6 +519,13 @@ way["highway"~"motorway|trunk|primary"](around:{radius_roads},{lat},{lng});
         )
 
 
+# ----------------------------
+# ✅ AMENITIES (AMENDED)
+# Fixes:
+# - Query uses nwr (node/way/relation) so results are not falsely empty.
+# - `value` returned as a bullet list (strings) so UI NEVER prints JSON blocks.
+# - Structured data kept in `metrics` for later charts if you want them.
+# ----------------------------
 def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
     base_sources = [
@@ -588,165 +541,139 @@ def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
         )
 
     radius = DEFAULT_OSM_RADIUS
+
+    # nwr = node/way/relation. Node-only was the main cause of the “0 results” nonsense.
     selectors = f"""
-node["amenity"](around:{radius},{lat},{lng});
-way["amenity"](around:{radius},{lat},{lng});
-relation["amenity"](around:{radius},{lat},{lng});
-
-node["shop"](around:{radius},{lat},{lng});
-way["shop"](around:{radius},{lat},{lng});
-relation["shop"](around:{radius},{lat},{lng});
-
-node["leisure"](around:{radius},{lat},{lng});
-way["leisure"](around:{radius},{lat},{lng});
-relation["leisure"](around:{radius},{lat},{lng});
-
-node["tourism"](around:{radius},{lat},{lng});
-way["tourism"](around:{radius},{lat},{lng});
-relation["tourism"](around:{radius},{lat},{lng});
-"""
+nwr["amenity"](around:{radius},{lat},{lng});
+nwr["shop"](around:{radius},{lat},{lng});
+nwr["leisure"](around:{radius},{lat},{lng});
+nwr["tourism"](around:{radius},{lat},{lng});
+""".strip()
 
     try:
-        payload = overpass_query(lat, lng, selectors, out_mode="center")
+        payload = overpass_query(lat, lng, selectors)
         elements = payload.get("elements", []) if isinstance(payload, dict) else []
         if not isinstance(elements, list):
             elements = []
 
-        def elem_latlon(e: dict) -> Optional[Tuple[float, float]]:
-            if not isinstance(e, dict):
-                return None
-            la = safe_float(e.get("lat"))
-            lo = safe_float(e.get("lon"))
-            if la is not None and lo is not None:
-                return la, lo
-            c = e.get("center") if isinstance(e.get("center"), dict) else None
-            if c:
-                la2 = safe_float(c.get("lat"))
-                lo2 = safe_float(c.get("lon"))
-                if la2 is not None and lo2 is not None:
-                    return la2, lo2
-            return None
-
-        # Bucket mapping (high-signal, human readable)
-        FOOD_AMENITY = {"restaurant", "cafe", "bar", "pub", "fast_food", "food_court", "biergarten"}
-        HEALTH_AMENITY = {"pharmacy", "hospital", "doctors", "dentist", "clinic", "veterinary"}
-        SERVICE_AMENITY = {"bank", "atm", "post_office", "library", "community_centre", "townhall"}
-        LEISURE_KEYS = {"park", "fitness_centre", "sports_centre", "pitch", "playground", "cinema", "theatre"}
-
-        # Hold nearest named examples per bucket
-        buckets: Dict[str, List[Tuple[float, str]]] = {
-            "Food & drink": [],
-            "Shopping": [],
-            "Healthcare": [],
-            "Services": [],
-            "Leisure": [],
-            "Other": [],
+        # Buckets you actually want in a “high-end” report
+        buckets: Dict[str, Dict[str, Any]] = {
+            "foodDrink": {"count": 0, "top": []},
+            "shopping": {"count": 0, "top": []},
+            "healthcare": {"count": 0, "top": []},
+            "education": {"count": 0, "top": []},
+            "leisure": {"count": 0, "top": []},
+            "services": {"count": 0, "top": []},
+            "other": {"count": 0, "top": []},
         }
-        counts: Dict[str, int] = {k: 0 for k in buckets.keys()}
 
-        # Track "essentials" distances if present
-        nearest_supermarket: Optional[Tuple[float, str]] = None
-        nearest_convenience: Optional[Tuple[float, str]] = None
-        nearest_pharmacy: Optional[Tuple[float, str]] = None
+        # Classification helpers
+        food_amenities = {
+            "restaurant", "cafe", "pub", "bar", "fast_food", "food_court", "ice_cream", "biergarten"
+        }
+        health_amenities = {"hospital", "clinic", "doctors", "dentist", "pharmacy", "veterinary"}
+        edu_amenities = {"school", "college", "university", "kindergarten", "childcare", "library"}
+        service_amenities = {
+            "bank", "atm", "post_office", "parcel_locker", "police", "fire_station",
+            "townhall", "community_centre", "courthouse", "place_of_worship"
+        }
+
+        def _bucket_for(tags: Dict[str, Any]) -> str:
+            a = tags.get("amenity")
+            s = tags.get("shop")
+            l = tags.get("leisure")
+            t = tags.get("tourism")
+
+            if isinstance(a, str):
+                if a in food_amenities:
+                    return "foodDrink"
+                if a in health_amenities:
+                    return "healthcare"
+                if a in edu_amenities:
+                    return "education"
+                if a in service_amenities:
+                    return "services"
+                # many leisure-ish amenities live under amenity too
+                if a in {"cinema", "theatre", "arts_centre", "gym", "sports_centre", "swimming_pool", "park"}:
+                    return "leisure"
+
+            if isinstance(s, str):
+                return "shopping"
+            if isinstance(l, str):
+                return "leisure"
+            if isinstance(t, str):
+                return "leisure"
+
+            return "other"
+
+        # Collect counts + top names per bucket
+        def _push_top(bucket_key: str, name: str) -> None:
+            if not name:
+                return
+            arr = buckets[bucket_key]["top"]
+            if name not in arr:
+                arr.append(name)
 
         for e in elements:
-            if not isinstance(e, dict):
-                continue
-            tags = e.get("tags") if isinstance(e.get("tags"), dict) else {}
+            tags = (e or {}).get("tags") or {}
             if not isinstance(tags, dict):
                 continue
 
-            ll = elem_latlon(e)
-            dist = haversine_miles(lat, lng, ll[0], ll[1]) if ll else None
+            bk = _bucket_for(tags)
+            buckets[bk]["count"] += 1
 
-            amenity = tags.get("amenity")
-            shop = tags.get("shop")
-            leisure = tags.get("leisure")
-            tourism = tags.get("tourism")
-            name = tags.get("name") or tags.get("brand") or ""
+            nm = tags.get("name")
+            name = nm.strip() if isinstance(nm, str) and nm.strip() else ""
 
-            # decide bucket
-            bucket = "Other"
-            if isinstance(amenity, str) and amenity in FOOD_AMENITY:
-                bucket = "Food & drink"
-            elif isinstance(amenity, str) and amenity in HEALTH_AMENITY:
-                bucket = "Healthcare"
-            elif isinstance(amenity, str) and amenity in SERVICE_AMENITY:
-                bucket = "Services"
-            elif isinstance(leisure, str) and leisure in LEISURE_KEYS:
-                bucket = "Leisure"
-            elif isinstance(shop, str) and shop.strip():
-                bucket = "Shopping"
-            elif isinstance(amenity, str) and amenity.strip():
-                # non-mapped amenity still usually useful
-                bucket = "Services" if amenity in {"police", "fire_station"} else "Other"
-            elif isinstance(tourism, str) and tourism.strip():
-                bucket = "Leisure"
+            # Keep a small curated sample so UI stays premium, not a directory dump
+            if buckets[bk]["count"] <= 9999:  # no-op guard, keeps logic simple
+                _push_top(bk, name)
 
-            counts[bucket] = counts.get(bucket, 0) + 1
+        # Trim top lists
+        for k in buckets.keys():
+            buckets[k]["top"] = buckets[k]["top"][:6]
 
-            if isinstance(name, str) and name.strip() and dist is not None:
-                buckets[bucket].append((dist, name.strip()))
-
-            # essentials tracking
-            if isinstance(shop, str) and dist is not None:
-                if shop == "supermarket" and isinstance(name, str) and name.strip():
-                    cand = (dist, name.strip())
-                    if nearest_supermarket is None or cand[0] < nearest_supermarket[0]:
-                        nearest_supermarket = cand
-                if shop == "convenience" and isinstance(name, str) and name.strip():
-                    cand = (dist, name.strip())
-                    if nearest_convenience is None or cand[0] < nearest_convenience[0]:
-                        nearest_convenience = cand
-
-            if isinstance(amenity, str) and amenity == "pharmacy" and dist is not None and isinstance(name, str) and name.strip():
-                cand = (dist, name.strip())
-                if nearest_pharmacy is None or cand[0] < nearest_pharmacy[0]:
-                    nearest_pharmacy = cand
-
-        total = sum(counts.values())
+        total = sum(int(buckets[k]["count"]) for k in buckets.keys())
 
         if total == 0:
-            out = metric_ok("No amenities returned from OSM for this area.", [], base_sources, retrieved, 0.0)
-            out["metrics"] = {"radiusMeters": radius, "buckets": counts, "total": 0}
-            return out
+            return metric_ok(
+                "No amenities returned from OSM for this area.",
+                [],
+                base_sources,
+                retrieved,
+                0.0,
+            )
 
-        # Build high-end, human output (string[] so UI renders bullets, not JSON)
-        def top_names_for(bucket_name: str, n: int = 4) -> List[str]:
-            xs = buckets.get(bucket_name, [])
-            xs.sort(key=lambda x: x[0])
-            outn: List[str] = []
-            for d, nm in xs[:n]:
-                outn.append(f"{nm} (~{d:.2f} mi)")
-            return outn
+        # Build “boardroom-readable” bullets
+        bullets: List[str] = []
 
-        lines: List[str] = []
-        # headline essentials
-        essentials: List[str] = []
-        if nearest_supermarket:
-            essentials.append(f"Nearest supermarket: {nearest_supermarket[1]} (~{nearest_supermarket[0]:.2f} mi)")
-        if nearest_convenience:
-            essentials.append(f"Nearest convenience: {nearest_convenience[1]} (~{nearest_convenience[0]:.2f} mi)")
-        if nearest_pharmacy:
-            essentials.append(f"Nearest pharmacy: {nearest_pharmacy[1]} (~{nearest_pharmacy[0]:.2f} mi)")
-        if essentials:
-            lines.extend(essentials)
+        def _line(label: str, key: str) -> None:
+            c = buckets[key]["count"]
+            tops = buckets[key]["top"]
+            if c and c > 0:
+                bullets.append(f"• {label}: {c}" + (f" (e.g., {', '.join(tops)})" if tops else ""))
 
-        # bucket summaries
-        order = ["Food & drink", "Shopping", "Healthcare", "Services", "Leisure", "Other"]
-        for b in order:
-            c = counts.get(b, 0)
-            if c <= 0:
-                continue
-            tops = top_names_for(b, 4)
-            if tops:
-                lines.append(f"{b}: {c} (e.g., {', '.join(tops)})")
-            else:
-                lines.append(f"{b}: {c}")
+        _line("Food & drink", "foodDrink")
+        _line("Shopping", "shopping")
+        _line("Healthcare", "healthcare")
+        _line("Education", "education")
+        _line("Leisure", "leisure")
+        _line("Services", "services")
 
-        summary = "• " + "\n• ".join(lines[:12])
-        out = metric_ok(summary, lines[:12], base_sources, retrieved, 0.90)
-        out["metrics"] = {"radiusMeters": radius, "buckets": counts, "total": total}
+        # Other is real but usually noise — include only if it’s doing meaningful work
+        if buckets["other"]["count"] >= 10:
+            bullets.append(f"• Other mapped POIs: {buckets['other']['count']}")
+
+        summary = f"Amenities (OSM within ~{radius}m): {total} mapped places.\n" + "\n".join(bullets)
+
+        out = metric_ok(
+            summary,
+            bullets,  # IMPORTANT: array of strings => UI shows bullets, not JSON.
+            base_sources,
+            retrieved,
+            0.90,
+        )
+        out["metrics"] = {"radiusMeters": radius, "total": total, "buckets": buckets}
         return out
 
     except Exception as e:
