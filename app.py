@@ -74,11 +74,11 @@ NOMIS_DATASET_ID = os.getenv("NOMIS_DATASET_ID", "NM_2023_1").strip()
 NOMIS_DEFAULT_GEOGRAPHY = os.getenv("NOMIS_DEFAULT_GEOGRAPHY", "").strip()
 NOMIS_TIMEOUT = int(os.getenv("NOMIS_TIMEOUT", "20"))
 
-# TS003 preset from your example URL
+# TS003 preset (NO ELLIPSIS - must be explicit)
 NOMIS_TS003_DIM = os.getenv("NOMIS_TS003_DIM", "c2021_hhcomp_15").strip()
 NOMIS_TS003_CATS = os.getenv(
     "NOMIS_TS003_CATS",
-    "1001,1,2,1002,1003,4...6,1004,7...9,1005,10,11,1006,12,1007,13,14"
+    "1001,1,2,1002,1003,4,5,6,1004,7,8,9,1005,10,11,1006,12,1007,13,14"
 ).strip()
 
 # TS044 / TS054 are configurable.
@@ -396,6 +396,15 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
             extra_metrics={"label": label, "dimension": dimension, "categories": categories, "geography": geography},
         )
 
+    # Guard: Nomis URLs sometimes get copied with "..." (ellipsis). That WILL break.
+    if "..." in categories or "…" in categories:
+        return metric_unavailable(
+            f"{label} categories contain an ellipsis (truncated copy). Use full category list (no ...).",
+            sources,
+            retrieved,
+            extra_metrics={"dimension": dimension, "categories": categories},
+        )
+
     try:
         params = {
             "date": "latest",
@@ -702,10 +711,19 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
         named_bus = _dedup(named_bus)[:8]
 
         bullets: List[str] = []
-        bullets.append(f"• Rail: {counts['stations']} station(s) within ~{radius}m" + (f" (e.g., {', '.join(named_stations)})" if named_stations else ""))
+        bullets.append(
+            f"• Rail: {counts['stations']} station(s) within ~{radius}m"
+            + (f" (e.g., {', '.join(named_stations)})" if named_stations else "")
+        )
         if counts["tram_stops"] > 0:
-            bullets.append(f"• Tram: {counts['tram_stops']} stop(s) within ~{radius}m" + (f" (e.g., {', '.join(named_tram)})" if named_tram else ""))
-        bullets.append(f"• Bus: {counts['bus_stops']} stop(s) within ~{radius}m" + (f" (e.g., {', '.join(named_bus)})" if named_bus else ""))
+            bullets.append(
+                f"• Tram: {counts['tram_stops']} stop(s) within ~{radius}m"
+                + (f" (e.g., {', '.join(named_tram)})" if named_tram else "")
+            )
+        bullets.append(
+            f"• Bus: {counts['bus_stops']} stop(s) within ~{radius}m"
+            + (f" (e.g., {', '.join(named_bus)})" if named_bus else "")
+        )
 
         if not elements or (counts["stations"] + counts["tram_stops"] + counts["bus_stops"] + counts["public_transport"]) == 0:
             return metric_ok("No transport features returned from OSM for this area.", [], base_sources, retrieved, 0.0)
@@ -713,7 +731,11 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
         summary = "Transport (OSM within ~1.2km):\n" + "\n".join(bullets)
 
         out = metric_ok(summary, bullets, base_sources, retrieved, 0.90)
-        out["metrics"] = {"radiusMeters": radius, "counts": counts, "sample": {"stations": named_stations, "tram": named_tram, "bus": named_bus}}
+        out["metrics"] = {
+            "radiusMeters": radius,
+            "counts": counts,
+            "sample": {"stations": named_stations, "tram": named_tram, "bus": named_bus},
+        }
         return out
 
     except Exception as e:
@@ -768,7 +790,10 @@ nwr["tourism"](around:{radius},{lat},{lng});
         food_amenities = {"restaurant", "cafe", "pub", "bar", "fast_food", "food_court", "ice_cream", "biergarten"}
         health_amenities = {"hospital", "clinic", "doctors", "dentist", "pharmacy", "veterinary"}
         edu_amenities = {"school", "college", "university", "kindergarten", "childcare", "library"}
-        service_amenities = {"bank", "atm", "post_office", "parcel_locker", "police", "fire_station", "townhall", "community_centre", "courthouse", "place_of_worship"}
+        service_amenities = {
+            "bank", "atm", "post_office", "parcel_locker", "police", "fire_station",
+            "townhall", "community_centre", "courthouse", "place_of_worship"
+        }
 
         def _bucket_for(tags: Dict[str, Any]) -> str:
             a = tags.get("amenity")
