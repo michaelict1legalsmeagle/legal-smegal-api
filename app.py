@@ -69,6 +69,8 @@ BROADBAND_CONFIDENCE_VALUE = float(os.getenv("BROADBAND_CONFIDENCE_VALUE", "0.90
 # ----------------------------
 NOMIS_ENABLED = (os.getenv("NOMIS_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"})
 NOMIS_DATASET_ID = os.getenv("NOMIS_DATASET_ID", "NM_2023_1").strip()
+
+# Keep as a fallback only (debug / emergency). UK-wide uses postcode->LSOA.
 NOMIS_DEFAULT_GEOGRAPHY = os.getenv("NOMIS_DEFAULT_GEOGRAPHY", "").strip()
 NOMIS_TIMEOUT = int(os.getenv("NOMIS_TIMEOUT", "20"))
 
@@ -76,16 +78,23 @@ NOMIS_TIMEOUT = int(os.getenv("NOMIS_TIMEOUT", "20"))
 NOMIS_TS003_DIM = os.getenv("NOMIS_TS003_DIM", "c2021_hhcomp_15").strip()
 NOMIS_TS003_CATS = os.getenv(
     "NOMIS_TS003_CATS",
-    "1001,1,2,1002,1003,4,5,6,1004,7,8,9,1005,10,11,1006,12,1007,13,14"
+    "1001,1,2,1002,1003,4...6,1004,7...9,1005,10,11,1006,12,1007,13,14"
 ).strip()
 
-# TS044 / TS054 are configurable because you haven’t pasted their copy-address URLs here.
-# You set these to EXACTLY what appears in your copy-address URL.
+# TS044 / TS054 are configurable.
+# Set these to EXACTLY what appears in your copy-address URL (dimension name + category list).
 NOMIS_TS044_DIM = os.getenv("NOMIS_TS044_DIM", "").strip()
 NOMIS_TS044_CATS = os.getenv("NOMIS_TS044_CATS", "").strip()
 
 NOMIS_TS054_DIM = os.getenv("NOMIS_TS054_DIM", "").strip()
 NOMIS_TS054_CATS = os.getenv("NOMIS_TS054_CATS", "").strip()
+
+# ----------------------------
+# Postcode -> LSOA (GSS) via postcodes.io (UK-wide)
+# ----------------------------
+POSTCODES_IO_TIMEOUT = int(os.getenv("POSTCODES_IO_TIMEOUT", "10"))
+POSTCODES_IO_CACHE_TTL_SECONDS = int(os.getenv("POSTCODES_IO_CACHE_TTL_SECONDS", "2592000"))  # 30 days
+_GEO_CACHE: Dict[str, Dict[str, Any]] = {}
 
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -135,6 +144,20 @@ def cache_get(key: str) -> Optional[Dict[str, Any]]:
 
 def cache_set(key: str, value: Dict[str, Any]) -> None:
     _CACHE[key] = {"_cached_at": time.time(), "value": value}
+
+
+def geo_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    hit = _GEO_CACHE.get(key)
+    if not hit:
+        return None
+    if time.time() - hit.get("_cached_at", 0) > POSTCODES_IO_CACHE_TTL_SECONDS:
+        _GEO_CACHE.pop(key, None)
+        return None
+    return hit.get("value")
+
+
+def geo_cache_set(key: str, value: Dict[str, Any]) -> None:
+    _GEO_CACHE[key] = {"_cached_at": time.time(), "value": value}
 
 
 def safe_float(v: Any) -> Optional[float]:
@@ -233,6 +256,63 @@ def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeo
     return r.status_code, r.text or ""
 
 
+def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    """
+    Returns (lsoa_gss, meta)
+    lsoa_gss looks like 'E0100....' (England/Wales), 'S0100....' (Scotland), etc.
+    """
+    retrieved = now_iso()
+    pc = normalize_postcode(postcode)
+    pc_key = normalize_postcode_nospace(pc)
+
+    meta = {
+        "provider": "postcodes.io",
+        "retrievedAtISO": retrieved,
+        "postcode": pc,
+        "sources": [{"label": "postcodes.io", "url": "https://postcodes.io/"}],
+        "notes": "",
+        "cache": {"hit": False, "ttlSeconds": POSTCODES_IO_CACHE_TTL_SECONDS},
+    }
+
+    if not pc_key:
+        meta["notes"] = "No postcode provided."
+        return None, meta
+
+    cache_key = f"lsoa_gss::{pc_key}"
+    cached = geo_cache_get(cache_key)
+    if cached and isinstance(cached.get("lsoa_gss"), str) and cached["lsoa_gss"].strip():
+        meta["cache"]["hit"] = True
+        meta["notes"] = "Resolved from geo cache."
+        return cached["lsoa_gss"].strip(), meta
+
+    url = f"https://api.postcodes.io/postcodes/{pc_key}"
+    try:
+        status, payload = _http_get_json(url, timeout=POSTCODES_IO_TIMEOUT)
+        if status != 200 or not isinstance(payload, dict):
+            meta["notes"] = f"postcodes.io returned HTTP {status}"
+            return None, meta
+
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else None
+        if not isinstance(result, dict):
+            meta["notes"] = "postcodes.io returned no result object."
+            return None, meta
+
+        codes = result.get("codes") if isinstance(result.get("codes"), dict) else {}
+        lsoa_gss = codes.get("lsoa")
+        lsoa_gss = lsoa_gss.strip() if isinstance(lsoa_gss, str) and lsoa_gss.strip() else None
+        if not lsoa_gss:
+            meta["notes"] = "postcodes.io result missing codes.lsoa (GSS)."
+            return None, meta
+
+        geo_cache_set(cache_key, {"lsoa_gss": lsoa_gss})
+        meta["notes"] = "Resolved LSOA GSS from postcodes.io."
+        return lsoa_gss, meta
+
+    except Exception as e:
+        meta["notes"] = f"postcodes.io exception: {str(e)}"
+        return None, meta
+
+
 # ----------------------------
 # Nomis (JSON-stat) — UK-wide census tables
 # ----------------------------
@@ -303,7 +383,7 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
 
     if not geography:
         return metric_unavailable(
-            "Nomis requires a geography id (e.g. 633348835). Provide 'nomisGeography' or set NOMIS_DEFAULT_GEOGRAPHY.",
+            "Nomis requires a geography id. Provide a postcode (preferred) or set NOMIS_DEFAULT_GEOGRAPHY for fallback.",
             sources,
             retrieved,
         )
@@ -314,15 +394,6 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
             sources,
             retrieved,
             extra_metrics={"label": label, "dimension": dimension, "categories": categories, "geography": geography},
-        )
-
-    # Guard: Nomis URLs sometimes get copied with "..." (ellipsis). That WILL break.
-    if "..." in categories or "…" in categories:
-        return metric_unavailable(
-            f"{label} categories contain an ellipsis (truncated copy). Use full category list (no ...).",
-            sources,
-            retrieved,
-            extra_metrics={"dimension": dimension, "categories": categories},
         )
 
     try:
@@ -1092,6 +1163,18 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 # ----------------------------
 # Route: Adapter endpoints
 # ----------------------------
+@app.route("/adapters/geo", methods=["GET"])
+def adapter_geo():
+    postcode = normalize_postcode(request.args.get("postcode", "") or "")
+    lsoa_gss, meta = resolve_lsoa_gss_from_postcode(postcode)
+    return jsonify({
+        "status": "ok" if lsoa_gss else "unavailable",
+        "postcode": postcode,
+        "lsoa_gss": lsoa_gss,
+        "meta": meta,
+    })
+
+
 @app.route("/adapters/schools", methods=["GET"])
 def adapter_schools():
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
@@ -1115,7 +1198,16 @@ def adapter_housing_comps():
 @app.route("/adapters/nomis", methods=["GET"])
 def adapter_nomis():
     table = (request.args.get("table", "") or "").strip().lower()
-    geography = (request.args.get("geography", "") or "").strip() or NOMIS_DEFAULT_GEOGRAPHY
+    postcode = normalize_postcode(request.args.get("postcode", "") or "")
+    geography = (request.args.get("geography", "") or "").strip()
+
+    # Prefer UK-wide: postcode -> LSOA(GSS). Allow manual geography override for debugging.
+    if not geography and postcode:
+        lsoa_gss, _meta = resolve_lsoa_gss_from_postcode(postcode)
+        geography = lsoa_gss or ""
+
+    if not geography:
+        geography = NOMIS_DEFAULT_GEOGRAPHY
 
     if table == "ts003":
         return jsonify(get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, geography))
@@ -1124,7 +1216,11 @@ def adapter_nomis():
     if table == "ts054":
         return jsonify(get_nomis_table("Tenure (TS054)", NOMIS_TS054_DIM, NOMIS_TS054_CATS, geography))
 
-    return jsonify(metric_unavailable("Unknown Nomis table. Use table=ts003|ts044|ts054", [{"label": "Nomis API", "url": "https://www.nomisweb.co.uk/api/v01/help"}], now_iso()))
+    return jsonify(metric_unavailable(
+        "Unknown Nomis table. Use table=ts003|ts044|ts054",
+        [{"label": "Nomis API", "url": "https://www.nomisweb.co.uk/api/v01/help"}],
+        now_iso()
+    ))
 
 
 # ----------------------------
@@ -1137,13 +1233,12 @@ def market_insights():
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
-    nomis_geo = ""
-    if isinstance(data, dict):
-        ng = data.get("nomisGeography")
-        if isinstance(ng, str):
-            nomis_geo = ng.strip()
-    if not nomis_geo:
-        nomis_geo = NOMIS_DEFAULT_GEOGRAPHY
+    # UK-wide Nomis geography derived from postcode (LSOA GSS)
+    lsoa_gss = ""
+    lsoa_meta = None
+    if postcode:
+        lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
+    nomis_geo = lsoa_gss or NOMIS_DEFAULT_GEOGRAPHY
 
     cache_key = f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}" if postcode else "market-insights::no-postcode"
     cached = cache_get(cache_key)
@@ -1178,7 +1273,13 @@ def market_insights():
 
         results = {
             "postcode": postcode,
-            "location": {"lat": lat, "lng": lng, "geocodeMeta": geo_meta},
+            "location": {
+                "lat": lat,
+                "lng": lng,
+                "geocodeMeta": geo_meta,
+                "lsoaMeta": lsoa_meta,
+                "nomisGeography": nomis_geo,
+            },
             "localAreaAnalysis": local_area,
             "comparableProperties": {
                 "forSale": [],
@@ -1206,13 +1307,14 @@ def home():
         "status": "active",
         "supabaseEnabled": bool(supabase),
         "routes": {
-            "POST /market-insights": "{ 'postcode': 'EC3A 5DE', 'nomisGeography': '633348835' }  // optional: lat/lng",
+            "POST /market-insights": "{ 'postcode': 'EC3A 5DE' }  // optional: lat/lng",
+            "GET /adapters/geo?postcode=B1%201AA": "debug postcode -> LSOA(GSS)",
+            "GET /adapters/nomis?table=ts003&postcode=B1%201AA": "Nomis TS003 UK-wide via postcode",
+            "GET /adapters/nomis?table=ts054&postcode=B1%201AA": "Nomis TS054 (requires env dims/cats)",
+            "GET /adapters/nomis?table=ts044&postcode=B1%201AA": "Nomis TS044 (requires env dims/cats)",
             "GET /adapters/schools?postcode=EC3A%205DE": "debug schools adapter",
             "GET /adapters/broadband?postcode=EC3A%205DE": "debug broadband adapter",
             "GET /adapters/housing/comps?postcode=EC3A%205DE&radius_miles=3&limit=20": "debug housing sold comps (RPC)",
-            "GET /adapters/nomis?table=ts003&geography=633348835": "Nomis TS003",
-            "GET /adapters/nomis?table=ts054&geography=633348835": "Nomis TS054 (requires env dims/cats)",
-            "GET /adapters/nomis?table=ts044&geography=633348835": "Nomis TS044 (requires env dims/cats)",
         },
         "envHints": {
             "SUPABASE_URL": "required for supabase providers",
@@ -1224,7 +1326,7 @@ def home():
             "HOUSING_PROVIDER": "set to 'supabase_rpc' to enable sold comps",
             "HOUSING_RPC_NAME": "defaults to 'housing_comps_v1'",
             "NOMIS_ENABLED": "1 to enable",
-            "NOMIS_DEFAULT_GEOGRAPHY": "e.g. 633348835 for testing",
+            "NOMIS_DEFAULT_GEOGRAPHY": "fallback only (optional)",
             "NOMIS_TS054_DIM/NOMIS_TS054_CATS": "paste from TS054 copy-address URL",
             "NOMIS_TS044_DIM/NOMIS_TS044_CATS": "paste from TS044 copy-address URL",
         }
