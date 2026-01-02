@@ -64,6 +64,29 @@ BROADBAND_SUPABASE_TABLE = os.getenv("BROADBAND_SUPABASE_TABLE", "").strip()
 BROADBAND_MAX_RESULTS = int(os.getenv("BROADBAND_MAX_RESULTS", "5"))
 BROADBAND_CONFIDENCE_VALUE = float(os.getenv("BROADBAND_CONFIDENCE_VALUE", "0.90"))
 
+# ----------------------------
+# Nomis (Census 2021) API
+# ----------------------------
+NOMIS_ENABLED = (os.getenv("NOMIS_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"})
+NOMIS_DATASET_ID = os.getenv("NOMIS_DATASET_ID", "NM_2023_1").strip()
+NOMIS_DEFAULT_GEOGRAPHY = os.getenv("NOMIS_DEFAULT_GEOGRAPHY", "").strip()
+NOMIS_TIMEOUT = int(os.getenv("NOMIS_TIMEOUT", "20"))
+
+# TS003 preset from your example URL
+NOMIS_TS003_DIM = os.getenv("NOMIS_TS003_DIM", "c2021_hhcomp_15").strip()
+NOMIS_TS003_CATS = os.getenv(
+    "NOMIS_TS003_CATS",
+    "1001,1,2,1002,1003,4,5,6,1004,7,8,9,1005,10,11,1006,12,1007,13,14"
+).strip()
+
+# TS044 / TS054 are configurable because you haven’t pasted their copy-address URLs here.
+# You set these to EXACTLY what appears in your copy-address URL.
+NOMIS_TS044_DIM = os.getenv("NOMIS_TS044_DIM", "").strip()
+NOMIS_TS044_CATS = os.getenv("NOMIS_TS044_CATS", "").strip()
+
+NOMIS_TS054_DIM = os.getenv("NOMIS_TS054_DIM", "").strip()
+NOMIS_TS054_CATS = os.getenv("NOMIS_TS054_CATS", "").strip()
+
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -195,12 +218,141 @@ def _http_get_json(url: str, params: Optional[dict] = None, headers: Optional[di
         return r.status_code, None
 
 
+def _http_get_json_raw(url: str, params: Optional[dict] = None, timeout: int = 20) -> Any:
+    h = {"User-Agent": HTTP_USER_AGENT}
+    r = requests.get(url, params=params or {}, headers=h, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
 def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeout: int = 30) -> Tuple[int, str]:
     h = {"User-Agent": HTTP_USER_AGENT}
     if headers:
         h.update(headers)
     r = requests.post(url, data=data, headers=h, timeout=timeout)
     return r.status_code, r.text or ""
+
+
+# ----------------------------
+# Nomis (JSON-stat) — UK-wide census tables
+# ----------------------------
+def fetch_nomis_jsonstat(dataset_id: str, params: dict) -> dict:
+    base = f"https://www.nomisweb.co.uk/api/v01/dataset/{dataset_id}.jsonstat.json"
+    payload = _http_get_json_raw(base, params=params, timeout=NOMIS_TIMEOUT)
+    if not isinstance(payload, dict) or "dataset" not in payload:
+        raise ValueError("Nomis returned unexpected payload (missing 'dataset').")
+    return payload
+
+
+def parse_jsonstat_single_dimension(jsonstat: dict) -> Dict[str, Any]:
+    ds = jsonstat.get("dataset") or {}
+    dim = ds.get("dimension") or {}
+    dim_ids = dim.get("id") or []
+    if not isinstance(dim_ids, list):
+        dim_ids = []
+
+    exclude = {"date", "time", "geography", "measures"}
+    candidate_dims = [d for d in dim_ids if isinstance(d, str) and d.lower() not in exclude]
+
+    main_dim = candidate_dims[0] if candidate_dims else None
+    if not main_dim:
+        for d in dim_ids:
+            cat = (((dim.get(d) or {}).get("category")) or {})
+            if isinstance(cat.get("index"), (list, dict)):
+                main_dim = d
+                break
+
+    if not main_dim:
+        raise ValueError("Could not infer main dimension from JSON-stat.")
+
+    cat = ((dim.get(main_dim) or {}).get("category")) or {}
+    labels = cat.get("label") or {}
+    index = cat.get("index")
+
+    if isinstance(index, list):
+        codes = index
+    elif isinstance(index, dict):
+        codes = [k for k, _ in sorted(index.items(), key=lambda kv: kv[1])]
+    else:
+        codes = list(labels.keys()) if isinstance(labels, dict) else []
+
+    values = ds.get("value")
+    if not isinstance(values, list):
+        raise ValueError("JSON-stat 'value' is not a list (unexpected for this query shape).")
+
+    items = []
+    total_val = 0
+    for i, code in enumerate(codes):
+        lab = labels.get(code) if isinstance(labels, dict) else str(code)
+        v = values[i] if i < len(values) else None
+        iv = safe_int(v)
+        if iv is None:
+            iv = 0
+        items.append({"code": str(code), "label": str(lab) if lab is not None else str(code), "value": iv})
+        total_val += iv
+
+    return {"items": items, "total": total_val, "dimensionId": main_dim}
+
+
+def get_nomis_table(label: str, dimension: str, categories: str, geography: str) -> Dict[str, Any]:
+    retrieved = now_iso()
+    sources = [{"label": "Nomis API (ONS)", "url": "https://www.nomisweb.co.uk/api/v01/help"}]
+
+    if not NOMIS_ENABLED:
+        return metric_missing_provider("Nomis disabled. Set NOMIS_ENABLED=1.", sources, retrieved)
+
+    if not geography:
+        return metric_unavailable(
+            "Nomis requires a geography id (e.g. 633348835). Provide 'nomisGeography' or set NOMIS_DEFAULT_GEOGRAPHY.",
+            sources,
+            retrieved,
+        )
+
+    if not dimension or not categories:
+        return metric_missing_provider(
+            f"{label} not configured. Set env for its dimension/categories (e.g. NOMIS_TS054_DIM and NOMIS_TS054_CATS).",
+            sources,
+            retrieved,
+            extra_metrics={"label": label, "dimension": dimension, "categories": categories, "geography": geography},
+        )
+
+    # Guard: Nomis URLs sometimes get copied with "..." (ellipsis). That WILL break.
+    if "..." in categories or "…" in categories:
+        return metric_unavailable(
+            f"{label} categories contain an ellipsis (truncated copy). Use full category list (no ...).",
+            sources,
+            retrieved,
+            extra_metrics={"dimension": dimension, "categories": categories},
+        )
+
+    try:
+        params = {
+            "date": "latest",
+            "geography": geography,
+            dimension: categories,
+            "measures": "20100",
+        }
+        js = fetch_nomis_jsonstat(NOMIS_DATASET_ID, params)
+        parsed = parse_jsonstat_single_dimension(js)
+
+        bullets = [f"• {it['label']}: {it['value']}" for it in parsed["items"]]
+        summary = f"{label} (Nomis) — total households: {parsed['total']}"
+
+        out = metric_ok(summary, bullets, sources, retrieved, 0.92)
+        out["metrics"] = {
+            "provider": "nomis",
+            "dataset": NOMIS_DATASET_ID,
+            "label": label,
+            "geography": geography,
+            "dimensionId": parsed.get("dimensionId"),
+            "total": parsed.get("total"),
+            "items": parsed.get("items"),
+            "params": params,
+        }
+        return out
+
+    except Exception as e:
+        return metric_unavailable(f"{label} fetch/parse failed: {str(e)}", sources, retrieved)
 
 
 # ----------------------------
@@ -402,9 +554,7 @@ out body;
 
 
 # ----------------------------
-# ✅ TRANSPORT (AMENDED)
-# - Do NOT return raw street names.
-# - Always return a bullet list as `value` to avoid UI JSON rendering.
+# ✅ TRANSPORT
 # ----------------------------
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
@@ -421,8 +571,6 @@ def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
         )
 
     radius = DEFAULT_OSM_RADIUS
-
-    # Keep it lightweight and reliable: bus stops + stations + public_transport nodes.
     selectors = f"""
 nwr["railway"="station"](around:{radius},{lat},{lng});
 nwr["railway"="tram_stop"](around:{radius},{lat},{lng});
@@ -469,7 +617,6 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
                 if nm:
                     named_bus.append(nm)
 
-        # Dedup while preserving order
         def _dedup(xs: List[str]) -> List[str]:
             seen = set()
             out = []
@@ -489,25 +636,12 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
             bullets.append(f"• Tram: {counts['tram_stops']} stop(s) within ~{radius}m" + (f" (e.g., {', '.join(named_tram)})" if named_tram else ""))
         bullets.append(f"• Bus: {counts['bus_stops']} stop(s) within ~{radius}m" + (f" (e.g., {', '.join(named_bus)})" if named_bus else ""))
 
-        # If basically empty, be honest.
         if not elements or (counts["stations"] + counts["tram_stops"] + counts["bus_stops"] + counts["public_transport"]) == 0:
-            return metric_ok(
-                "No transport features returned from OSM for this area.",
-                [],
-                base_sources,
-                retrieved,
-                0.0,
-            )
+            return metric_ok("No transport features returned from OSM for this area.", [], base_sources, retrieved, 0.0)
 
         summary = "Transport (OSM within ~1.2km):\n" + "\n".join(bullets)
 
-        out = metric_ok(
-            summary,
-            bullets,  # IMPORTANT: array of strings => UI renders clean bullets, not JSON blocks.
-            base_sources,
-            retrieved,
-            0.90,
-        )
+        out = metric_ok(summary, bullets, base_sources, retrieved, 0.90)
         out["metrics"] = {"radiusMeters": radius, "counts": counts, "sample": {"stations": named_stations, "tram": named_tram, "bus": named_bus}}
         return out
 
@@ -520,11 +654,7 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
 
 
 # ----------------------------
-# ✅ AMENITIES (AMENDED)
-# Fixes:
-# - Query uses nwr (node/way/relation) so results are not falsely empty.
-# - `value` returned as a bullet list (strings) so UI NEVER prints JSON blocks.
-# - Structured data kept in `metrics` for later charts if you want them.
+# ✅ AMENITIES
 # ----------------------------
 def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
@@ -541,8 +671,6 @@ def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
         )
 
     radius = DEFAULT_OSM_RADIUS
-
-    # nwr = node/way/relation. Node-only was the main cause of the “0 results” nonsense.
     selectors = f"""
 nwr["amenity"](around:{radius},{lat},{lng});
 nwr["shop"](around:{radius},{lat},{lng});
@@ -556,7 +684,6 @@ nwr["tourism"](around:{radius},{lat},{lng});
         if not isinstance(elements, list):
             elements = []
 
-        # Buckets you actually want in a “high-end” report
         buckets: Dict[str, Dict[str, Any]] = {
             "foodDrink": {"count": 0, "top": []},
             "shopping": {"count": 0, "top": []},
@@ -567,16 +694,10 @@ nwr["tourism"](around:{radius},{lat},{lng});
             "other": {"count": 0, "top": []},
         }
 
-        # Classification helpers
-        food_amenities = {
-            "restaurant", "cafe", "pub", "bar", "fast_food", "food_court", "ice_cream", "biergarten"
-        }
+        food_amenities = {"restaurant", "cafe", "pub", "bar", "fast_food", "food_court", "ice_cream", "biergarten"}
         health_amenities = {"hospital", "clinic", "doctors", "dentist", "pharmacy", "veterinary"}
         edu_amenities = {"school", "college", "university", "kindergarten", "childcare", "library"}
-        service_amenities = {
-            "bank", "atm", "post_office", "parcel_locker", "police", "fire_station",
-            "townhall", "community_centre", "courthouse", "place_of_worship"
-        }
+        service_amenities = {"bank", "atm", "post_office", "parcel_locker", "police", "fire_station", "townhall", "community_centre", "courthouse", "place_of_worship"}
 
         def _bucket_for(tags: Dict[str, Any]) -> str:
             a = tags.get("amenity")
@@ -593,20 +714,16 @@ nwr["tourism"](around:{radius},{lat},{lng});
                     return "education"
                 if a in service_amenities:
                     return "services"
-                # many leisure-ish amenities live under amenity too
                 if a in {"cinema", "theatre", "arts_centre", "gym", "sports_centre", "swimming_pool", "park"}:
                     return "leisure"
 
             if isinstance(s, str):
                 return "shopping"
-            if isinstance(l, str):
-                return "leisure"
-            if isinstance(t, str):
+            if isinstance(l, str) or isinstance(t, str):
                 return "leisure"
 
             return "other"
 
-        # Collect counts + top names per bucket
         def _push_top(bucket_key: str, name: str) -> None:
             if not name:
                 return
@@ -624,27 +741,15 @@ nwr["tourism"](around:{radius},{lat},{lng});
 
             nm = tags.get("name")
             name = nm.strip() if isinstance(nm, str) and nm.strip() else ""
+            _push_top(bk, name)
 
-            # Keep a small curated sample so UI stays premium, not a directory dump
-            if buckets[bk]["count"] <= 9999:  # no-op guard, keeps logic simple
-                _push_top(bk, name)
-
-        # Trim top lists
         for k in buckets.keys():
             buckets[k]["top"] = buckets[k]["top"][:6]
 
         total = sum(int(buckets[k]["count"]) for k in buckets.keys())
-
         if total == 0:
-            return metric_ok(
-                "No amenities returned from OSM for this area.",
-                [],
-                base_sources,
-                retrieved,
-                0.0,
-            )
+            return metric_ok("No amenities returned from OSM for this area.", [], base_sources, retrieved, 0.0)
 
-        # Build “boardroom-readable” bullets
         bullets: List[str] = []
 
         def _line(label: str, key: str) -> None:
@@ -659,20 +764,11 @@ nwr["tourism"](around:{radius},{lat},{lng});
         _line("Education", "education")
         _line("Leisure", "leisure")
         _line("Services", "services")
-
-        # Other is real but usually noise — include only if it’s doing meaningful work
         if buckets["other"]["count"] >= 10:
             bullets.append(f"• Other mapped POIs: {buckets['other']['count']}")
 
         summary = f"Amenities (OSM within ~{radius}m): {total} mapped places.\n" + "\n".join(bullets)
-
-        out = metric_ok(
-            summary,
-            bullets,  # IMPORTANT: array of strings => UI shows bullets, not JSON.
-            base_sources,
-            retrieved,
-            0.90,
-        )
+        out = metric_ok(summary, bullets, base_sources, retrieved, 0.90)
         out["metrics"] = {"radiusMeters": radius, "total": total, "buckets": buckets}
         return out
 
@@ -909,7 +1005,6 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
     r_miles = radius_miles if isinstance(radius_miles, (int, float)) and radius_miles > 0 else HOUSING_DEFAULT_RADIUS_MILES
     lim = limit if isinstance(limit, int) and limit > 0 else HOUSING_DEFAULT_LIMIT
 
-    # Bounds
     lim = max(1, min(int(lim), HOUSING_MAX_LIMIT))
     r_miles = max(0.25, min(float(r_miles), 10.0))
 
@@ -929,9 +1024,6 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
         )
 
-    # RPC contract expected:
-    # public.housing_comps_v1(postcode text, radius_miles numeric, limit_n int)
-    # returns rows: date_of_transfer, price, property_type, street, town_city, postcode, miles
     try:
         payload = {"postcode": pc, "radius_miles": r_miles, "limit_n": lim}
         res = supabase.rpc(HOUSING_RPC_NAME, payload).execute()
@@ -1020,6 +1112,21 @@ def adapter_housing_comps():
     return jsonify(get_housing_data(postcode, radius_miles=radius_miles, limit=limit))
 
 
+@app.route("/adapters/nomis", methods=["GET"])
+def adapter_nomis():
+    table = (request.args.get("table", "") or "").strip().lower()
+    geography = (request.args.get("geography", "") or "").strip() or NOMIS_DEFAULT_GEOGRAPHY
+
+    if table == "ts003":
+        return jsonify(get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, geography))
+    if table == "ts044":
+        return jsonify(get_nomis_table("Accommodation type (TS044)", NOMIS_TS044_DIM, NOMIS_TS044_CATS, geography))
+    if table == "ts054":
+        return jsonify(get_nomis_table("Tenure (TS054)", NOMIS_TS054_DIM, NOMIS_TS054_CATS, geography))
+
+    return jsonify(metric_unavailable("Unknown Nomis table. Use table=ts003|ts044|ts054", [{"label": "Nomis API", "url": "https://www.nomisweb.co.uk/api/v01/help"}], now_iso()))
+
+
 # ----------------------------
 # Route: /market-insights
 # ----------------------------
@@ -1030,7 +1137,15 @@ def market_insights():
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
-    cache_key = f"market-insights::{postcode}::{lat or ''}::{lng or ''}" if postcode else "market-insights::no-postcode"
+    nomis_geo = ""
+    if isinstance(data, dict):
+        ng = data.get("nomisGeography")
+        if isinstance(ng, str):
+            nomis_geo = ng.strip()
+    if not nomis_geo:
+        nomis_geo = NOMIS_DEFAULT_GEOGRAPHY
+
+    cache_key = f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}" if postcode else "market-insights::no-postcode"
     cached = cache_get(cache_key)
     if cached:
         return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
@@ -1054,6 +1169,11 @@ def market_insights():
             "amenities": get_amenities_data(lat, lng),
             "crime": get_crime_data(lat, lng),
             "broadband": get_broadband_data(postcode),
+            "census": {
+                "ts003": get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, nomis_geo),
+                "ts044": get_nomis_table("Accommodation type (TS044)", NOMIS_TS044_DIM, NOMIS_TS044_CATS, nomis_geo),
+                "ts054": get_nomis_table("Tenure (TS054)", NOMIS_TS054_DIM, NOMIS_TS054_CATS, nomis_geo),
+            },
         }
 
         results = {
@@ -1086,10 +1206,13 @@ def home():
         "status": "active",
         "supabaseEnabled": bool(supabase),
         "routes": {
-            "POST /market-insights": "{ 'postcode': 'EC3A 5DE' }  // optional: lat/lng",
+            "POST /market-insights": "{ 'postcode': 'EC3A 5DE', 'nomisGeography': '633348835' }  // optional: lat/lng",
             "GET /adapters/schools?postcode=EC3A%205DE": "debug schools adapter",
             "GET /adapters/broadband?postcode=EC3A%205DE": "debug broadband adapter",
             "GET /adapters/housing/comps?postcode=EC3A%205DE&radius_miles=3&limit=20": "debug housing sold comps (RPC)",
+            "GET /adapters/nomis?table=ts003&geography=633348835": "Nomis TS003",
+            "GET /adapters/nomis?table=ts054&geography=633348835": "Nomis TS054 (requires env dims/cats)",
+            "GET /adapters/nomis?table=ts044&geography=633348835": "Nomis TS044 (requires env dims/cats)",
         },
         "envHints": {
             "SUPABASE_URL": "required for supabase providers",
@@ -1100,6 +1223,10 @@ def home():
             "NSPL": "requires view/table public.nspl_lookup(pcd_nospace, lat, lng) for postcode->coords",
             "HOUSING_PROVIDER": "set to 'supabase_rpc' to enable sold comps",
             "HOUSING_RPC_NAME": "defaults to 'housing_comps_v1'",
+            "NOMIS_ENABLED": "1 to enable",
+            "NOMIS_DEFAULT_GEOGRAPHY": "e.g. 633348835 for testing",
+            "NOMIS_TS054_DIM/NOMIS_TS054_CATS": "paste from TS054 copy-address URL",
+            "NOMIS_TS044_DIM/NOMIS_TS044_CATS": "paste from TS044 copy-address URL",
         }
     })
 
