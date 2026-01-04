@@ -27,6 +27,11 @@ SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
 _CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL_SECONDS = int(os.getenv("MARKET_INSIGHTS_CACHE_TTL_SECONDS", "21600"))  # default 6 hours
 
+# ----------------------------
+# Contract freeze mode (debug)
+# ----------------------------
+MARKET_CONTRACT_MODE = (os.getenv("MARKET_CONTRACT_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
+
 # Identify ourselves to public services (Nominatim requires a proper UA)
 HTTP_USER_AGENT = os.getenv(
     "HTTP_USER_AGENT",
@@ -288,6 +293,12 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
     url = f"https://api.postcodes.io/postcodes/{pc_key}"
     try:
         status, payload = _http_get_json(url, timeout=POSTCODES_IO_TIMEOUT)
+
+        # postcodes.io sometimes returns HTTP 200 with {status:404,...}
+        if isinstance(payload, dict) and isinstance(payload.get("status"), int) and payload.get("status") != 200:
+            meta["notes"] = f"postcodes.io payload status {payload.get('status')}: {payload.get('error', '')}".strip()
+            return None, meta
+
         if status != 200 or not isinstance(payload, dict):
             meta["notes"] = f"postcodes.io returned HTTP {status}"
             return None, meta
@@ -433,6 +444,178 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
 
     except Exception as e:
         return metric_unavailable(f"{label} fetch/parse failed: {str(e)}", sources, retrieved)
+
+
+# ----------------------------
+# Housing charts (local aggregation)
+# ----------------------------
+def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # Stable bins + stable ordering (UI contract)
+    price_bins = [
+        ("<£100k", 0, 100_000),
+        ("£100–150k", 100_000, 150_000),
+        ("£150–200k", 150_000, 200_000),
+        ("£200–300k", 200_000, 300_000),
+        ("£300k+", 300_000, None),
+    ]
+    dist_bins = [
+        ("0–0.5 mi", 0.0, 0.5),
+        ("0.5–1 mi", 0.5, 1.0),
+        ("1–2 mi", 1.0, 2.0),
+        ("2–3 mi", 2.0, 3.0),
+        ("3+ mi", 3.0, None),
+    ]
+
+    price_counts = {lab: 0 for (lab, _, _) in price_bins}
+    dist_counts = {lab: 0 for (lab, _, _) in dist_bins}
+    type_counts: Dict[str, int] = {}
+
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        p = safe_int(r.get("price"))
+        m = safe_float(r.get("miles"))
+        t = (r.get("property_type") or "").strip()
+
+        if isinstance(p, int):
+            for lab, lo, hi in price_bins:
+                if hi is None and p >= lo:
+                    price_counts[lab] += 1
+                    break
+                if hi is not None and lo <= p < hi:
+                    price_counts[lab] += 1
+                    break
+
+        if isinstance(m, float):
+            for lab, lo, hi in dist_bins:
+                if hi is None and m >= lo:
+                    dist_counts[lab] += 1
+                    break
+                if hi is not None and lo <= m < hi:
+                    dist_counts[lab] += 1
+                    break
+
+        if t:
+            type_counts[t] = type_counts.get(t, 0) + 1
+
+    # Ensure a few common types always exist (stable UI legends)
+    for common in ["Terraced", "Semi-detached", "Detached", "Flat/Maisonette", "Other"]:
+        type_counts.setdefault(common, 0)
+
+    charts = {
+        "priceBands": {
+            "title": "Price bands (sold comps)",
+            "bins": [{"label": lab, "value": int(price_counts[lab])} for (lab, _, _) in price_bins],
+        },
+        "propertyTypes": {
+            "title": "Property types (sold comps)",
+            "bins": [{"label": lab, "value": int(type_counts.get(lab, 0))} for lab in ["Terraced", "Semi-detached", "Detached", "Flat/Maisonette", "Other"]],
+        },
+        "distanceBands": {
+            "title": "Distance bands (sold comps)",
+            "bins": [{"label": lab, "value": int(dist_counts[lab])} for (lab, _, _) in dist_bins],
+        },
+    }
+    return charts
+
+
+# ----------------------------
+# Contract freeze payload
+# ----------------------------
+def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optional[float], nomis_geo: str) -> Dict[str, Any]:
+    retrieved = now_iso()
+
+    # Deterministic, UI-safe housing "sold comps" + charts
+    housing_sold = [
+        {
+            "price": 149950,
+            "date": "2025-10-29",
+            "property_type": "Terraced",
+            "miles": 0.84,
+            "address": "PARROT ROW",
+            "town": "ABERTILLERY",
+            "postcode": "NP13 3AH",
+        },
+        {
+            "price": 85000,
+            "date": "2025-10-24",
+            "property_type": "Terraced",
+            "miles": 0.20,
+            "address": "GLADSTONE STREET",
+            "town": "ABERTILLERY",
+            "postcode": "NP13 3HJ",
+        },
+    ]
+    housing_charts = build_housing_charts_from_rows(housing_sold)
+
+    housing_metric = metric_ok(
+        summary="Contract mode: deterministic housing comps + charts.",
+        value=housing_sold,
+        sources=[{"label": "Contract stub", "url": ""}],
+        retrieved_at=retrieved,
+        confidence=1.0,
+    )
+    # Contract keys (UI should rely on these)
+    housing_metric["soldComps"] = housing_sold
+    housing_metric["charts"] = housing_charts
+
+    census_stub = metric_ok(
+        summary="Contract mode: census TS003 placeholder.",
+        value=[
+            "• One-person household: 0",
+            "• Couple household: 0",
+            "• Family household: 0",
+        ],
+        sources=[{"label": "Contract stub", "url": ""}],
+        retrieved_at=retrieved,
+        confidence=1.0,
+    )
+    census_stub["metrics"] = {
+        "provider": "stub",
+        "dataset": "stub",
+        "label": "Household composition (TS003)",
+        "geography": nomis_geo,
+        "dimensionId": "stub_dim",
+        "total": 0,
+        "items": [],
+        "params": {},
+    }
+
+    results = {
+        "postcode": postcode,
+        "location": {
+            "lat": lat,
+            "lng": lng,
+            "geocodeMeta": {"provider": "stub", "notes": "Contract mode: no geocoding performed."},
+            "lsoaMeta": {"provider": "stub", "notes": "Contract mode: no LSOA lookup performed."},
+            "nomisGeography": nomis_geo,
+        },
+        "localAreaAnalysis": {
+            "retrievedAtISO": retrieved,
+            "postcode": postcode,
+            "schools": metric_missing_provider("Contract mode: schools not wired.", [{"label": "Contract stub", "url": ""}], retrieved),
+            "housing": housing_metric,
+            "transport": metric_missing_provider("Contract mode: transport not wired.", [{"label": "Contract stub", "url": ""}], retrieved),
+            "amenities": metric_missing_provider("Contract mode: amenities not wired.", [{"label": "Contract stub", "url": ""}], retrieved),
+            "crime": metric_missing_provider("Contract mode: crime not wired.", [{"label": "Contract stub", "url": ""}], retrieved),
+            "broadband": metric_missing_provider("Contract mode: broadband not wired.", [{"label": "Contract stub", "url": ""}], retrieved),
+            "census": {
+                "ts003": census_stub,
+                "ts044": metric_missing_provider("Contract mode: TS044 not wired.", [{"label": "Contract stub", "url": ""}], retrieved),
+                "ts054": metric_missing_provider("Contract mode: TS054 not wired.", [{"label": "Contract stub", "url": ""}], retrieved),
+            },
+        },
+        "comparableProperties": {
+            "forSale": [],
+            "sourceUrl": "",
+            "sources": [],
+            "retrievedAtISO": retrieved,
+            "confidenceValue": 0.0,
+            "status": "missing_provider",
+            "summary": "Contract mode: live listings provider not configured.",
+        },
+    }
+    return results
 
 
 # ----------------------------
@@ -1173,6 +1356,12 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "max_miles": max_m,
             "property_type_counts": ptypes,
         }
+
+        # Contract keys for UI (always present when ok)
+        charts = build_housing_charts_from_rows(rows)
+        out["soldComps"] = rows
+        out["charts"] = charts
+
         return out
 
     except Exception as e:
@@ -1222,9 +1411,18 @@ def adapter_housing_comps():
 
 @app.route("/adapters/nomis", methods=["GET"])
 def adapter_nomis():
-    table = (request.args.get("table", "") or "").strip().lower()
+    # Make it harder to shoot yourself in the foot with malformed URLs.
+    table_raw = (request.args.get("table", "") or "").strip()
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
     geography = (request.args.get("geography", "") or "").strip()
+
+    # If someone pasted "...?table=ts003postcode=B1%201AA" (missing &), recover.
+    if ("postcode=" in table_raw) and (not postcode):
+        parts = table_raw.split("postcode=", 1)
+        table_raw = parts[0]
+        postcode = normalize_postcode(parts[1]) if len(parts) > 1 else ""
+
+    table = table_raw.lower().strip()
 
     # Prefer UK-wide: postcode -> LSOA(GSS). Allow manual geography override for debugging.
     if not geography and postcode:
@@ -1257,6 +1455,14 @@ def market_insights():
     postcode = normalize_postcode(data.get("postcode", "") or "")
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
+
+    # ----------------------------
+    # Contract freeze mode (bypass cache + providers)
+    # ----------------------------
+    if MARKET_CONTRACT_MODE:
+        nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "stub").strip()
+        results = build_market_contract_stub(postcode, lat, lng, nomis_geo)
+        return jsonify({**results, "_contract": {"mode": True}, "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS}})
 
     # UK-wide Nomis geography derived from postcode (LSOA GSS)
     lsoa_gss = ""
@@ -1342,6 +1548,7 @@ def home():
             "GET /adapters/housing/comps?postcode=EC3A%205DE&radius_miles=3&limit=20": "debug housing sold comps (RPC)",
         },
         "envHints": {
+            "MARKET_CONTRACT_MODE": "set to 1 to force deterministic UI-safe payload (bypasses cache/providers)",
             "SUPABASE_URL": "required for supabase providers",
             "SUPABASE_SERVICE_ROLE_KEY": "preferred (server-only). SUPABASE_KEY also supported as fallback.",
             "SCHOOLS_PROVIDER": "set to 'supabase' to enable",
