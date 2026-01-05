@@ -74,20 +74,21 @@ BROADBAND_CONFIDENCE_VALUE = float(os.getenv("BROADBAND_CONFIDENCE_VALUE", "0.90
 # ----------------------------
 NOMIS_ENABLED = (os.getenv("NOMIS_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"})
 NOMIS_DATASET_ID = os.getenv("NOMIS_DATASET_ID", "NM_2023_1").strip()
-
-# Keep as a fallback only (debug / emergency). UK-wide uses postcode->LSOA.
 NOMIS_DEFAULT_GEOGRAPHY = os.getenv("NOMIS_DEFAULT_GEOGRAPHY", "").strip()
 NOMIS_TIMEOUT = int(os.getenv("NOMIS_TIMEOUT", "20"))
 
-# TS003 preset (NO ELLIPSIS - must be explicit)
+# ✅ NM_2023_1 requires freq
+NOMIS_FREQ = os.getenv("NOMIS_FREQ", "A").strip()
+
+# ✅ IMPORTANT: JSON-stat payload shows id "c2021_hhcomp_15" (lowercase).
+# Default must match dataset ids exactly; you can override via env.
 NOMIS_TS003_DIM = os.getenv("NOMIS_TS003_DIM", "c2021_hhcomp_15").strip()
 NOMIS_TS003_CATS = os.getenv(
     "NOMIS_TS003_CATS",
     "1001,1,2,1002,1003,4,5,6,1004,7,8,9,1005,10,11,1006,12,1007,13,14"
 ).strip()
 
-# TS044 / TS054 are configurable.
-# Set these to EXACTLY what appears in your copy-address URL (dimension name + category list).
+# TS044 / TS054 are configurable (must match dataset ids exactly)
 NOMIS_TS044_DIM = os.getenv("NOMIS_TS044_DIM", "").strip()
 NOMIS_TS044_CATS = os.getenv("NOMIS_TS044_CATS", "").strip()
 
@@ -95,7 +96,7 @@ NOMIS_TS054_DIM = os.getenv("NOMIS_TS054_DIM", "").strip()
 NOMIS_TS054_CATS = os.getenv("NOMIS_TS054_CATS", "").strip()
 
 # ----------------------------
-# Postcode -> LSOA (GSS) via postcodes.io (UK-wide)
+# Postcode -> LSOA (GSS) + coords via postcodes.io (UK-wide)
 # ----------------------------
 POSTCODES_IO_TIMEOUT = int(os.getenv("POSTCODES_IO_TIMEOUT", "10"))
 POSTCODES_IO_CACHE_TTL_SECONDS = int(os.getenv("POSTCODES_IO_CACHE_TTL_SECONDS", "2592000"))  # 30 days
@@ -135,6 +136,10 @@ def postcode_district(pc: str) -> str:
     if not pc:
         return ""
     return pc.split(" ")[0] if " " in pc else pc
+
+
+def is_digits_only(s: Any) -> bool:
+    return isinstance(s, str) and s.strip().isdigit()
 
 
 def cache_get(key: str) -> Optional[Dict[str, Any]]:
@@ -265,6 +270,7 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
     """
     Returns (lsoa_gss, meta)
     lsoa_gss looks like 'E0100....' (England/Wales), 'S0100....' (Scotland), etc.
+    meta may include lat/lng (from postcodes.io) when available.
     """
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
@@ -277,18 +283,24 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
         "sources": [{"label": "postcodes.io", "url": "https://postcodes.io/"}],
         "notes": "",
         "cache": {"hit": False, "ttlSeconds": POSTCODES_IO_CACHE_TTL_SECONDS},
+        "lat": None,
+        "lng": None,
     }
 
     if not pc_key:
         meta["notes"] = "No postcode provided."
         return None, meta
 
-    cache_key = f"lsoa_gss::{pc_key}"
+    cache_key = f"geo::{pc_key}"
     cached = geo_cache_get(cache_key)
-    if cached and isinstance(cached.get("lsoa_gss"), str) and cached["lsoa_gss"].strip():
-        meta["cache"]["hit"] = True
-        meta["notes"] = "Resolved from geo cache."
-        return cached["lsoa_gss"].strip(), meta
+    if isinstance(cached, dict):
+        lsoa_cached = cached.get("lsoa_gss")
+        if isinstance(lsoa_cached, str) and lsoa_cached.strip():
+            meta["cache"]["hit"] = True
+            meta["notes"] = "Resolved from geo cache."
+            meta["lat"] = safe_float(cached.get("lat"))
+            meta["lng"] = safe_float(cached.get("lng"))
+            return lsoa_cached.strip(), meta
 
     url = f"https://api.postcodes.io/postcodes/{pc_key}"
     try:
@@ -308,6 +320,10 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
             meta["notes"] = "postcodes.io returned no result object."
             return None, meta
 
+        # coords (so we can avoid NSPL/Nominatim)
+        meta["lat"] = safe_float(result.get("latitude"))
+        meta["lng"] = safe_float(result.get("longitude"))
+
         codes = result.get("codes") if isinstance(result.get("codes"), dict) else {}
         lsoa_gss = codes.get("lsoa")
         lsoa_gss = lsoa_gss.strip() if isinstance(lsoa_gss, str) and lsoa_gss.strip() else None
@@ -315,8 +331,8 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
             meta["notes"] = "postcodes.io result missing codes.lsoa (GSS)."
             return None, meta
 
-        geo_cache_set(cache_key, {"lsoa_gss": lsoa_gss})
-        meta["notes"] = "Resolved LSOA GSS from postcodes.io."
+        geo_cache_set(cache_key, {"lsoa_gss": lsoa_gss, "lat": meta["lat"], "lng": meta["lng"]})
+        meta["notes"] = "Resolved LSOA GSS (+ coords) from postcodes.io."
         return lsoa_gss, meta
 
     except Exception as e:
@@ -327,36 +343,69 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
 # ----------------------------
 # Nomis (JSON-stat) — UK-wide census tables
 # ----------------------------
+# ✅ Supports NM_2023_1 JSON-stat v2 root dataset
 def fetch_nomis_jsonstat(dataset_id: str, params: dict) -> dict:
     base = f"https://www.nomisweb.co.uk/api/v01/dataset/{dataset_id}.jsonstat.json"
     payload = _http_get_json_raw(base, params=params, timeout=NOMIS_TIMEOUT)
-    if not isinstance(payload, dict) or "dataset" not in payload:
-        raise ValueError("Nomis returned unexpected payload (missing 'dataset').")
-    return payload
+
+    if not isinstance(payload, dict):
+        raise ValueError("Nomis payload is not a dict")
+
+    # NM_2023_1 returns the dataset at the ROOT (JSON-stat v2)
+    if payload.get("class") == "dataset":
+        return {"dataset": payload}
+
+    # Older / wrapped datasets
+    if "dataset" in payload:
+        return payload
+
+    raise ValueError(f"Nomis returned unsupported JSON-stat shape: keys={list(payload.keys())}")
 
 
 def parse_jsonstat_single_dimension(jsonstat: dict) -> Dict[str, Any]:
+    """
+    JSON-stat v2 safe parser for the "single breakdown dim" case.
+
+    NM_2023_1 frequently returns:
+      - dataset.id: ["<breakdown_dim>", "geography", "measures", "time"] (or similar)
+      - dimension.id: None   (NOT present)
+    """
     ds = jsonstat.get("dataset") or {}
     dim = ds.get("dimension") or {}
-    dim_ids = dim.get("id") or []
-    if not isinstance(dim_ids, list):
-        dim_ids = []
 
-    exclude = {"date", "time", "geography", "measures"}
+    # JSON-stat v2: dimension order usually lives in dataset.id
+    dim_ids = ds.get("id") or dim.get("id") or []
+    if not isinstance(dim_ids, list) or not dim_ids:
+        # fallback: infer from dimension keys
+        if isinstance(dim, dict):
+            dim_ids = [k for k in dim.keys() if isinstance(k, str)]
+        else:
+            dim_ids = []
+
+    # Exclude non-breakdown dims (including freq)
+    exclude = {"date", "time", "geography", "measures", "freq"}
     candidate_dims = [d for d in dim_ids if isinstance(d, str) and d.lower() not in exclude]
 
     main_dim = candidate_dims[0] if candidate_dims else None
-    if not main_dim:
+
+    # fallback: pick a dimension that has category index/labels
+    if not main_dim and isinstance(dim, dict):
         for d in dim_ids:
-            cat = (((dim.get(d) or {}).get("category")) or {})
-            if isinstance(cat.get("index"), (list, dict)):
+            if not isinstance(d, str) or d.lower() in exclude:
+                continue
+            d_obj = dim.get(d)
+            cat = (d_obj or {}).get("category") if isinstance(d_obj, dict) else None
+            if isinstance(cat, dict) and isinstance(cat.get("index"), (list, dict)):
                 main_dim = d
                 break
 
     if not main_dim:
-        raise ValueError("Could not infer main dimension from JSON-stat.")
+        raise ValueError(
+            f"Could not infer main dimension from JSON-stat. dim_ids={dim_ids}, dim_keys={list(dim.keys()) if isinstance(dim, dict) else type(dim)}"
+        )
 
-    cat = ((dim.get(main_dim) or {}).get("category")) or {}
+    d_obj = dim.get(main_dim) if isinstance(dim, dict) else {}
+    cat = (d_obj or {}).get("category") if isinstance(d_obj, dict) else {}
     labels = cat.get("label") or {}
     index = cat.get("index")
 
@@ -373,6 +422,8 @@ def parse_jsonstat_single_dimension(jsonstat: dict) -> Dict[str, Any]:
 
     items = []
     total_val = 0
+
+    # Assumes query constrains other dimensions to singletons (geography/time/measures/freq).
     for i, code in enumerate(codes):
         lab = labels.get(code) if isinstance(labels, dict) else str(code)
         v = values[i] if i < len(values) else None
@@ -394,9 +445,17 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
 
     if not geography:
         return metric_unavailable(
-            "Nomis requires a geography id. Provide a postcode (preferred) or set NOMIS_DEFAULT_GEOGRAPHY for fallback.",
+            "Nomis requires a geography id. Provide a numeric geography id or set NOMIS_DEFAULT_GEOGRAPHY.",
             sources,
             retrieved,
+        )
+
+    if not is_digits_only(geography):
+        return metric_unavailable(
+            "Nomis geography must be a numeric Nomis geography id for this dataset (NM_2023_1).",
+            sources,
+            retrieved,
+            extra_metrics={"label": label, "geography": geography},
         )
 
     if not dimension or not categories:
@@ -417,9 +476,11 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
         )
 
     try:
+        # NM_2023_1 requires `freq`
         params = {
             "date": "latest",
             "geography": geography,
+            "freq": NOMIS_FREQ,
             dimension: categories,
             "measures": "20100",
         }
@@ -427,7 +488,7 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
         parsed = parse_jsonstat_single_dimension(js)
 
         bullets = [f"• {it['label']}: {it['value']}" for it in parsed["items"]]
-        summary = f"{label} (Nomis) — total households: {parsed['total']}"
+        summary = f"{label} (Nomis) — total: {parsed['total']}"
 
         out = metric_ok(summary, bullets, sources, retrieved, 0.92)
         out["metrics"] = {
@@ -509,7 +570,8 @@ def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]
         },
         "propertyTypes": {
             "title": "Property types (sold comps)",
-            "bins": [{"label": lab, "value": int(type_counts.get(lab, 0))} for lab in ["Terraced", "Semi-detached", "Detached", "Flat/Maisonette", "Other"]],
+            "bins": [{"label": lab, "value": int(type_counts.get(lab, 0))}
+                     for lab in ["Terraced", "Semi-detached", "Detached", "Flat/Maisonette", "Other"]],
         },
         "distanceBands": {
             "title": "Distance bands (sold comps)",
@@ -1424,11 +1486,10 @@ def adapter_nomis():
 
     table = table_raw.lower().strip()
 
-    # Prefer UK-wide: postcode -> LSOA(GSS). Allow manual geography override for debugging.
-    if not geography and postcode:
-        lsoa_gss, _meta = resolve_lsoa_gss_from_postcode(postcode)
-        geography = lsoa_gss or ""
-
+    # IMPORTANT:
+    # For NM_2023_1, geography must be a NUMERIC Nomis geography id.
+    # postcodes.io gives you GSS codes (E0100...) which are NOT valid here.
+    # Therefore: if geography not provided, we DO NOT attempt postcode->GSS->geography.
     if not geography:
         geography = NOMIS_DEFAULT_GEOGRAPHY
 
@@ -1464,12 +1525,21 @@ def market_insights():
         results = build_market_contract_stub(postcode, lat, lng, nomis_geo)
         return jsonify({**results, "_contract": {"mode": True}, "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS}})
 
-    # UK-wide Nomis geography derived from postcode (LSOA GSS)
+    # Postcode -> LSOA (GSS) + coords. (GSS is NOT usable as Nomis geography id)
     lsoa_gss = ""
     lsoa_meta = None
     if postcode:
         lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
-    nomis_geo = lsoa_gss or NOMIS_DEFAULT_GEOGRAPHY
+
+    # Use postcodes.io coords FIRST (prevents Nominatim 403; avoids NSPL dependency)
+    if (lat is None or lng is None) and isinstance(lsoa_meta, dict):
+        if lat is None:
+            lat = safe_float(lsoa_meta.get("lat"))
+        if lng is None:
+            lng = safe_float(lsoa_meta.get("lng"))
+
+    # For Nomis calls in this build, we ONLY use a numeric geography id:
+    nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "").strip()
 
     cache_key = f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}" if postcode else "market-insights::no-postcode"
     cached = cache_get(cache_key)
@@ -1539,10 +1609,10 @@ def home():
         "supabaseEnabled": bool(supabase),
         "routes": {
             "POST /market-insights": "{ 'postcode': 'EC3A 5DE' }  // optional: lat/lng",
-            "GET /adapters/geo?postcode=B1%201AA": "debug postcode -> LSOA(GSS)",
-            "GET /adapters/nomis?table=ts003&postcode=B1%201AA": "Nomis TS003 UK-wide via postcode",
-            "GET /adapters/nomis?table=ts054&postcode=B1%201AA": "Nomis TS054 (requires env dims/cats)",
-            "GET /adapters/nomis?table=ts044&postcode=B1%201AA": "Nomis TS044 (requires env dims/cats)",
+            "GET /adapters/geo?postcode=EC1A%201BB": "debug postcode -> LSOA(GSS) + coords",
+            "GET /adapters/nomis?table=ts003&geography=2092957699": "Nomis TS003 (requires numeric geography id)",
+            "GET /adapters/nomis?table=ts054&geography=2092957699": "Nomis TS054 (requires env dims/cats + numeric geography)",
+            "GET /adapters/nomis?table=ts044&geography=2092957699": "Nomis TS044 (requires env dims/cats + numeric geography)",
             "GET /adapters/schools?postcode=EC3A%205DE": "debug schools adapter",
             "GET /adapters/broadband?postcode=EC3A%205DE": "debug broadband adapter",
             "GET /adapters/housing/comps?postcode=EC3A%205DE&radius_miles=3&limit=20": "debug housing sold comps (RPC)",
@@ -1558,7 +1628,9 @@ def home():
             "HOUSING_PROVIDER": "set to 'supabase_rpc' to enable sold comps",
             "HOUSING_RPC_NAME": "defaults to 'housing_comps_v1'",
             "NOMIS_ENABLED": "1 to enable",
-            "NOMIS_DEFAULT_GEOGRAPHY": "fallback only (optional)",
+            "NOMIS_DEFAULT_GEOGRAPHY": "REQUIRED for Nomis with this dataset unless you supply a numeric geography id",
+            "NOMIS_FREQ": "REQUIRED for NM_2023_1 (e.g. A)",
+            "NOMIS_TS003_DIM": "defaults to c2021_hhcomp_15 (must match dataset id)",
             "NOMIS_TS054_DIM/NOMIS_TS054_CATS": "paste from TS054 copy-address URL",
             "NOMIS_TS044_DIM/NOMIS_TS044_CATS": "paste from TS044 copy-address URL",
         }
