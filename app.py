@@ -14,6 +14,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GOOGLE_MAPS_API_KEY = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
 
 # ---- Supabase env hardening (support legacy names) ----
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
@@ -101,6 +102,12 @@ NOMIS_TS054_CATS = os.getenv("NOMIS_TS054_CATS", "").strip()
 POSTCODES_IO_TIMEOUT = int(os.getenv("POSTCODES_IO_TIMEOUT", "10"))
 POSTCODES_IO_CACHE_TTL_SECONDS = int(os.getenv("POSTCODES_IO_CACHE_TTL_SECONDS", "2592000"))  # 30 days
 _GEO_CACHE: Dict[str, Dict[str, Any]] = {}
+
+# ----------------------------
+# Geocode cache table (Supabase)
+# ----------------------------
+GEOCODE_CACHE_TABLE = os.getenv("GEOCODE_CACHE_TABLE", "geocode_cache").strip()
+GEOCODE_BATCH_LIMIT = int(os.getenv("GEOCODE_BATCH_LIMIT", "10"))
 
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -264,6 +271,117 @@ def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeo
         h.update(headers)
     r = requests.post(url, data=data, headers=h, timeout=timeout)
     return r.status_code, r.text or ""
+
+
+# ----------------------------
+# ✅ Google Geocoding + Supabase cache (batch)
+# ----------------------------
+def _norm_geocode_query(s: str) -> str:
+    s = (s or "").strip().upper()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _google_geocode_one(query: str, api_key: str) -> Dict[str, Any]:
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    r = requests.get(url, params={"address": query, "key": api_key}, timeout=12)
+    r.raise_for_status()
+    data = r.json()
+
+    status = data.get("status")
+    if status != "OK":
+        return {"ok": False, "error": f"google_status={status}"}
+
+    results = data.get("results") or []
+    if not results:
+        return {"ok": False, "error": "no_results"}
+
+    loc = (results[0].get("geometry") or {}).get("location") or {}
+    lat = loc.get("lat")
+    lng = loc.get("lng")
+    if lat is None or lng is None:
+        return {"ok": False, "error": "missing_lat_lng"}
+
+    return {"ok": True, "lat": float(lat), "lng": float(lng)}
+
+
+@app.route("/adapters/geocode/batch", methods=["POST"])
+def adapter_geocode_batch():
+    """
+    POST { "queries": ["PARROT ROW, ABERTILLERY, NP13 3AH", ...] }
+    -> { "status": "ok", "results": [{query, lat, lng, cached}, ...], "failed": [{query, error}, ...] }
+    """
+    payload = request.get_json(silent=True) or {}
+    queries = payload.get("queries") or []
+    if not isinstance(queries, list):
+        return jsonify({"status": "error", "error": "queries must be a list"}), 400
+
+    queries = [q for q in queries if isinstance(q, str) and q.strip()]
+    queries = queries[:max(1, GEOCODE_BATCH_LIMIT)]
+
+    if not GOOGLE_MAPS_API_KEY:
+        return jsonify({"status": "error", "error": "GOOGLE_MAPS_API_KEY not set"}), 500
+    if not supabase:
+        return jsonify({"status": "error", "error": "Supabase not configured (geocode cache requires Supabase)"}), 500
+    if not queries:
+        return jsonify({"status": "ok", "results": [], "failed": []})
+
+    normalized = [_norm_geocode_query(q) for q in queries]
+    # de-dupe while preserving order
+    seen = set()
+    normalized_unique: List[str] = []
+    for q in normalized:
+        if q in seen:
+            continue
+        normalized_unique.append(q)
+        seen.add(q)
+
+    results: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+
+    # 1) Read cache
+    cached_map: Dict[str, Dict[str, Any]] = {}
+    try:
+        res = supabase.table(GEOCODE_CACHE_TABLE).select("query,lat,lng").in_("query", normalized_unique).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict) and row.get("query"):
+                    cached_map[str(row["query"]).upper()] = row
+    except Exception:
+        cached_map = {}
+
+    # 2) Resolve each query
+    for q in normalized_unique:
+        hit = cached_map.get(q)
+        if hit:
+            results.append({"query": q, "lat": hit.get("lat"), "lng": hit.get("lng"), "cached": True})
+            continue
+
+        try:
+            g = _google_geocode_one(q, GOOGLE_MAPS_API_KEY)
+            if not g.get("ok"):
+                failed.append({"query": q, "error": g.get("error", "geocode_failed")})
+                continue
+
+            lat = g["lat"]
+            lng = g["lng"]
+
+            # write-through cache (best-effort)
+            try:
+                supabase.table(GEOCODE_CACHE_TABLE).upsert(
+                    {"query": q, "lat": lat, "lng": lng, "provider": "google"},
+                    on_conflict="query",
+                ).execute()
+            except Exception:
+                pass
+
+            results.append({"query": q, "lat": lat, "lng": lng, "cached": False})
+            time.sleep(0.05)
+        except Exception as e:
+            failed.append({"query": q, "error": f"exception:{str(e)}"})
+
+    return jsonify({"status": "ok", "results": results, "failed": failed})
 
 
 def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -1486,10 +1604,7 @@ def adapter_nomis():
 
     table = table_raw.lower().strip()
 
-    # IMPORTANT:
     # For NM_2023_1, geography must be a NUMERIC Nomis geography id.
-    # postcodes.io gives you GSS codes (E0100...) which are NOT valid here.
-    # Therefore: if geography not provided, we DO NOT attempt postcode->GSS->geography.
     if not geography:
         geography = NOMIS_DEFAULT_GEOGRAPHY
 
@@ -1609,6 +1724,7 @@ def home():
         "supabaseEnabled": bool(supabase),
         "routes": {
             "POST /market-insights": "{ 'postcode': 'EC3A 5DE' }  // optional: lat/lng",
+            "POST /adapters/geocode/batch": "{ 'queries': ['PARROT ROW, ABERTILLERY, NP13 3AH', ...] }",
             "GET /adapters/geo?postcode=EC1A%201BB": "debug postcode -> LSOA(GSS) + coords",
             "GET /adapters/nomis?table=ts003&geography=2092957699": "Nomis TS003 (requires numeric geography id)",
             "GET /adapters/nomis?table=ts054&geography=2092957699": "Nomis TS054 (requires env dims/cats + numeric geography)",
@@ -1621,6 +1737,9 @@ def home():
             "MARKET_CONTRACT_MODE": "set to 1 to force deterministic UI-safe payload (bypasses cache/providers)",
             "SUPABASE_URL": "required for supabase providers",
             "SUPABASE_SERVICE_ROLE_KEY": "preferred (server-only). SUPABASE_KEY also supported as fallback.",
+            "GOOGLE_MAPS_API_KEY": "required for /adapters/geocode/batch (server-side geocoding + cache)",
+            "GEOCODE_CACHE_TABLE": "defaults to geocode_cache",
+            "GEOCODE_BATCH_LIMIT": "defaults to 10",
             "SCHOOLS_PROVIDER": "set to 'supabase' to enable",
             "BROADBAND_PROVIDER": "set to 'supabase' to enable",
             "BROADBAND_SUPABASE_TABLE": "e.g. broadband_by_postcode",
