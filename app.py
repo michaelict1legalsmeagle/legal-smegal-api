@@ -317,7 +317,6 @@ def _row_has_latlng(r: Dict[str, Any]) -> bool:
 
 
 def _build_comp_geocode_query(r: Dict[str, Any]) -> str:
-    # Prefer full address string if present
     parts: List[str] = []
     for k in ("address", "town", "postcode"):
         v = r.get(k)
@@ -327,10 +326,6 @@ def _build_comp_geocode_query(r: Dict[str, Any]) -> str:
 
 
 def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Best-effort: ensure rows include lat/lng.
-    Uses Supabase GEOCODE_CACHE_TABLE as read-through cache + Google as fallback.
-    """
     meta = {
         "enabled": HOUSING_ENRICH_LATLNG,
         "attempted": 0,
@@ -355,7 +350,6 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
         meta["notes"] = "Supabase not configured; cannot use geocode cache."
         return rows, meta
 
-    # Identify rows missing coords
     missing_idxs: List[int] = []
     queries: List[str] = []
     for i, r in enumerate(rows):
@@ -373,7 +367,6 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
         meta["notes"] = "All rows already contain lat/lng (or lacked address data)."
         return rows, meta
 
-    # Dedup while preserving order
     seen = set()
     uniq_queries: List[str] = []
     for q in queries:
@@ -385,7 +378,6 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
     uniq_queries = uniq_queries[:max(1, HOUSING_ENRICH_BATCH_LIMIT)]
     meta["attempted"] = len(uniq_queries)
 
-    # 1) Read cache
     cached_map: Dict[str, Dict[str, Any]] = {}
     try:
         res = supabase.table(GEOCODE_CACHE_TABLE).select("query,lat,lng").in_("query", uniq_queries).execute()
@@ -397,7 +389,6 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
     except Exception:
         cached_map = {}
 
-    # 2) Resolve each query (cache hit else Google)
     resolved: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
 
     for q in uniq_queries:
@@ -423,7 +414,6 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
                 meta["failed"] += 1
                 continue
 
-            # write-through cache (best-effort)
             try:
                 supabase.table(GEOCODE_CACHE_TABLE).upsert(
                     {"query": q, "lat": lat, "lng": lng, "provider": "google"},
@@ -439,7 +429,6 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
         except Exception:
             meta["failed"] += 1
 
-    # 3) Apply resolved to rows
     for i, r in enumerate(rows):
         if not isinstance(r, dict):
             continue
@@ -459,10 +448,6 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
 
 @app.route("/adapters/geocode/batch", methods=["POST"])
 def adapter_geocode_batch():
-    """
-    POST { "queries": ["PARROT ROW, ABERTILLERY, NP13 3AH", ...] }
-    -> { "status": "ok", "results": [{query, lat, lng, cached}, ...], "failed": [{query, error}, ...] }
-    """
     payload = request.get_json(silent=True) or {}
     queries = payload.get("queries") or []
     if not isinstance(queries, list):
@@ -479,7 +464,6 @@ def adapter_geocode_batch():
         return jsonify({"status": "ok", "results": [], "failed": []})
 
     normalized = [_norm_geocode_query(q) for q in queries]
-    # de-dupe while preserving order
     seen = set()
     normalized_unique: List[str] = []
     for q in normalized:
@@ -491,7 +475,6 @@ def adapter_geocode_batch():
     results: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
 
-    # 1) Read cache
     cached_map: Dict[str, Dict[str, Any]] = {}
     try:
         res = supabase.table(GEOCODE_CACHE_TABLE).select("query,lat,lng").in_("query", normalized_unique).execute()
@@ -503,7 +486,6 @@ def adapter_geocode_batch():
     except Exception:
         cached_map = {}
 
-    # 2) Resolve each query
     for q in normalized_unique:
         hit = cached_map.get(q.upper())
         if hit:
@@ -519,7 +501,6 @@ def adapter_geocode_batch():
             lat = g["lat"]
             lng = g["lng"]
 
-            # write-through cache (best-effort)
             try:
                 supabase.table(GEOCODE_CACHE_TABLE).upsert(
                     {"query": q, "lat": lat, "lng": lng, "provider": "google"},
@@ -537,11 +518,6 @@ def adapter_geocode_batch():
 
 
 def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[str, Any]]:
-    """
-    Returns (lsoa_gss, meta)
-    lsoa_gss looks like 'E0100....' (England/Wales), 'S0100....' (Scotland), etc.
-    meta may include lat/lng (from postcodes.io) when available.
-    """
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
     pc_key = normalize_postcode_nospace(pc)
@@ -576,7 +552,6 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
     try:
         status, payload = _http_get_json(url, timeout=POSTCODES_IO_TIMEOUT)
 
-        # postcodes.io sometimes returns HTTP 200 with {status:404,...}
         if isinstance(payload, dict) and isinstance(payload.get("status"), int) and payload.get("status") != 200:
             meta["notes"] = f"postcodes.io payload status {payload.get('status')}: {payload.get('error', '')}".strip()
             return None, meta
@@ -590,7 +565,6 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
             meta["notes"] = "postcodes.io returned no result object."
             return None, meta
 
-        # coords (so we can avoid NSPL/Nominatim)
         meta["lat"] = safe_float(result.get("latitude"))
         meta["lng"] = safe_float(result.get("longitude"))
 
@@ -620,11 +594,9 @@ def fetch_nomis_jsonstat(dataset_id: str, params: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Nomis payload is not a dict")
 
-    # NM_2023_1 returns the dataset at the ROOT (JSON-stat v2)
     if payload.get("class") == "dataset":
         return {"dataset": payload}
 
-    # Older / wrapped datasets
     if "dataset" in payload:
         return payload
 
@@ -935,7 +907,6 @@ def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optiona
 
 # ----------------------------
 # NSPL (Supabase view) postcode -> lat/lng
-# Requires: public.nspl_lookup(pcd_nospace, lat, lng)
 # ----------------------------
 def nspl_lookup_latlng(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
     meta = {
@@ -1032,7 +1003,7 @@ def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], D
 
 
 # ----------------------------
-# Summaries
+# Crime (UK Police)
 # ----------------------------
 def summarise_counts(title: str, counts: Dict[str, int], top_names: Optional[list] = None) -> str:
     parts = []
@@ -1046,9 +1017,6 @@ def summarise_counts(title: str, counts: Dict[str, int], top_names: Optional[lis
     return headline
 
 
-# ----------------------------
-# Crime (UK Police)
-# ----------------------------
 def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
     docs_url = "https://data.police.uk/docs/"
@@ -1131,9 +1099,6 @@ out body;
         return {"elements": []}
 
 
-# ----------------------------
-# ✅ TRANSPORT
-# ----------------------------
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
     base_sources = [
@@ -1165,7 +1130,6 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
         counts: Dict[str, int] = {"stations": 0, "tram_stops": 0, "public_transport": 0, "bus_stops": 0}
         named_stations: List[str] = []
         named_tram: List[str] = []
-        named_pt: List[str] = []
         named_bus: List[str] = []
 
         for e in elements:
@@ -1184,11 +1148,6 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
                 counts["tram_stops"] += 1
                 if nm:
                     named_tram.append(nm)
-
-            if "public_transport" in tags:
-                counts["public_transport"] += 1
-                if nm:
-                    named_pt.append(nm)
 
             if tags.get("highway") == "bus_stop":
                 counts["bus_stops"] += 1
@@ -1223,7 +1182,7 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
             + (f" (e.g., {', '.join(named_bus)})" if named_bus else "")
         )
 
-        if not elements or (counts["stations"] + counts["tram_stops"] + counts["bus_stops"] + counts["public_transport"]) == 0:
+        if not elements or (counts["stations"] + counts["tram_stops"] + counts["bus_stops"]) == 0:
             return metric_ok("No transport features returned from OSM for this area.", [], base_sources, retrieved, 0.0)
 
         summary = "Transport (OSM within ~1.2km):\n" + "\n".join(bullets)
@@ -1244,9 +1203,6 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
         )
 
 
-# ----------------------------
-# ✅ AMENITIES
-# ----------------------------
 def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
     base_sources = [
@@ -1618,22 +1574,24 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
         )
 
+    payload = {"postcode": pc, "radius_miles": r_miles, "limit_n": lim}
+
     try:
-        payload = {"postcode": pc, "radius_miles": r_miles, "limit_n": lim}
         res = supabase.rpc(HOUSING_RPC_NAME, payload).execute()
         rows = res.data if hasattr(res, "data") else None
         if not isinstance(rows, list):
             rows = []
 
         if not rows:
-            return metric_unavailable(
+            out = metric_unavailable(
                 f"No sold comparables returned within {r_miles} miles for {pc}.",
                 sources,
                 retrieved,
                 extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim, "rpc": HOUSING_RPC_NAME},
             )
+            out["metrics"]["payload"] = payload
+            return out
 
-        # ✅ Ensure rows have lat/lng (best-effort)
         enrich_meta = {}
         rows, enrich_meta = _enrich_housing_rows_with_latlng(rows)
 
@@ -1675,22 +1633,25 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "max_miles": max_m,
             "property_type_counts": ptypes,
             "latlngEnrichment": enrich_meta,
+            "payload": payload,
         }
 
         charts = build_housing_charts_from_rows(rows)
         out["soldComps"] = rows
         out["charts"] = charts
-
         return out
 
     except Exception as e:
         msg = str(e) or "Unknown error"
-        return metric_missing_provider(
+        out = metric_missing_provider(
             f"Housing RPC not available. Create Supabase function '{HOUSING_RPC_NAME}' then retry. Error: {msg}",
             sources,
             retrieved,
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim, "rpc": HOUSING_RPC_NAME},
         )
+        out["metrics"]["housingRpcError"] = msg
+        out["metrics"]["payload"] = payload
+        return out
 
 
 # ----------------------------
@@ -1768,6 +1729,9 @@ def market_insights():
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
+    # ✅ NEW: request-level cache bypass
+    force_refresh = bool(data.get("forceRefresh") is True)
+
     if MARKET_CONTRACT_MODE:
         nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "stub").strip()
         results = build_market_contract_stub(postcode, lat, lng, nomis_geo)
@@ -1786,24 +1750,24 @@ def market_insights():
 
     nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "").strip()
 
-    # ✅ include APP_CACHE_BUSTER so you can force refresh after changes
+    # ✅ include APP_CACHE_BUSTER + HOUSING_RPC_NAME so old cache can’t mask a function/env change
     cache_key = (
-        f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}::bust={APP_CACHE_BUSTER}"
+        f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
         if postcode else
-        f"market-insights::no-postcode::bust={APP_CACHE_BUSTER}"
+        f"market-insights::no-postcode::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
     )
 
-    # ✅ FIX: only serve cache if housing is OK and NON-EMPTY (prevents stale broken cache poisoning UI)
-    cached = cache_get(cache_key)
-    if cached:
-        try:
-            h = (cached.get("localAreaAnalysis") or {}).get("housing") or {}
-            hv = h.get("value") or []
-            if h.get("status") == "ok" and isinstance(hv, list) and len(hv) > 0:
-                return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
-        except Exception:
-            pass
-        # Otherwise ignore cache and recompute
+    if not force_refresh:
+        cached = cache_get(cache_key)
+        if cached:
+            try:
+                h = (cached.get("localAreaAnalysis") or {}).get("housing") or {}
+                hv = h.get("value") or []
+                if h.get("status") == "ok" and isinstance(hv, list) and len(hv) > 0:
+                    return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
+            except Exception:
+                pass
+            # ignore cache if housing isn’t good
 
     try:
         geo_meta = None
@@ -1852,16 +1816,17 @@ def market_insights():
             },
         }
 
-        # ✅ FIX: only cache if housing is OK and NON-EMPTY
-        try:
-            h = (results.get("localAreaAnalysis") or {}).get("housing") or {}
-            hv = h.get("value") or []
-            if h.get("status") == "ok" and isinstance(hv, list) and len(hv) > 0:
-                cache_set(cache_key, results)
-        except Exception:
-            pass
+        # only cache if housing is OK + non-empty and request didn’t force refresh
+        if not force_refresh:
+            try:
+                h = (results.get("localAreaAnalysis") or {}).get("housing") or {}
+                hv = h.get("value") or []
+                if h.get("status") == "ok" and isinstance(hv, list) and len(hv) > 0:
+                    cache_set(cache_key, results)
+            except Exception:
+                pass
 
-        return jsonify({**results, "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS}})
+        return jsonify({**results, "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS, "forceRefresh": force_refresh}})
 
     except Exception as e:
         print("❌ Error in /market-insights:", str(e))
@@ -1875,7 +1840,7 @@ def home():
         "status": "active",
         "supabaseEnabled": bool(supabase),
         "routes": {
-            "POST /market-insights": "{ 'postcode': 'EC3A 5DE' }  // optional: lat/lng",
+            "POST /market-insights": "{ 'postcode': 'EC3A 5DE', 'forceRefresh': true }  // optional: lat/lng",
             "POST /adapters/geocode/batch": "{ 'queries': ['PARROT ROW, ABERTILLERY, NP13 3AH', ...] }",
             "GET /adapters/geo?postcode=EC1A%201BB": "debug postcode -> LSOA(GSS) + coords",
             "GET /adapters/nomis?table=ts003&geography=2092957699": "Nomis TS003 (requires numeric geography id)",
