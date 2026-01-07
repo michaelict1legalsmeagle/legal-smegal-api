@@ -1792,9 +1792,18 @@ def market_insights():
         if postcode else
         f"market-insights::no-postcode::bust={APP_CACHE_BUSTER}"
     )
+
+    # ✅ FIX: only serve cache if housing is OK and NON-EMPTY (prevents stale broken cache poisoning UI)
     cached = cache_get(cache_key)
     if cached:
-        return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
+        try:
+            h = (cached.get("localAreaAnalysis") or {}).get("housing") or {}
+            hv = h.get("value") or []
+            if h.get("status") == "ok" and isinstance(hv, list) and len(hv) > 0:
+                return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
+        except Exception:
+            pass
+        # Otherwise ignore cache and recompute
 
     try:
         geo_meta = None
@@ -1843,7 +1852,15 @@ def market_insights():
             },
         }
 
-        cache_set(cache_key, results)
+        # ✅ FIX: only cache if housing is OK and NON-EMPTY
+        try:
+            h = (results.get("localAreaAnalysis") or {}).get("housing") or {}
+            hv = h.get("value") or []
+            if h.get("status") == "ok" and isinstance(hv, list) and len(hv) > 0:
+                cache_set(cache_key, results)
+        except Exception:
+            pass
+
         return jsonify({**results, "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS}})
 
     except Exception as e:
