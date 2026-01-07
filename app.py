@@ -1,5 +1,3 @@
-# app.py
-
 from flask import Flask, request, jsonify
 import requests
 import os
@@ -27,6 +25,9 @@ SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
 # ----------------------------
 _CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL_SECONDS = int(os.getenv("MARKET_INSIGHTS_CACHE_TTL_SECONDS", "21600"))  # default 6 hours
+
+# ✅ Cache buster so you can force-refresh after schema/contract changes
+APP_CACHE_BUSTER = (os.getenv("APP_CACHE_BUSTER", "") or "").strip()
 
 # ----------------------------
 # Contract freeze mode (debug)
@@ -58,6 +59,10 @@ HOUSING_MAX_LIMIT = int(os.getenv("HOUSING_MAX_LIMIT", "50"))
 HOUSING_DEFAULT_LIMIT = int(os.getenv("HOUSING_DEFAULT_LIMIT", "20"))
 HOUSING_DEFAULT_RADIUS_MILES = float(os.getenv("HOUSING_DEFAULT_RADIUS_MILES", "3"))
 HOUSING_CONFIDENCE_VALUE = float(os.getenv("HOUSING_CONFIDENCE_VALUE", "0.96"))
+
+# ✅ ensure sold comps have lat/lng (even if RPC doesn't return them)
+HOUSING_ENRICH_LATLNG = (os.getenv("HOUSING_ENRICH_LATLNG", "1").strip().lower() in {"1", "true", "yes", "on"})
+HOUSING_ENRICH_BATCH_LIMIT = int(os.getenv("HOUSING_ENRICH_BATCH_LIMIT", "10"))
 
 # Supabase-backed adapters
 SCHOOLS_SUPABASE_VIEW = os.getenv("SCHOOLS_SUPABASE_VIEW", "schools_by_district").strip()
@@ -305,6 +310,153 @@ def _google_geocode_one(query: str, api_key: str) -> Dict[str, Any]:
     return {"ok": True, "lat": float(lat), "lng": float(lng)}
 
 
+def _row_has_latlng(r: Dict[str, Any]) -> bool:
+    lat = safe_float(r.get("lat"))
+    lng = safe_float(r.get("lng"))
+    return (lat is not None) and (lng is not None)
+
+
+def _build_comp_geocode_query(r: Dict[str, Any]) -> str:
+    # Prefer full address string if present
+    parts: List[str] = []
+    for k in ("address", "town", "postcode"):
+        v = r.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v.strip())
+    return _norm_geocode_query(", ".join(parts))
+
+
+def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Best-effort: ensure rows include lat/lng.
+    Uses Supabase GEOCODE_CACHE_TABLE as read-through cache + Google as fallback.
+    """
+    meta = {
+        "enabled": HOUSING_ENRICH_LATLNG,
+        "attempted": 0,
+        "filled": 0,
+        "failed": 0,
+        "notes": "",
+    }
+
+    if not HOUSING_ENRICH_LATLNG:
+        meta["notes"] = "Enrichment disabled (HOUSING_ENRICH_LATLNG=0)."
+        return rows, meta
+
+    if not rows or not isinstance(rows, list):
+        meta["notes"] = "No rows to enrich."
+        return rows, meta
+
+    if not GOOGLE_MAPS_API_KEY:
+        meta["notes"] = "GOOGLE_MAPS_API_KEY not set; cannot enrich."
+        return rows, meta
+
+    if not supabase:
+        meta["notes"] = "Supabase not configured; cannot use geocode cache."
+        return rows, meta
+
+    # Identify rows missing coords
+    missing_idxs: List[int] = []
+    queries: List[str] = []
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            continue
+        if _row_has_latlng(r):
+            continue
+        q = _build_comp_geocode_query(r)
+        if not q:
+            continue
+        missing_idxs.append(i)
+        queries.append(q)
+
+    if not queries:
+        meta["notes"] = "All rows already contain lat/lng (or lacked address data)."
+        return rows, meta
+
+    # Dedup while preserving order
+    seen = set()
+    uniq_queries: List[str] = []
+    for q in queries:
+        if q in seen:
+            continue
+        uniq_queries.append(q)
+        seen.add(q)
+
+    uniq_queries = uniq_queries[:max(1, HOUSING_ENRICH_BATCH_LIMIT)]
+    meta["attempted"] = len(uniq_queries)
+
+    # 1) Read cache
+    cached_map: Dict[str, Dict[str, Any]] = {}
+    try:
+        res = supabase.table(GEOCODE_CACHE_TABLE).select("query,lat,lng").in_("query", uniq_queries).execute()
+        rows_cached = res.data if hasattr(res, "data") else []
+        if isinstance(rows_cached, list):
+            for row in rows_cached:
+                if isinstance(row, dict) and row.get("query"):
+                    cached_map[str(row["query"]).upper()] = row
+    except Exception:
+        cached_map = {}
+
+    # 2) Resolve each query (cache hit else Google)
+    resolved: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+
+    for q in uniq_queries:
+        qk = q.upper()
+        hit = cached_map.get(qk)
+        if hit:
+            lat = safe_float(hit.get("lat"))
+            lng = safe_float(hit.get("lng"))
+            if lat is not None and lng is not None:
+                resolved[q] = (lat, lng)
+                meta["filled"] += 1
+                continue
+
+        try:
+            g = _google_geocode_one(q, GOOGLE_MAPS_API_KEY)
+            if not g.get("ok"):
+                meta["failed"] += 1
+                continue
+
+            lat = safe_float(g.get("lat"))
+            lng = safe_float(g.get("lng"))
+            if lat is None or lng is None:
+                meta["failed"] += 1
+                continue
+
+            # write-through cache (best-effort)
+            try:
+                supabase.table(GEOCODE_CACHE_TABLE).upsert(
+                    {"query": q, "lat": lat, "lng": lng, "provider": "google"},
+                    on_conflict="query",
+                ).execute()
+            except Exception:
+                pass
+
+            resolved[q] = (lat, lng)
+            meta["filled"] += 1
+            time.sleep(0.05)
+
+        except Exception:
+            meta["failed"] += 1
+
+    # 3) Apply resolved to rows
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            continue
+        if _row_has_latlng(r):
+            continue
+        q = _build_comp_geocode_query(r)
+        if not q:
+            continue
+        if q in resolved:
+            lat, lng = resolved[q]
+            r["lat"] = lat
+            r["lng"] = lng
+
+    meta["notes"] = "Enrichment completed (cache + google)."
+    return rows, meta
+
+
 @app.route("/adapters/geocode/batch", methods=["POST"])
 def adapter_geocode_batch():
     """
@@ -353,7 +505,7 @@ def adapter_geocode_batch():
 
     # 2) Resolve each query
     for q in normalized_unique:
-        hit = cached_map.get(q)
+        hit = cached_map.get(q.upper())
         if hit:
             results.append({"query": q, "lat": hit.get("lat"), "lng": hit.get("lng"), "cached": True})
             continue
@@ -461,7 +613,6 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
 # ----------------------------
 # Nomis (JSON-stat) — UK-wide census tables
 # ----------------------------
-# ✅ Supports NM_2023_1 JSON-stat v2 root dataset
 def fetch_nomis_jsonstat(dataset_id: str, params: dict) -> dict:
     base = f"https://www.nomisweb.co.uk/api/v01/dataset/{dataset_id}.jsonstat.json"
     payload = _http_get_json_raw(base, params=params, timeout=NOMIS_TIMEOUT)
@@ -481,32 +632,20 @@ def fetch_nomis_jsonstat(dataset_id: str, params: dict) -> dict:
 
 
 def parse_jsonstat_single_dimension(jsonstat: dict) -> Dict[str, Any]:
-    """
-    JSON-stat v2 safe parser for the "single breakdown dim" case.
-
-    NM_2023_1 frequently returns:
-      - dataset.id: ["<breakdown_dim>", "geography", "measures", "time"] (or similar)
-      - dimension.id: None   (NOT present)
-    """
     ds = jsonstat.get("dataset") or {}
     dim = ds.get("dimension") or {}
 
-    # JSON-stat v2: dimension order usually lives in dataset.id
     dim_ids = ds.get("id") or dim.get("id") or []
     if not isinstance(dim_ids, list) or not dim_ids:
-        # fallback: infer from dimension keys
         if isinstance(dim, dict):
             dim_ids = [k for k in dim.keys() if isinstance(k, str)]
         else:
             dim_ids = []
 
-    # Exclude non-breakdown dims (including freq)
     exclude = {"date", "time", "geography", "measures", "freq"}
     candidate_dims = [d for d in dim_ids if isinstance(d, str) and d.lower() not in exclude]
-
     main_dim = candidate_dims[0] if candidate_dims else None
 
-    # fallback: pick a dimension that has category index/labels
     if not main_dim and isinstance(dim, dict):
         for d in dim_ids:
             if not isinstance(d, str) or d.lower() in exclude:
@@ -540,8 +679,6 @@ def parse_jsonstat_single_dimension(jsonstat: dict) -> Dict[str, Any]:
 
     items = []
     total_val = 0
-
-    # Assumes query constrains other dimensions to singletons (geography/time/measures/freq).
     for i, code in enumerate(codes):
         lab = labels.get(code) if isinstance(labels, dict) else str(code)
         v = values[i] if i < len(values) else None
@@ -584,7 +721,6 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
             extra_metrics={"label": label, "dimension": dimension, "categories": categories, "geography": geography},
         )
 
-    # Guard: Nomis URLs sometimes get copied with "..." (ellipsis). That WILL break.
     if "..." in categories or "…" in categories:
         return metric_unavailable(
             f"{label} categories contain an ellipsis (truncated copy). Use full category list (no ...).",
@@ -594,7 +730,6 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
         )
 
     try:
-        # NM_2023_1 requires `freq`
         params = {
             "date": "latest",
             "geography": geography,
@@ -629,7 +764,6 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
 # Housing charts (local aggregation)
 # ----------------------------
 def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    # Stable bins + stable ordering (UI contract)
     price_bins = [
         ("<£100k", 0, 100_000),
         ("£100–150k", 100_000, 150_000),
@@ -677,7 +811,6 @@ def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]
         if t:
             type_counts[t] = type_counts.get(t, 0) + 1
 
-    # Ensure a few common types always exist (stable UI legends)
     for common in ["Terraced", "Semi-detached", "Detached", "Flat/Maisonette", "Other"]:
         type_counts.setdefault(common, 0)
 
@@ -705,7 +838,6 @@ def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]
 def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optional[float], nomis_geo: str) -> Dict[str, Any]:
     retrieved = now_iso()
 
-    # Deterministic, UI-safe housing "sold comps" + charts
     housing_sold = [
         {
             "price": 149950,
@@ -715,6 +847,8 @@ def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optiona
             "address": "PARROT ROW",
             "town": "ABERTILLERY",
             "postcode": "NP13 3AH",
+            "lat": None,
+            "lng": None,
         },
         {
             "price": 85000,
@@ -724,6 +858,8 @@ def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optiona
             "address": "GLADSTONE STREET",
             "town": "ABERTILLERY",
             "postcode": "NP13 3HJ",
+            "lat": None,
+            "lng": None,
         },
     ]
     housing_charts = build_housing_charts_from_rows(housing_sold)
@@ -735,7 +871,6 @@ def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optiona
         retrieved_at=retrieved,
         confidence=1.0,
     )
-    # Contract keys (UI should rely on these)
     housing_metric["soldComps"] = housing_sold
     housing_metric["charts"] = housing_charts
 
@@ -1498,6 +1633,10 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim, "rpc": HOUSING_RPC_NAME},
             )
 
+        # ✅ Ensure rows have lat/lng (best-effort)
+        enrich_meta = {}
+        rows, enrich_meta = _enrich_housing_rows_with_latlng(rows)
+
         prices: List[int] = []
         ptypes: Dict[str, int] = {}
         miles_list: List[float] = []
@@ -1535,9 +1674,9 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "min_miles": min_m,
             "max_miles": max_m,
             "property_type_counts": ptypes,
+            "latlngEnrichment": enrich_meta,
         }
 
-        # Contract keys for UI (always present when ok)
         charts = build_housing_charts_from_rows(rows)
         out["soldComps"] = rows
         out["charts"] = charts
@@ -1591,12 +1730,10 @@ def adapter_housing_comps():
 
 @app.route("/adapters/nomis", methods=["GET"])
 def adapter_nomis():
-    # Make it harder to shoot yourself in the foot with malformed URLs.
     table_raw = (request.args.get("table", "") or "").strip()
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
     geography = (request.args.get("geography", "") or "").strip()
 
-    # If someone pasted "...?table=ts003postcode=B1%201AA" (missing &), recover.
     if ("postcode=" in table_raw) and (not postcode):
         parts = table_raw.split("postcode=", 1)
         table_raw = parts[0]
@@ -1604,7 +1741,6 @@ def adapter_nomis():
 
     table = table_raw.lower().strip()
 
-    # For NM_2023_1, geography must be a NUMERIC Nomis geography id.
     if not geography:
         geography = NOMIS_DEFAULT_GEOGRAPHY
 
@@ -1632,31 +1768,30 @@ def market_insights():
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
-    # ----------------------------
-    # Contract freeze mode (bypass cache + providers)
-    # ----------------------------
     if MARKET_CONTRACT_MODE:
         nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "stub").strip()
         results = build_market_contract_stub(postcode, lat, lng, nomis_geo)
         return jsonify({**results, "_contract": {"mode": True}, "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS}})
 
-    # Postcode -> LSOA (GSS) + coords. (GSS is NOT usable as Nomis geography id)
     lsoa_gss = ""
     lsoa_meta = None
     if postcode:
         lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
 
-    # Use postcodes.io coords FIRST (prevents Nominatim 403; avoids NSPL dependency)
     if (lat is None or lng is None) and isinstance(lsoa_meta, dict):
         if lat is None:
             lat = safe_float(lsoa_meta.get("lat"))
         if lng is None:
             lng = safe_float(lsoa_meta.get("lng"))
 
-    # For Nomis calls in this build, we ONLY use a numeric geography id:
     nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "").strip()
 
-    cache_key = f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}" if postcode else "market-insights::no-postcode"
+    # ✅ include APP_CACHE_BUSTER so you can force refresh after changes
+    cache_key = (
+        f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}::bust={APP_CACHE_BUSTER}"
+        if postcode else
+        f"market-insights::no-postcode::bust={APP_CACHE_BUSTER}"
+    )
     cached = cache_get(cache_key)
     if cached:
         return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
@@ -1734,12 +1869,15 @@ def home():
             "GET /adapters/housing/comps?postcode=EC3A%205DE&radius_miles=3&limit=20": "debug housing sold comps (RPC)",
         },
         "envHints": {
+            "APP_CACHE_BUSTER": "change this value to force refresh of cached /market-insights payloads",
             "MARKET_CONTRACT_MODE": "set to 1 to force deterministic UI-safe payload (bypasses cache/providers)",
             "SUPABASE_URL": "required for supabase providers",
             "SUPABASE_SERVICE_ROLE_KEY": "preferred (server-only). SUPABASE_KEY also supported as fallback.",
-            "GOOGLE_MAPS_API_KEY": "required for /adapters/geocode/batch (server-side geocoding + cache)",
+            "GOOGLE_MAPS_API_KEY": "required for /adapters/geocode/batch AND housing lat/lng enrichment",
             "GEOCODE_CACHE_TABLE": "defaults to geocode_cache",
             "GEOCODE_BATCH_LIMIT": "defaults to 10",
+            "HOUSING_ENRICH_LATLNG": "defaults to 1; ensures sold comps include lat/lng for map pins",
+            "HOUSING_ENRICH_BATCH_LIMIT": "defaults to 10; max comps to enrich per request",
             "SCHOOLS_PROVIDER": "set to 'supabase' to enable",
             "BROADBAND_PROVIDER": "set to 'supabase' to enable",
             "BROADBAND_SUPABASE_TABLE": "e.g. broadband_by_postcode",
