@@ -7,6 +7,7 @@ import re
 from flask_cors import CORS
 from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -794,6 +795,126 @@ def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]
     return charts
 
 
+def _parse_date_any(v: Any) -> Optional[datetime]:
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1]
+        s = s.replace(" ", "T")
+        return datetime.fromisoformat(s)
+    except Exception:
+        try:
+            return datetime.strptime(s[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+
+
+def _evidence_grade(n: int) -> str:
+    if n >= 20:
+        return "strong"
+    if n >= 10:
+        return "moderate"
+    if n >= 3:
+        return "thin"
+    return "minimal"
+
+
+def _pricing_power_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    pairs: List[Tuple[datetime, int]] = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        dt = _parse_date_any(r.get("date"))
+        pr = safe_int(r.get("price"))
+        if dt is None or pr is None:
+            continue
+        pairs.append((dt, pr))
+
+    if not pairs:
+        return {
+            "status": "unavailable",
+            "trend": "unknown",
+            "windowDays": 365,
+            "evidenceGrade": "minimal",
+            "counts": {"total": 0, "recent": 0, "previous": 0},
+            "medians": {"recent": None, "previous": None},
+            "pctChange": None,
+            "confidence": 0.0,
+            "notes": "No dated sale prices available in comps for pricing power analysis.",
+        }
+
+    pairs.sort(key=lambda x: x[0])
+    latest_dt = pairs[-1][0]
+    earliest_dt = pairs[0][0]
+
+    recent_from = latest_dt - timedelta(days=365)
+    prev_from = latest_dt - timedelta(days=730)
+
+    recent = [p for (d, p) in pairs if d >= recent_from]
+    prev = [p for (d, p) in pairs if (d < recent_from and d >= prev_from)]
+
+    n_total = len(pairs)
+    n_recent = len(recent)
+    n_prev = len(prev)
+
+    def _median_int(values: List[int]) -> Optional[int]:
+        vs = sorted([v for v in values if isinstance(v, int)])
+        if not vs:
+            return None
+        mid = len(vs) // 2
+        if len(vs) % 2 == 1:
+            return vs[mid]
+        return int((vs[mid - 1] + vs[mid]) / 2)
+
+    med_recent = _median_int(recent)
+    med_prev = _median_int(prev)
+
+    pct_change: Optional[float] = None
+    if isinstance(med_recent, int) and isinstance(med_prev, int) and med_prev > 0:
+        pct_change = ((med_recent - med_prev) / float(med_prev)) * 100.0
+
+    trend = "unknown"
+    if pct_change is not None:
+        if pct_change > 2.0:
+            trend = "up"
+        elif pct_change < -2.0:
+            trend = "down"
+        else:
+            trend = "flat"
+
+    grade = _evidence_grade(n_total)
+    conf = 0.0
+    if grade == "strong":
+        conf = 0.92
+    elif grade == "moderate":
+        conf = 0.87
+    elif grade == "thin":
+        conf = 0.80
+    else:
+        conf = 0.70
+
+    notes = ""
+    if n_prev < 3:
+        notes = "Limited comparison window: fewer than 3 sales in the prior 12 months."
+
+    return {
+        "status": "ok",
+        "trend": trend,
+        "windowDays": 365,
+        "evidenceGrade": grade,
+        "counts": {"total": n_total, "recent": n_recent, "previous": n_prev},
+        "medians": {"recent": med_recent, "previous": med_prev},
+        "pctChange": pct_change,
+        "dateRange": {"earliest": earliest_dt.date().isoformat(), "latest": latest_dt.date().isoformat()},
+        "confidence": conf,
+        "notes": notes,
+    }
+
+
 def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optional[float], nomis_geo: str) -> Dict[str, Any]:
     retrieved = now_iso()
 
@@ -832,6 +953,8 @@ def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optiona
     )
     housing_metric["soldComps"] = housing_sold
     housing_metric["charts"] = housing_charts
+    housing_metric["metrics"] = housing_metric.get("metrics") or {}
+    housing_metric["metrics"]["pricingPower"] = _pricing_power_from_rows(housing_sold)
 
     census_stub = metric_ok(
         summary="Contract mode: census TS003 placeholder.",
@@ -1614,6 +1737,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 print("⚠️ propertyTypes bins total mismatch:", {"binsTotal": t_total, "rows": len(rows), "sampleType": (rows[0] or {}).get("property_type")})
         except Exception:
             pass
+
+        out["metrics"]["pricingPower"] = _pricing_power_from_rows(rows)
 
         out["soldComps"] = rows
         out["charts"] = charts
