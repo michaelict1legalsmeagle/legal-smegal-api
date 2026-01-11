@@ -4,6 +4,8 @@ import os
 import time
 import json
 import re
+import math
+import random
 from flask_cors import CORS
 from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
@@ -250,7 +252,6 @@ def _norm_geocode_query(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
-
 def _google_geocode_one(query: str, api_key: str) -> Dict[str, Any]:
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     r = requests.get(url, params={"address": query, "key": api_key}, timeout=12)
@@ -477,7 +478,6 @@ def adapter_geocode_batch():
             failed.append({"query": q, "error": f"exception:{str(e)}"})
 
     return jsonify({"status": "ok", "results": results, "failed": failed})
-
 
 def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[str, Any]]:
     retrieved = now_iso()
@@ -823,6 +823,240 @@ def _evidence_grade(n: int) -> str:
     return "minimal"
 
 
+# -------------------------------
+# Trend Card #1 (GATED, EVIDENCE-FIRST)
+# Pricing Power (Sold Comps Momentum)
+# -------------------------------
+
+def _quantile_float(values: List[float], q: float) -> Optional[float]:
+    vs = sorted([float(v) for v in values if isinstance(v, (int, float)) and math.isfinite(float(v))])
+    if not vs:
+        return None
+    q = max(0.0, min(1.0, float(q)))
+    idx = int(round((len(vs) - 1) * q))
+    idx = max(0, min(len(vs) - 1, idx))
+    return float(vs[idx])
+
+
+def _median_float(values: List[float]) -> Optional[float]:
+    vs = sorted([float(v) for v in values if isinstance(v, (int, float)) and math.isfinite(float(v))])
+    if not vs:
+        return None
+    mid = len(vs) // 2
+    if len(vs) % 2 == 1:
+        return float(vs[mid])
+    return float((vs[mid - 1] + vs[mid]) / 2.0)
+
+
+def _ols_slope(xs: List[float], ys: List[float]) -> Optional[float]:
+    if not xs or not ys or len(xs) != len(ys) or len(xs) < 3:
+        return None
+    x_mean = sum(xs) / float(len(xs))
+    y_mean = sum(ys) / float(len(ys))
+    num = 0.0
+    den = 0.0
+    for x, y in zip(xs, ys):
+        dx = x - x_mean
+        num += dx * (y - y_mean)
+        den += dx * dx
+    if den == 0.0:
+        return None
+    return num / den
+
+
+def _bootstrap_slope_ci_width(xs: List[float], ys: List[float], iters: int = 200) -> Optional[float]:
+    n = len(xs)
+    if n < 10:
+        return None
+
+    seed = int(n * 1000 + (xs[0] if xs else 0.0))
+    rnd = random.Random(seed)
+    slopes: List[float] = []
+    iters = max(50, int(iters))
+
+    for _ in range(iters):
+        bx: List[float] = []
+        by: List[float] = []
+        for _j in range(n):
+            i = rnd.randrange(0, n)
+            bx.append(xs[i])
+            by.append(ys[i])
+        s = _ols_slope(bx, by)
+        if s is not None and math.isfinite(float(s)):
+            slopes.append(float(s))
+
+    if len(slopes) < 30:
+        return None
+
+    lo = _quantile_float(slopes, 0.05)
+    hi = _quantile_float(slopes, 0.95)
+    if lo is None or hi is None:
+        return None
+    return float(hi - lo)
+
+
+def build_pricing_power_sold_comps_momentum(rows: List[Dict[str, Any]], radius_miles: Optional[float]) -> Dict[str, Any]:
+    retrieved = now_iso()
+    window_months = 12
+
+    obs: List[Tuple[datetime, float, str]] = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        dt = _parse_date_any(r.get("date"))
+        pr = safe_float(r.get("price"))
+        if dt is None or pr is None or pr <= 0:
+            continue
+        cid = str(r.get("id") or r.get("uid") or r.get("transaction_id") or r.get("uprn") or "").strip()
+        obs.append((dt, float(pr), cid))
+
+    if not obs:
+        return {
+            "status": "unavailable",
+            "confidenceValue": 0.0,
+            "reason": "No dated sold comps available for momentum analysis.",
+            "window": {"months": window_months, "radiusMiles": radius_miles},
+            "sample": {"n": 0, "dateMin": None, "dateMax": None},
+            "evidence": {"method": "ols-log-price-regression", "outlierRule": "trim p5..p95", "compsUsed": []},
+            "retrievedAtISO": retrieved,
+        }
+
+    obs.sort(key=lambda t: t[0])
+    date_min = obs[0][0]
+    date_max = obs[-1][0]
+
+    cutoff = date_max - timedelta(days=int(window_months * 30.5))
+    obs_w = [(d, p, cid) for (d, p, cid) in obs if d >= cutoff]
+
+    if len(obs_w) < 10:
+        return {
+            "status": "suppressed",
+            "confidenceValue": 0.0,
+            "reason": f"Insufficient sold comps in last {window_months} months (n={len(obs_w)}).",
+            "window": {"months": window_months, "radiusMiles": radius_miles},
+            "sample": {"n": len(obs_w), "dateMin": date_min.date().isoformat(), "dateMax": date_max.date().isoformat()},
+            "evidence": {"method": "ols-log-price-regression", "outlierRule": "trim p5..p95", "compsUsed": []},
+            "retrievedAtISO": retrieved,
+        }
+
+    prices = [p for (_d, p, _cid) in obs_w]
+    p5 = _quantile_float(prices, 0.05)
+    p95 = _quantile_float(prices, 0.95)
+    if p5 is None or p95 is None or p95 <= p5:
+        p5, p95 = None, None
+
+    filtered: List[Tuple[datetime, float, str]] = []
+    for d, p, cid in obs_w:
+        if p <= 0:
+            continue
+        if p5 is not None and p95 is not None:
+            if p < p5 or p > p95:
+                continue
+        filtered.append((d, p, cid))
+
+    n = len(filtered)
+    if n < 10:
+        return {
+            "status": "suppressed",
+            "confidenceValue": 0.0,
+            "reason": f"Too few observations after outlier trimming (n={n}).",
+            "window": {"months": window_months, "radiusMiles": radius_miles},
+            "sample": {"n": n, "dateMin": date_min.date().isoformat(), "dateMax": date_max.date().isoformat()},
+            "evidence": {"method": "ols-log-price-regression", "outlierRule": "trim p5..p95", "compsUsed": [c for (_d, _p, c) in filtered if c][:250]},
+            "retrievedAtISO": retrieved,
+        }
+
+    t0 = filtered[0][0]
+    xs: List[float] = []
+    ys: List[float] = []
+    for d, p, _cid in filtered:
+        days = float((d - t0).days)
+        xs.append(days)
+        ys.append(math.log(float(p)))
+
+    slope = _ols_slope(xs, ys)
+    if slope is None:
+        return {
+            "status": "suppressed",
+            "confidenceValue": 0.0,
+            "reason": "Could not compute momentum slope (degenerate data).",
+            "window": {"months": window_months, "radiusMiles": radius_miles},
+            "sample": {"n": n, "dateMin": date_min.date().isoformat(), "dateMax": date_max.date().isoformat()},
+            "evidence": {"method": "ols-log-price-regression", "outlierRule": "trim p5..p95", "compsUsed": [c for (_d, _p, c) in filtered if c][:250]},
+            "retrievedAtISO": retrieved,
+        }
+
+    momentum_annualized_pct = (math.exp(float(slope) * 365.0) - 1.0) * 100.0
+
+    last_dt = filtered[-1][0]
+    r0 = last_dt - timedelta(days=90)
+    p0 = last_dt - timedelta(days=180)
+    recent_vals = [p for (d, p, _cid) in filtered if d >= r0]
+    prev_vals = [p for (d, p, _cid) in filtered if (d < r0 and d >= p0)]
+
+    med_recent = _median_float(recent_vals)
+    med_prev = _median_float(prev_vals)
+    recent_shift_pct: Optional[float] = None
+    if med_recent is not None and med_prev is not None and med_prev > 0:
+        recent_shift_pct = ((med_recent - med_prev) / float(med_prev)) * 100.0
+
+    months_seen = len(set((d.year, d.month) for (d, _p, _cid) in filtered))
+    recent_120 = len([1 for (d, _p, _cid) in filtered if d >= (last_dt - timedelta(days=120))])
+    ciw = _bootstrap_slope_ci_width(xs, ys, iters=200)
+
+    reasons: List[str] = []
+    if n < 40:
+        reasons.append(f"n<40 (n={n})")
+    if months_seen < 6:
+        reasons.append(f"months_seen<6 (months_seen={months_seen})")
+    if recent_120 < 10:
+        reasons.append(f"recent_120<10 (recent_120={recent_120})")
+    if ciw is None:
+        reasons.append("bootstrap_ci_unavailable")
+    else:
+        if float(ciw) > 0.10:
+            reasons.append(f"ci_width_too_wide (ciw={float(ciw):.4f})")
+
+    headline = "Flat"
+    if momentum_annualized_pct > 5.0:
+        headline = "Upward pressure"
+    elif momentum_annualized_pct < -5.0:
+        headline = "Downward pressure"
+    elif abs(momentum_annualized_pct) < 2.0:
+        headline = "Flat"
+    else:
+        headline = "Slightly moving"
+
+    base = {
+        "headline": headline,
+        "momentumAnnualizedPct": float(momentum_annualized_pct),
+        "recentMedianShiftPct": float(recent_shift_pct) if recent_shift_pct is not None else None,
+        "unit": "£",
+        "window": {"months": window_months, "radiusMiles": radius_miles},
+        "sample": {
+            "n": int(n),
+            "dateMin": date_min.date().isoformat(),
+            "dateMax": date_max.date().isoformat(),
+            "monthsSeen": int(months_seen),
+            "recent120Count": int(recent_120),
+        },
+        "evidence": {
+            "method": "ols-log-price-regression",
+            "outlierRule": "trim p5..p95",
+            "bootstrapIters": 200,
+            "bootstrapSlopeCIWidth": float(ciw) if ciw is not None else None,
+            "compsUsed": [c for (_d, _p, c) in filtered if c][:250],
+            "notes": [],
+        },
+        "retrievedAtISO": retrieved,
+    }
+
+    if not reasons:
+        return {**base, "status": "ok", "confidenceValue": float(MIN_VERIFIED)}
+
+    return {**base, "status": "suppressed", "confidenceValue": 0.0, "reason": "Gating failed: " + ", ".join(reasons)}
+
+
 def _pricing_power_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     pairs: List[Tuple[datetime, int]] = []
     for r in rows or []:
@@ -955,6 +1189,9 @@ def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optiona
     housing_metric["charts"] = housing_charts
     housing_metric["metrics"] = housing_metric.get("metrics") or {}
     housing_metric["metrics"]["pricingPower"] = _pricing_power_from_rows(housing_sold)
+    housing_metric["metrics"]["pricingPowerSoldCompsMomentum"] = build_pricing_power_sold_comps_momentum(
+        housing_sold, HOUSING_DEFAULT_RADIUS_MILES
+    )
 
     census_stub = metric_ok(
         summary="Contract mode: census TS003 placeholder.",
@@ -1739,6 +1976,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             pass
 
         out["metrics"]["pricingPower"] = _pricing_power_from_rows(rows)
+        out["metrics"]["pricingPowerSoldCompsMomentum"] = build_pricing_power_sold_comps_momentum(rows, r_miles)
 
         out["soldComps"] = rows
         out["charts"] = charts
