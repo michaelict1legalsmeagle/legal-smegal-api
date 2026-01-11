@@ -14,57 +14,42 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GOOGLE_MAPS_API_KEY = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
 
-# ---- Supabase env hardening (support legacy names) ----
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 SUPABASE_KEY_FALLBACK = (os.getenv("SUPABASE_KEY") or "").strip()
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
 
-# ----------------------------
-# Caching (in-memory, TTL)
-# ----------------------------
 _CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL_SECONDS = int(os.getenv("MARKET_INSIGHTS_CACHE_TTL_SECONDS", "21600"))  # default 6 hours
+CACHE_TTL_SECONDS = int(os.getenv("MARKET_INSIGHTS_CACHE_TTL_SECONDS", "21600"))
 
-# ✅ Cache buster so you can force-refresh after schema/contract changes
 APP_CACHE_BUSTER = (os.getenv("APP_CACHE_BUSTER", "") or "").strip()
 
-# ----------------------------
-# Contract freeze mode (debug)
-# ----------------------------
 MARKET_CONTRACT_MODE = (os.getenv("MARKET_CONTRACT_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
 
-# Identify ourselves to public services (Nominatim requires a proper UA)
 HTTP_USER_AGENT = os.getenv(
     "HTTP_USER_AGENT",
     "LegalSmegal/1.0 (market-insights; contact=admin@example.com)"
 )
 
-# Safety + stability: bound payload sizes
 MAX_CRIMES = int(os.getenv("MAX_CRIMES", "300"))
 MAX_OSM_NAMES = int(os.getenv("MAX_OSM_NAMES", "250"))
 DEFAULT_OSM_RADIUS = int(os.getenv("OSM_RADIUS_METERS", "1200"))
 
-# Confidence rules
 MIN_VERIFIED = float(os.getenv("MIN_VERIFIED_CONFIDENCE", "0.95"))
 
-# Provider toggles
-SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()          # "supabase" or ""
-BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()      # "supabase" or ""
+SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()
+BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()
 
-# Housing provider (Supabase RPC)
-HOUSING_PROVIDER = os.getenv("HOUSING_PROVIDER", "supabase_rpc").strip().lower()   # "supabase_rpc" or ""
+HOUSING_PROVIDER = os.getenv("HOUSING_PROVIDER", "supabase_rpc").strip().lower()
 HOUSING_RPC_NAME = os.getenv("HOUSING_RPC_NAME", "housing_comps_v1").strip()
 HOUSING_MAX_LIMIT = int(os.getenv("HOUSING_MAX_LIMIT", "50"))
 HOUSING_DEFAULT_LIMIT = int(os.getenv("HOUSING_DEFAULT_LIMIT", "20"))
 HOUSING_DEFAULT_RADIUS_MILES = float(os.getenv("HOUSING_DEFAULT_RADIUS_MILES", "3"))
 HOUSING_CONFIDENCE_VALUE = float(os.getenv("HOUSING_CONFIDENCE_VALUE", "0.96"))
 
-# ✅ ensure sold comps have lat/lng (even if RPC doesn't return them)
 HOUSING_ENRICH_LATLNG = (os.getenv("HOUSING_ENRICH_LATLNG", "1").strip().lower() in {"1", "true", "yes", "on"})
 HOUSING_ENRICH_BATCH_LIMIT = int(os.getenv("HOUSING_ENRICH_BATCH_LIMIT", "10"))
 
-# Supabase-backed adapters
 SCHOOLS_SUPABASE_VIEW = os.getenv("SCHOOLS_SUPABASE_VIEW", "schools_by_district").strip()
 SCHOOLS_SUPABASE_FALLBACK_TABLE = os.getenv("SCHOOLS_SUPABASE_FALLBACK_TABLE", "schools_clean_v2").strip()
 
@@ -75,42 +60,28 @@ BROADBAND_SUPABASE_TABLE = os.getenv("BROADBAND_SUPABASE_TABLE", "").strip()
 BROADBAND_MAX_RESULTS = int(os.getenv("BROADBAND_MAX_RESULTS", "5"))
 BROADBAND_CONFIDENCE_VALUE = float(os.getenv("BROADBAND_CONFIDENCE_VALUE", "0.90"))
 
-# ----------------------------
-# Nomis (Census 2021) API
-# ----------------------------
 NOMIS_ENABLED = (os.getenv("NOMIS_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"})
 NOMIS_DATASET_ID = os.getenv("NOMIS_DATASET_ID", "NM_2023_1").strip()
 NOMIS_DEFAULT_GEOGRAPHY = os.getenv("NOMIS_DEFAULT_GEOGRAPHY", "").strip()
 NOMIS_TIMEOUT = int(os.getenv("NOMIS_TIMEOUT", "20"))
-
-# ✅ NM_2023_1 requires freq
 NOMIS_FREQ = os.getenv("NOMIS_FREQ", "A").strip()
 
-# ✅ IMPORTANT: JSON-stat payload shows id "c2021_hhcomp_15" (lowercase).
-# Default must match dataset ids exactly; you can override via env.
 NOMIS_TS003_DIM = os.getenv("NOMIS_TS003_DIM", "c2021_hhcomp_15").strip()
 NOMIS_TS003_CATS = os.getenv(
     "NOMIS_TS003_CATS",
     "1001,1,2,1002,1003,4,5,6,1004,7,8,9,1005,10,11,1006,12,1007,13,14"
 ).strip()
 
-# TS044 / TS054 are configurable (must match dataset ids exactly)
 NOMIS_TS044_DIM = os.getenv("NOMIS_TS044_DIM", "").strip()
 NOMIS_TS044_CATS = os.getenv("NOMIS_TS044_CATS", "").strip()
 
 NOMIS_TS054_DIM = os.getenv("NOMIS_TS054_DIM", "").strip()
 NOMIS_TS054_CATS = os.getenv("NOMIS_TS054_CATS", "").strip()
 
-# ----------------------------
-# Postcode -> LSOA (GSS) + coords via postcodes.io (UK-wide)
-# ----------------------------
 POSTCODES_IO_TIMEOUT = int(os.getenv("POSTCODES_IO_TIMEOUT", "10"))
-POSTCODES_IO_CACHE_TTL_SECONDS = int(os.getenv("POSTCODES_IO_CACHE_TTL_SECONDS", "2592000"))  # 30 days
+POSTCODES_IO_CACHE_TTL_SECONDS = int(os.getenv("POSTCODES_IO_CACHE_TTL_SECONDS", "2592000"))
 _GEO_CACHE: Dict[str, Dict[str, Any]] = {}
 
-# ----------------------------
-# Geocode cache table (Supabase)
-# ----------------------------
 GEOCODE_CACHE_TABLE = os.getenv("GEOCODE_CACHE_TABLE", "geocode_cache").strip()
 GEOCODE_BATCH_LIMIT = int(os.getenv("GEOCODE_BATCH_LIMIT", "10"))
 
@@ -122,22 +93,17 @@ else:
     print("🔴 Supabase env vars not set. Supabase features are DISABLED.")
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def normalize_postcode(pc: str) -> str:
-    """UK canonical display format: uppercase, single internal spaces."""
     if not isinstance(pc, str):
         return ""
     return " ".join(pc.strip().upper().split())
 
 
 def normalize_postcode_nospace(pc: str) -> str:
-    """UK canonical lookup key: uppercase, remove all whitespace."""
     if not isinstance(pc, str):
         return ""
     return re.sub(r"\s+", "", pc.strip().upper())
@@ -185,7 +151,7 @@ def geo_cache_set(key: str, value: Dict[str, Any]) -> None:
 def safe_float(v: Any) -> Optional[float]:
     try:
         f = float(v)
-        if f != f:  # NaN
+        if f != f:
             return None
         return f
     except Exception:
@@ -278,9 +244,6 @@ def _http_post_text(url: str, data: bytes, headers: Optional[dict] = None, timeo
     return r.status_code, r.text or ""
 
 
-# ----------------------------
-# ✅ Google Geocoding + Supabase cache (batch)
-# ----------------------------
 def _norm_geocode_query(s: str) -> str:
     s = (s or "").strip().upper()
     s = re.sub(r"\s+", " ", s)
@@ -350,9 +313,8 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
         meta["notes"] = "Supabase not configured; cannot use geocode cache."
         return rows, meta
 
-    missing_idxs: List[int] = []
     queries: List[str] = []
-    for i, r in enumerate(rows):
+    for r in rows:
         if not isinstance(r, dict):
             continue
         if _row_has_latlng(r):
@@ -360,7 +322,6 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
         q = _build_comp_geocode_query(r)
         if not q:
             continue
-        missing_idxs.append(i)
         queries.append(q)
 
     if not queries:
@@ -429,7 +390,7 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
         except Exception:
             meta["failed"] += 1
 
-    for i, r in enumerate(rows):
+    for r in rows:
         if not isinstance(r, dict):
             continue
         if _row_has_latlng(r):
@@ -584,9 +545,6 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
         return None, meta
 
 
-# ----------------------------
-# Nomis (JSON-stat) — UK-wide census tables
-# ----------------------------
 def fetch_nomis_jsonstat(dataset_id: str, params: dict) -> dict:
     base = f"https://www.nomisweb.co.uk/api/v01/dataset/{dataset_id}.jsonstat.json"
     payload = _http_get_json_raw(base, params=params, timeout=NOMIS_TIMEOUT)
@@ -732,9 +690,35 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
         return metric_unavailable(f"{label} fetch/parse failed: {str(e)}", sources, retrieved)
 
 
-# ----------------------------
-# Housing charts (local aggregation)
-# ----------------------------
+def map_property_type_label(v: Any) -> str:
+    s = (str(v or "").strip())
+    if not s:
+        return ""
+    up = s.upper()
+    if up == "D":
+        return "Detached"
+    if up == "S":
+        return "Semi-detached"
+    if up == "T":
+        return "Terraced"
+    if up == "F":
+        return "Flat/Maisonette"
+    if up == "O":
+        return "Other"
+
+    low = s.lower()
+    if "semi" in low:
+        return "Semi-detached"
+    if "terr" in low:
+        return "Terraced"
+    if "detach" in low and "semi" not in low:
+        return "Detached"
+    if "flat" in low or "maison" in low:
+        return "Flat/Maisonette"
+
+    return "Other"
+
+
 def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     price_bins = [
         ("<£100k", 0, 100_000),
@@ -753,14 +737,21 @@ def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]
 
     price_counts = {lab: 0 for (lab, _, _) in price_bins}
     dist_counts = {lab: 0 for (lab, _, _) in dist_bins}
-    type_counts: Dict[str, int] = {}
+
+    type_counts: Dict[str, int] = {
+        "Terraced": 0,
+        "Semi-detached": 0,
+        "Detached": 0,
+        "Flat/Maisonette": 0,
+        "Other": 0,
+    }
 
     for r in rows:
         if not isinstance(r, dict):
             continue
         p = safe_int(r.get("price"))
         m = safe_float(r.get("miles"))
-        t = (r.get("property_type") or "").strip()
+        t = map_property_type_label(r.get("property_type"))
 
         if isinstance(p, int):
             for lab, lo, hi in price_bins:
@@ -783,9 +774,6 @@ def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]
         if t:
             type_counts[t] = type_counts.get(t, 0) + 1
 
-    for common in ["Terraced", "Semi-detached", "Detached", "Flat/Maisonette", "Other"]:
-        type_counts.setdefault(common, 0)
-
     charts = {
         "priceBands": {
             "title": "Price bands (sold comps)",
@@ -793,8 +781,10 @@ def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]
         },
         "propertyTypes": {
             "title": "Property types (sold comps)",
-            "bins": [{"label": lab, "value": int(type_counts.get(lab, 0))}
-                     for lab in ["Terraced", "Semi-detached", "Detached", "Flat/Maisonette", "Other"]],
+            "bins": [
+                {"label": lab, "value": int(type_counts.get(lab, 0))}
+                for lab in ["Terraced", "Semi-detached", "Detached", "Flat/Maisonette", "Other"]
+            ],
         },
         "distanceBands": {
             "title": "Distance bands (sold comps)",
@@ -804,9 +794,6 @@ def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]
     return charts
 
 
-# ----------------------------
-# Contract freeze payload
-# ----------------------------
 def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optional[float], nomis_geo: str) -> Dict[str, Any]:
     retrieved = now_iso()
 
@@ -905,9 +892,6 @@ def build_market_contract_stub(postcode: str, lat: Optional[float], lng: Optiona
     return results
 
 
-# ----------------------------
-# NSPL (Supabase view) postcode -> lat/lng
-# ----------------------------
 def nspl_lookup_latlng(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
     meta = {
         "retrievedAtISO": now_iso(),
@@ -960,9 +944,6 @@ def nspl_lookup_latlng(postcode: str) -> Tuple[Optional[float], Optional[float],
         return None, None, meta
 
 
-# ----------------------------
-# Geocoding (Nominatim) fallback only
-# ----------------------------
 def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], Dict[str, Any]]:
     pc = normalize_postcode(postcode)
     meta = {
@@ -1002,9 +983,6 @@ def geocode_postcode(postcode: str) -> Tuple[Optional[float], Optional[float], D
         return None, None, meta
 
 
-# ----------------------------
-# Crime (UK Police)
-# ----------------------------
 def summarise_counts(title: str, counts: Dict[str, int], top_names: Optional[list] = None) -> str:
     parts = []
     for k in sorted(counts.keys()):
@@ -1070,9 +1048,6 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
         )
 
 
-# ----------------------------
-# OSM (Overpass) Utilities
-# ----------------------------
 def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
     q = f"""
 [out:json];
@@ -1330,9 +1305,6 @@ nwr["tourism"](around:{radius},{lat},{lng});
         )
 
 
-# ----------------------------
-# Schools (Supabase adapter)
-# ----------------------------
 def get_schools_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
@@ -1441,9 +1413,6 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
     )
 
 
-# ----------------------------
-# Broadband (Supabase adapter - optional)
-# ----------------------------
 def get_broadband_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
@@ -1527,9 +1496,6 @@ def get_broadband_data(postcode: str) -> Dict[str, Any]:
     )
 
 
-# ----------------------------
-# Housing (SOLD COMPS via Supabase RPC)
-# ----------------------------
 def _median_int(values: List[int]) -> Optional[int]:
     vs = sorted([v for v in values if isinstance(v, int)])
     if not vs:
@@ -1604,7 +1570,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             pr = safe_int(r.get("price"))
             if isinstance(pr, int):
                 prices.append(pr)
-            pt = (r.get("property_type") or "").strip()
+            pt = map_property_type_label(r.get("property_type"))
             if pt:
                 ptypes[pt] = ptypes.get(pt, 0) + 1
             mi = safe_float(r.get("miles"))
@@ -1637,6 +1603,18 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         }
 
         charts = build_housing_charts_from_rows(rows)
+
+        try:
+            t_total = sum(
+                int(b.get("value") or 0)
+                for b in (charts.get("propertyTypes") or {}).get("bins", [])
+                if isinstance(b, dict)
+            )
+            if t_total != len(rows):
+                print("⚠️ propertyTypes bins total mismatch:", {"binsTotal": t_total, "rows": len(rows), "sampleType": (rows[0] or {}).get("property_type")})
+        except Exception:
+            pass
+
         out["soldComps"] = rows
         out["charts"] = charts
         return out
@@ -1654,9 +1632,6 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         return out
 
 
-# ----------------------------
-# Route: Adapter endpoints
-# ----------------------------
 @app.route("/adapters/geo", methods=["GET"])
 def adapter_geo():
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
@@ -1719,9 +1694,6 @@ def adapter_nomis():
     ))
 
 
-# ----------------------------
-# Route: /market-insights
-# ----------------------------
 @app.route("/market-insights", methods=["POST"])
 def market_insights():
     data = request.get_json(silent=True) or {}
@@ -1729,7 +1701,6 @@ def market_insights():
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
-    # ✅ NEW: request-level cache bypass
     force_refresh = bool(data.get("forceRefresh") is True)
 
     if MARKET_CONTRACT_MODE:
@@ -1750,7 +1721,6 @@ def market_insights():
 
     nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "").strip()
 
-    # ✅ include APP_CACHE_BUSTER + HOUSING_RPC_NAME so old cache can’t mask a function/env change
     cache_key = (
         f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
         if postcode else
@@ -1767,7 +1737,6 @@ def market_insights():
                     return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
             except Exception:
                 pass
-            # ignore cache if housing isn’t good
 
     try:
         geo_meta = None
@@ -1816,7 +1785,6 @@ def market_insights():
             },
         }
 
-        # only cache if housing is OK + non-empty and request didn’t force refresh
         if not force_refresh:
             try:
                 h = (results.get("localAreaAnalysis") or {}).get("housing") or {}
