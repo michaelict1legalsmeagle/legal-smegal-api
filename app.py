@@ -220,6 +220,50 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
         "needsEvidence": True,
     }
 
+# -------------------------------
+# HARD CONTRACT: MARKET TRENDS
+# Always present in API payloads.
+# Uses evidence already computed inside housing.metrics.
+# Anything we present as "real" must meet MIN_VERIFIED.
+# -------------------------------
+def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
+    retrieved = now_iso()
+
+    if not isinstance(housing_metric, dict):
+        return {
+            "status": "unavailable",
+            "confidenceValue": 0.0,
+            "summary": "Housing metric unavailable; market trends not computable.",
+            "signals": None,
+            "retrievedAtISO": retrieved,
+        }
+
+    metrics = housing_metric.get("metrics") or {}
+    momentum = metrics.get("pricingPowerSoldCompsMomentum")
+
+    if isinstance(momentum, dict):
+        summary = ""
+        if isinstance(momentum.get("headline"), str) and momentum.get("headline").strip():
+            summary = momentum["headline"].strip()
+        elif isinstance(momentum.get("reason"), str) and momentum.get("reason").strip():
+            summary = momentum["reason"].strip()
+
+        return {
+            "status": str(momentum.get("status") or "unknown"),
+            "confidenceValue": float(momentum.get("confidenceValue") or 0.0),
+            "summary": summary,
+            "signals": momentum,
+            "retrievedAtISO": str(momentum.get("retrievedAtISO") or retrieved),
+        }
+
+    return {
+        "status": "unavailable",
+        "confidenceValue": 0.0,
+        "summary": "Market trends not computable from available evidence.",
+        "signals": None,
+        "retrievedAtISO": retrieved,
+    }
+
 
 def _http_get_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None, timeout: int = 20) -> Tuple[int, Any]:
     h = {"User-Agent": HTTP_USER_AGENT}
