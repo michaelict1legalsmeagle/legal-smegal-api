@@ -226,6 +226,7 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
 # Uses evidence already computed inside housing.metrics.
 # Anything we present as "real" must meet MIN_VERIFIED.
 # -------------------------------
+
 def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
     retrieved = now_iso()
 
@@ -242,11 +243,14 @@ def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
     momentum = metrics.get("pricingPowerSoldCompsMomentum")
 
     if isinstance(momentum, dict):
+        headline = momentum.get("headline")
+        reason = momentum.get("reason")
+
         summary = ""
-        if isinstance(momentum.get("headline"), str) and momentum.get("headline").strip():
-            summary = momentum["headline"].strip()
-        elif isinstance(momentum.get("reason"), str) and momentum.get("reason").strip():
-            summary = momentum["reason"].strip()
+        if isinstance(headline, str) and headline.strip():
+            summary = headline.strip()
+        elif isinstance(reason, str) and reason.strip():
+            summary = reason.strip()
 
         return {
             "status": str(momentum.get("status") or "unknown"),
@@ -263,6 +267,48 @@ def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
         "signals": None,
         "retrievedAtISO": retrieved,
     }
+
+
+def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+
+    if "marketTrends" in payload:
+        return payload
+
+    la = payload.get("localAreaAnalysis")
+    la = la if isinstance(la, dict) else {}
+
+    housing = la.get("housing")
+    housing = housing if isinstance(housing, dict) else {}
+
+    payload["marketTrends"] = build_market_trends(housing)
+    return payload
+
+
+@app.after_request
+def inject_market_trends(response):
+    try:
+        # Match both "/market-insights" and "/market-insights/" and also works if mounted under a prefix.
+        if not request.path.endswith("/market-insights"):
+            return response
+
+        if not getattr(response, "is_json", False):
+            return response
+
+        payload = response.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return response
+
+        if "marketTrends" not in payload:
+            payload = ensure_market_trends(payload)
+            response.set_data(json.dumps(payload))
+            response.mimetype = "application/json"
+
+        return response
+
+    except Exception:
+        return response
 
 
 def _http_get_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None, timeout: int = 20) -> Tuple[int, Any]:
