@@ -230,42 +230,55 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
 def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
     retrieved = now_iso()
 
-    if not isinstance(housing_metric, dict):
-        return {
-            "status": "unavailable",
-            "confidenceValue": 0.0,
-            "summary": "Housing metric unavailable; market trends not computable.",
-            "signals": None,
-            "retrievedAtISO": retrieved,
-        }
-
-    metrics = housing_metric.get("metrics") or {}
-    momentum = metrics.get("pricingPowerSoldCompsMomentum")
-
-    if isinstance(momentum, dict):
-        headline = momentum.get("headline")
-        reason = momentum.get("reason")
-
-        summary = ""
-        if isinstance(headline, str) and headline.strip():
-            summary = headline.strip()
-        elif isinstance(reason, str) and reason.strip():
-            summary = reason.strip()
-
-        return {
-            "status": str(momentum.get("status") or "unknown"),
-            "confidenceValue": float(momentum.get("confidenceValue") or 0.0),
-            "summary": summary,
-            "signals": momentum,
-            "retrievedAtISO": str(momentum.get("retrievedAtISO") or retrieved),
-        }
-
-    return {
+    base_unavailable = {
         "status": "unavailable",
         "confidenceValue": 0.0,
         "summary": "Market trends not computable from available evidence.",
         "signals": None,
         "retrievedAtISO": retrieved,
+    }
+
+    if not isinstance(housing_metric, dict):
+        base_unavailable["summary"] = "Housing metric unavailable; market trends not computable."
+        return base_unavailable
+
+    metrics = housing_metric.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+
+    momentum = metrics.get("pricingPowerSoldCompsMomentum")
+    if not isinstance(momentum, dict):
+        return base_unavailable
+
+    headline = momentum.get("headline")
+    reason = momentum.get("reason")
+
+    summary = ""
+    if isinstance(headline, str) and headline.strip():
+        summary = headline.strip()
+    elif isinstance(reason, str) and reason.strip():
+        summary = reason.strip()
+
+    cv = float(momentum.get("confidenceValue") or 0.0)
+    status = str(momentum.get("status") or "unknown")
+    retrieved_at = str(momentum.get("retrievedAtISO") or retrieved)
+
+    # Hard contract: only "real" if meets MIN_VERIFIED
+    if cv >= float(MIN_VERIFIED):
+        return {
+            "status": status,
+            "confidenceValue": cv,
+            "summary": summary,
+            "signals": momentum,
+            "retrievedAtISO": retrieved_at,
+        }
+
+    # Below threshold: suppress but keep evidence attached
+    return {
+        "status": "suppressed",
+        "confidenceValue": 0.0,
+        "summary": summary or "Trend signal below minimum confidence threshold.",
+        "signals": momentum,
+        "retrievedAtISO": retrieved_at,
     }
 
 
@@ -289,8 +302,9 @@ def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
 @app.after_request
 def inject_market_trends(response):
     try:
-        # Match both "/market-insights" and "/market-insights/" and also works if mounted under a prefix.
-        if not request.path.endswith("/market-insights"):
+        # Trigger for BOTH routes: /market-insights and /market_insights (with or without trailing slash)
+        p = (request.path or "").rstrip("/")
+        if not (p.endswith("/market-insights") or p.endswith("/market_insights")):
             return response
 
         if not getattr(response, "is_json", False):
@@ -309,6 +323,7 @@ def inject_market_trends(response):
 
     except Exception:
         return response
+
 
 
 def _http_get_json(url: str, params: Optional[dict] = None, headers: Optional[dict] = None, timeout: int = 20) -> Tuple[int, Any]:
@@ -2159,7 +2174,14 @@ def market_insights():
     if MARKET_CONTRACT_MODE:
         nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "stub").strip()
         results = build_market_contract_stub(postcode, lat, lng, nomis_geo)
-        return jsonify({**results, "_contract": {"mode": True}, "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS}})
+        results = ensure_market_trends(results)
+        return jsonify(
+            {
+                **results,
+                "_contract": {"mode": True},
+                "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS},
+            }
+        )
 
     lsoa_gss = ""
     lsoa_meta = None
@@ -2176,8 +2198,8 @@ def market_insights():
 
     cache_key = (
         f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
-        if postcode else
-        f"market-insights::no-postcode::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
+        if postcode
+        else f"market-insights::no-postcode::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
     )
 
     if not force_refresh:
@@ -2187,7 +2209,14 @@ def market_insights():
                 h = (cached.get("localAreaAnalysis") or {}).get("housing") or {}
                 hv = h.get("value") or []
                 if h.get("status") == "ok" and isinstance(hv, list) and len(hv) > 0:
-                    return jsonify({**cached, "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS}})
+                    payload = dict(cached)
+                    payload = ensure_market_trends(payload)
+                    return jsonify(
+                        {
+                            **payload,
+                            "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS},
+                        }
+                    )
             except Exception:
                 pass
 
@@ -2211,9 +2240,21 @@ def market_insights():
             "crime": get_crime_data(lat, lng),
             "broadband": get_broadband_data(postcode),
             "census": {
-                "ts003": get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, nomis_geo),
-                "ts044": get_nomis_table("Accommodation type (TS044)", NOMIS_TS044_DIM, NOMIS_TS044_CATS, nomis_geo),
-                "ts054": get_nomis_table("Tenure (TS054)", NOMIS_TS054_DIM, NOMIS_TS054_CATS, nomis_geo),
+                "ts003": get_nomis_table(
+                    "Household composition (TS003)",
+                    NOMIS_TS003_DIM,
+                    NOMIS_TS003_CATS,
+                    nomis_geo,
+                ),
+                "ts044": get_nomis_table(
+                    "Accommodation type (TS044)",
+                    NOMIS_TS044_DIM,
+                    NOMIS_TS044_CATS,
+                    nomis_geo,
+                ),
+                "ts054": get_nomis_table(
+                    "Tenure (TS054)", NOMIS_TS054_DIM, NOMIS_TS054_CATS, nomis_geo
+                ),
             },
         }
 
@@ -2238,6 +2279,8 @@ def market_insights():
             },
         }
 
+        results = ensure_market_trends(results)
+
         if not force_refresh:
             try:
                 h = (results.get("localAreaAnalysis") or {}).get("housing") or {}
@@ -2247,11 +2290,25 @@ def market_insights():
             except Exception:
                 pass
 
-        return jsonify({**results, "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS, "forceRefresh": force_refresh}})
+        return jsonify(
+            {
+                **results,
+                "_cache": {
+                    "hit": False,
+                    "ttlSeconds": CACHE_TTL_SECONDS,
+                    "forceRefresh": force_refresh,
+                },
+            }
+        )
 
     except Exception as e:
         print("❌ Error in /market-insights:", str(e))
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/market_insights", methods=["POST"])
+def market_insights_alias():
+    return market_insights()
 
 
 @app.route("/", methods=["GET"])
