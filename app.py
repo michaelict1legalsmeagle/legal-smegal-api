@@ -2163,6 +2163,7 @@ def adapter_nomis():
 
 
 @app.route("/market-insights", methods=["POST"])
+@app.route("/market_insights", methods=["POST"])  # alias for any legacy/underscore callers
 def market_insights():
     data = request.get_json(silent=True) or {}
     postcode = normalize_postcode(data.get("postcode", "") or "")
@@ -2171,17 +2172,20 @@ def market_insights():
 
     force_refresh = bool(data.get("forceRefresh") is True)
 
+    def _finalize(payload: Dict[str, Any]) -> Any:
+        """Hard-contract finalization for this endpoint."""
+        payload = ensure_market_trends(payload)
+        return jsonify(payload)
+
     if MARKET_CONTRACT_MODE:
         nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "stub").strip()
         results = build_market_contract_stub(postcode, lat, lng, nomis_geo)
-        results = ensure_market_trends(results)
-        return jsonify(
-            {
-                **results,
-                "_contract": {"mode": True},
-                "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS},
-            }
-        )
+        payload = {
+            **results,
+            "_contract": {"mode": True},
+            "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS},
+        }
+        return _finalize(payload)
 
     lsoa_gss = ""
     lsoa_meta = None
@@ -2198,8 +2202,8 @@ def market_insights():
 
     cache_key = (
         f"market-insights::{postcode}::{lat or ''}::{lng or ''}::{nomis_geo or ''}::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
-        if postcode
-        else f"market-insights::no-postcode::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
+        if postcode else
+        f"market-insights::no-postcode::rpc={HOUSING_RPC_NAME}::bust={APP_CACHE_BUSTER}"
     )
 
     if not force_refresh:
@@ -2209,14 +2213,11 @@ def market_insights():
                 h = (cached.get("localAreaAnalysis") or {}).get("housing") or {}
                 hv = h.get("value") or []
                 if h.get("status") == "ok" and isinstance(hv, list) and len(hv) > 0:
-                    payload = dict(cached)
-                    payload = ensure_market_trends(payload)
-                    return jsonify(
-                        {
-                            **payload,
-                            "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS},
-                        }
-                    )
+                    payload = {
+                        **cached,
+                        "_cache": {"hit": True, "ttlSeconds": CACHE_TTL_SECONDS},
+                    }
+                    return _finalize(payload)
             except Exception:
                 pass
 
@@ -2240,21 +2241,9 @@ def market_insights():
             "crime": get_crime_data(lat, lng),
             "broadband": get_broadband_data(postcode),
             "census": {
-                "ts003": get_nomis_table(
-                    "Household composition (TS003)",
-                    NOMIS_TS003_DIM,
-                    NOMIS_TS003_CATS,
-                    nomis_geo,
-                ),
-                "ts044": get_nomis_table(
-                    "Accommodation type (TS044)",
-                    NOMIS_TS044_DIM,
-                    NOMIS_TS044_CATS,
-                    nomis_geo,
-                ),
-                "ts054": get_nomis_table(
-                    "Tenure (TS054)", NOMIS_TS054_DIM, NOMIS_TS054_CATS, nomis_geo
-                ),
+                "ts003": get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, nomis_geo),
+                "ts044": get_nomis_table("Accommodation type (TS044)", NOMIS_TS044_DIM, NOMIS_TS044_CATS, nomis_geo),
+                "ts054": get_nomis_table("Tenure (TS054)", NOMIS_TS054_DIM, NOMIS_TS054_CATS, nomis_geo),
             },
         }
 
@@ -2279,6 +2268,7 @@ def market_insights():
             },
         }
 
+        # Ensure hard-contract fields are present BEFORE caching.
         results = ensure_market_trends(results)
 
         if not force_refresh:
@@ -2290,22 +2280,20 @@ def market_insights():
             except Exception:
                 pass
 
-        return jsonify(
-            {
-                **results,
-                "_cache": {
-                    "hit": False,
-                    "ttlSeconds": CACHE_TTL_SECONDS,
-                    "forceRefresh": force_refresh,
-                },
-            }
-        )
+        payload = {
+            **results,
+            "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS, "forceRefresh": force_refresh},
+        }
+        return _finalize(payload)
 
     except Exception as e:
         print("❌ Error in /market-insights:", str(e))
-        return jsonify({"error": str(e)}), 500
-
-
+        payload = {
+            "error": str(e),
+            "postcode": postcode,
+            "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS, "forceRefresh": force_refresh},
+        }
+        return _finalize(payload), 500
 @app.route("/market_insights", methods=["POST"])
 def market_insights_alias():
     return market_insights()
