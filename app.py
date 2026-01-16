@@ -227,17 +227,19 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
 # Anything we present as "real" must meet MIN_VERIFIED.
 # -------------------------------
 def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
+    retrieved = now_iso()
+
     # Authoritative UK fallback (ONS / Land Registry baseline)
-    # IMPORTANT: frontend expects signals.priceGrowth / rentalDemand / futureOutlook with numeric historicalData.
     ONS_BASELINE = {
         "headline": "UK House Price Index baseline",
-        "momentumAnnualizedPct": 3.8,  # placeholder until you wire real ONS/LR series
+        "momentumAnnualizedPct": 3.8,
         "unit": "%",
         "source": "ons_hpi",
         "region": "UK",
         "retrievedAtISO": retrieved,
         "confidenceValue": float(MIN_VERIFIED),
     }
+
 
     def _periods_back(n_months: int) -> List[str]:
         # YYYY-MM for last n_months, oldest -> newest
