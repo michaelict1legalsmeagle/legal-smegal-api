@@ -40,6 +40,12 @@ DEFAULT_OSM_RADIUS = int(os.getenv("OSM_RADIUS_METERS", "1200"))
 
 MIN_VERIFIED = float(os.getenv("MIN_VERIFIED_CONFIDENCE", "0.95"))
 
+# UK HPI baseline series (ingested from GOV.UK / ONS UK HPI downloads)
+UK_HPI_TABLE = os.getenv("UK_HPI_TABLE", "uk_hpi_monthly").strip()
+UK_HPI_PT_TABLE = os.getenv("UK_HPI_PT_TABLE", "uk_hpi_property_type_monthly").strip()
+UK_HPI_MAX_MONTHS = int(os.getenv("UK_HPI_MAX_MONTHS", "120"))  # cap payload size
+
+
 SCHOOLS_PROVIDER = os.getenv("SCHOOLS_PROVIDER", "").strip().lower()
 BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()
 
@@ -220,6 +226,99 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
         "needsEvidence": True,
     }
 
+
+
+def _hpi_parse_period(v: Any) -> str:
+    """Normalize period to YYYY-MM."""
+    if not isinstance(v, str):
+        return ""
+    s = v.strip()
+    if not s:
+        return ""
+    # Accept YYYY-MM or YYYY-MM-..
+    m = re.match(r"^(\d{4})-(\d{2})", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    return ""
+
+
+def _fetch_uk_hpi_series(months: int = 60, property_type: str = "", region: str = "UK") -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Fetch UK HPI monthly percent-change series from Supabase if available.
+
+    Expected tables:
+      - uk_hpi_monthly(period YYYY-MM, annual_change_pct numeric, region text)
+      - uk_hpi_property_type_monthly(period YYYY-MM, annual_change_pct numeric, region text, property_type text)
+
+    If tables/columns differ, adjust ingestion to match these names.
+    """
+    retrieved = now_iso()
+    meta: Dict[str, Any] = {
+        "provider": "supabase" if supabase else "none",
+        "table": "",
+        "region": region,
+        "propertyType": property_type,
+        "months": months,
+        "retrievedAtISO": retrieved,
+        "ok": False,
+        "notes": "",
+    }
+
+    months = max(2, int(months or 60))
+    months = min(months, max(2, int(UK_HPI_MAX_MONTHS or 120)))
+
+    if not supabase:
+        meta["notes"] = "Supabase not configured."
+        return [], meta
+
+    tbl = UK_HPI_PT_TABLE if property_type else UK_HPI_TABLE
+    if not tbl:
+        meta["notes"] = "UK_HPI_TABLE not set."
+        return [], meta
+
+    meta["table"] = tbl
+
+    # We prefer ordering by period desc then reverse (oldest->newest).
+    try:
+        cols = "period,annual_change_pct,region"
+        q = supabase.table(tbl).select(cols).eq("region", region)
+        if property_type:
+            q = q.eq("property_type", property_type)
+            # tolerate alt column name
+            cols = "period,annual_change_pct,region,property_type"
+            q = supabase.table(tbl).select(cols).eq("region", region).eq("property_type", property_type)
+
+        res = q.order("period", desc=True).limit(months).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if not isinstance(rows, list):
+            rows = []
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            per = _hpi_parse_period(r.get("period"))
+            ch = safe_float(r.get("annual_change_pct"))
+            if not per or ch is None or not math.isfinite(float(ch)):
+                continue
+            out.append({"period": per, "price_change_pct": round(float(ch), 2)})
+
+        # Reverse to oldest->newest
+        out.reverse()
+
+        # Need >=2 points to render chart
+        if len(out) < 2:
+            meta["notes"] = f"Too few points after parse (n={len(out)})."
+            return [], meta
+
+        meta["ok"] = True
+        return out, meta
+
+    except Exception as e:
+        meta["notes"] = f"Supabase query failed: {str(e)}"
+        return [], meta
+
+
 # -------------------------------
 # HARD CONTRACT: MARKET TRENDS
 # Always present in API payloads.
@@ -229,24 +328,12 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
 def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
     retrieved = now_iso()
 
-    # Authoritative UK fallback (ONS / Land Registry baseline)
-    ONS_BASELINE = {
-        "headline": "UK House Price Index baseline",
-        "momentumAnnualizedPct": 3.8,
-        "unit": "%",
-        "source": "ons_hpi",
-        "region": "UK",
-        "retrievedAtISO": retrieved,
-        "confidenceValue": float(MIN_VERIFIED),
-    }
-
-
+    # --- Baseline: UK HPI series (Supabase) with deterministic fallback ---
     def _periods_back(n_months: int) -> List[str]:
         # YYYY-MM for last n_months, oldest -> newest
         try:
             now = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         except Exception:
-            # fallback if datetime import ever gets weird
             now = datetime.strptime(retrieved[:10], "%Y-%m-%d").replace(day=1)
 
         out: List[str] = []
@@ -261,31 +348,59 @@ def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
         out.reverse()
         return out
 
-    def _baseline_signals(summary: str) -> Dict[str, Any]:
-        annual = safe_float(ONS_BASELINE.get("momentumAnnualizedPct")) or 0.0
-        monthly = float(annual) / 12.0
+    def _synthetic_baseline_series(months: int = 60, annualized_pct: float = 3.8) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        # Always >=2 points, never NaN.
+        monthly = float(annualized_pct) / 12.0
+        periods = _periods_back(months)
+        series = [{"period": p, "price_change_pct": round(monthly, 2)} for p in periods]
+        meta = {
+            "provider": "synthetic",
+            "region": "UK",
+            "months": months,
+            "annualizedPct": float(annualized_pct),
+            "retrievedAtISO": retrieved,
+            "ok": True,
+            "notes": "Synthetic baseline (wire UK HPI table for real series).",
+        }
+        return series, meta
 
-        periods = _periods_back(60)  # 5Y baseline
-        price_hist = [{"period": p, "price_change_pct": round(monthly, 2)} for p in periods]
-        demand_hist = [{"period": p, "rental_demand_index": 50} for p in periods]
+    def _baseline_signals(summary: str) -> Dict[str, Any]:
+        # Prefer real UK HPI series from Supabase.
+        price_hist, meta = _fetch_uk_hpi_series(months=60, property_type="", region="UK")
+        if not price_hist:
+            price_hist, meta = _synthetic_baseline_series(months=60, annualized_pct=3.8)
+
+        # Annualized headline from last point if available
+        last = price_hist[-1] if price_hist else {}
+        annual = safe_float(last.get("price_change_pct"))
+        annual = float(annual) if annual is not None else 0.0
+
+        # Demand proxy stays deterministic
+        demand_hist = [{"period": pt["period"], "rental_demand_index": 50} for pt in price_hist]
 
         signals = {
             "priceGrowth": {
                 "trend": "Stable",
                 "percentage": f"{round(annual, 1)}%",
-                "commentary": ONS_BASELINE.get("headline") or "",
+                "commentary": "UK House Price Index baseline",
                 "historicalData": price_hist,
             },
             "rentalDemand": {
                 "trend": "Medium",
-                "commentary": "Baseline demand proxy (no local rental series in this build).",
+                "commentary": "Baseline demand proxy (no rental series wired in this build).",
                 "historicalData": demand_hist,
             },
             "futureOutlook": {
                 "prediction": "Neutral",
-                "commentary": "Baseline outlook (no local forward model in this build).",
+                "commentary": "Baseline outlook (no forward model wired in this build).",
             },
-            "baseline": ONS_BASELINE,
+            "baseline": {
+                "source": "uk_hpi",
+                "region": "UK",
+                "retrievedAtISO": retrieved,
+                "seriesMeta": meta,
+                "confidenceValue": float(MIN_VERIFIED),
+            },
         }
 
         return {
@@ -369,9 +484,9 @@ def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
     retrieved_at = str(momentum.get("retrievedAtISO") or retrieved)
 
     trend = "Stable"
-    if m_annual > 2.0:
+    if float(m_annual) > 2.0:
         trend = "Increasing"
-    elif m_annual < -2.0:
+    elif float(m_annual) < -2.0:
         trend = "Decreasing"
 
     signals = {
@@ -393,8 +508,6 @@ def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
         "evidence": momentum,
     }
 
-    # If local confidence is below threshold, we still return numeric series (renderable),
-    # but we do NOT lie about confidence.
     return {
         "status": "ok",
         "confidenceValue": float(cv),
