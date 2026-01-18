@@ -45,124 +45,6 @@ BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()
 
 HOUSING_PROVIDER = os.getenv("HOUSING_PROVIDER", "supabase_rpc").strip().lower()
 HOUSING_RPC_NAME = os.getenv("HOUSING_RPC_NAME", "housing_comps_v1").strip()
-
-
-# ----------------------------
-# UK HPI (ONS / Land Registry baseline)
-# ----------------------------
-UK_HPI_MONTHLY_TABLE = os.getenv("UK_HPI_MONTHLY_TABLE", "uk_hpi_monthly").strip()
-UK_HPI_BY_PROPERTY_TYPE_TABLE = os.getenv(
-    "UK_HPI_BY_PROPERTY_TYPE_TABLE", "uk_hpi_monthly_by_property_type"
-).strip()
-# National baseline area_code (UK aggregate). Override if you prefer a region.
-UK_HPI_BASE_AREA_CODE = os.getenv("UK_HPI_BASE_AREA_CODE", "K02000001").strip()
-# Max months we ever return; UI can slice 1Y/5Y/10Y.
-UK_HPI_MAX_MONTHS = int(os.getenv("UK_HPI_MAX_MONTHS", "120") or 120)
-
-
-def _hpi_period(d: str) -> str:
-    """Return YYYY-MM from a date-ish string."""
-    if not isinstance(d, str) or len(d) < 7:
-        return ""
-    return d[:7]
-
-
-def _safe_float(v):
-    try:
-        if v is None:
-            return None
-        return float(v)
-    except Exception:
-        return None
-
-
-def fetch_uk_hpi_monthly_series(
-    supabase: Client,
-    *,
-    area_code: str,
-    months: int,
-) -> list:
-    """Fetch UK HPI monthly rows (date asc) for a single area_code."""
-    ac = (area_code or "").strip() or UK_HPI_BASE_AREA_CODE
-    lim = max(1, min(int(months or 1), UK_HPI_MAX_MONTHS))
-    try:
-        q = (
-            supabase.table(UK_HPI_MONTHLY_TABLE)
-            .select("date,area_code,region_name,average_price,monthly_change,annual_change")
-            .eq("area_code", ac)
-            .order("date", desc=False)
-            .limit(lim)
-        )
-        rows = q.execute().data or []
-    except Exception:
-        rows = []
-
-    out = []
-    for r in rows:
-        d = str(r.get("date") or "")
-        out.append(
-            {
-                "period": _hpi_period(d),
-                "date": d,
-                "avgPrice": _safe_float(r.get("average_price")),
-                "monthlyChangePct": _safe_float(r.get("monthly_change")),
-                "annualChangePct": _safe_float(r.get("annual_change")),
-                "areaCode": str(r.get("area_code") or ac),
-                "region": str(r.get("region_name") or ""),
-                "confidenceValue": float(MIN_VERIFIED),
-            }
-        )
-    return out
-
-
-def fetch_uk_hpi_property_type_series(
-    supabase: Client,
-    *,
-    area_code: str,
-    months: int,
-) -> dict:
-    """Fetch UK HPI monthly rows by property_type for a single area_code."""
-    ac = (area_code or "").strip() or UK_HPI_BASE_AREA_CODE
-    lim = max(1, min(int(months or 1), UK_HPI_MAX_MONTHS))
-    try:
-        q = (
-            supabase.table(UK_HPI_BY_PROPERTY_TYPE_TABLE)
-            .select(
-                "date,area_code,region_name,property_type,avg_price,index_value,monthly_change,annual_change"
-            )
-            .eq("area_code", ac)
-            .order("date", desc=False)
-            .limit(lim * 8)  # 4 types * months (+ headroom)
-        )
-        rows = q.execute().data or []
-    except Exception:
-        rows = []
-
-    by: dict = {}
-    for r in rows:
-        pt = str(r.get("property_type") or "").strip().lower()
-        if not pt:
-            continue
-        d = str(r.get("date") or "")
-        by.setdefault(pt, []).append(
-            {
-                "period": _hpi_period(d),
-                "date": d,
-                "avgPrice": _safe_float(r.get("avg_price")),
-                "index": _safe_float(r.get("index_value")),
-                "monthlyChangePct": _safe_float(r.get("monthly_change")),
-                "annualChangePct": _safe_float(r.get("annual_change")),
-                "areaCode": str(r.get("area_code") or ac),
-                "region": str(r.get("region_name") or ""),
-                "propertyType": pt,
-                "confidenceValue": float(MIN_VERIFIED),
-            }
-        )
-
-    # Ensure each list is sorted
-    for pt, series in by.items():
-        series.sort(key=lambda x: x.get("date") or "")
-    return by
 HOUSING_MAX_LIMIT = int(os.getenv("HOUSING_MAX_LIMIT", "50"))
 HOUSING_DEFAULT_LIMIT = int(os.getenv("HOUSING_DEFAULT_LIMIT", "20"))
 HOUSING_DEFAULT_RADIUS_MILES = float(os.getenv("HOUSING_DEFAULT_RADIUS_MILES", "3"))
@@ -346,142 +228,58 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
 # -------------------------------
 
 def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    HARD CONTRACT: MARKET TRENDS
-    - Always present in API payloads (ensure_market_trends will inject if missing).
-    - Never suppress: if local evidence is missing or < MIN_VERIFIED, fallback to UK HPI baseline.
-    - Frontend expects snapshot signals PLUS (optionally) a numeric time-series.
-
-    We treat UK HPI tables as authoritative macro baseline:
-      - public.uk_hpi_monthly (overall)
-      - public.uk_hpi_monthly_by_property_type (detached / semi_detached / terraced / flat)
-    """
     retrieved = now_iso()
 
-    # Resolve area_code for baseline. If we can't infer it, use UK-wide default.
-    area_code = UK_HPI_BASE_AREA_CODE
-    if isinstance(housing_metric, dict):
-        metrics = housing_metric.get("metrics")
-        if isinstance(metrics, dict):
-            # If upstream ever includes an area_code, accept it.
-            for k in ("area_code", "areaCode"):
-                v = metrics.get(k)
-                if isinstance(v, str) and v.strip():
-                    area_code = v.strip()
-                    break
-
-    # Pull macro series from Supabase (best-effort; never fatal).
-    uk_series = fetch_uk_hpi_monthly_series(area_code=area_code, months=UK_HPI_MAX_MONTHS)
-    uk_by_pt = fetch_uk_hpi_by_property_type_series(area_code=area_code, months=UK_HPI_MAX_MONTHS)
-
-    def last_numeric(rows, key):
-        for r in reversed(rows or []):
-            v = r.get(key)
-            if isinstance(v, (int, float)):
-                return float(v)
-        return None
-
-    # Build baseline snapshot from latest UK HPI datapoint (annual change is the cleanest signal)
-    baseline_snapshot = {
-        "headline": "UK House Price Index baseline",
-        "unit": "%",
-        "source": "uk_hpi_monthly",
-        "area_code": area_code,
+    base_unavailable = {
+        "status": "unavailable",
+        "confidenceValue": 0.0,
+        "summary": "Market trends not computable from available evidence.",
+        "signals": None,
         "retrievedAtISO": retrieved,
-        "confidenceValue": float(MIN_VERIFIED),
-        "avgPrice": last_numeric(uk_series, "avg_price"),
-        "monthlyChangePct": last_numeric(uk_series, "monthly_change"),
-        "annualChangePct": last_numeric(uk_series, "annual_change"),
     }
 
-    # Convert macro series to UI-friendly time-series points.
-    price_growth_series = [
-        {
-            "period": r.get("period"),
-            "value": r.get("annual_change"),
-            "avgPrice": r.get("avg_price"),
-            "monthlyChangePct": r.get("monthly_change"),
-            "confidenceValue": float(MIN_VERIFIED),
-        }
-        for r in (uk_series or [])
-        if isinstance(r, dict) and r.get("period") and isinstance(r.get("annual_change"), (int, float))
-    ]
+    if not isinstance(housing_metric, dict):
+        base_unavailable["summary"] = "Housing metric unavailable; market trends not computable."
+        return base_unavailable
 
-    # Local evidence (if present) — use as narrative overlay, but never as the only source.
-    local = None
-    if isinstance(housing_metric, dict):
-        metrics = housing_metric.get("metrics")
-        metrics = metrics if isinstance(metrics, dict) else {}
-        local = metrics.get("pricingPowerSoldCompsMomentum")
+    metrics = housing_metric.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
 
-    def fallback(summary: str) -> Dict[str, Any]:
-        return {
-            "status": "ok",
-            "confidenceValue": float(MIN_VERIFIED),
-            "summary": summary,
-            "signals": {
-                "priceGrowth": {
-                    "status": "ok",
-                    "confidenceValue": float(MIN_VERIFIED),
-                    "directionLabel": "Neutral",
-                    "headline": baseline_snapshot.get("headline"),
-                    "snapshot": baseline_snapshot,
-                    "series": price_growth_series,
-                },
-                # Rental demand + forward outlook are optional until we wire real sources.
-                "rentalDemand": {
-                    "status": "ok",
-                    "confidenceValue": float(MIN_VERIFIED),
-                    "directionLabel": "Medium",
-                    "headline": "Rental demand signal not supplied in this run.",
-                    "series": [],
-                },
-                "futureOutlook": {
-                    "status": "ok",
-                    "confidenceValue": float(MIN_VERIFIED),
-                    "directionLabel": "Neutral",
-                    "headline": "Forward outlook not supplied in this run.",
-                    "series": [],
-                },
-                "byPropertyType": uk_by_pt,
-            },
-            "retrievedAtISO": retrieved,
-        }
+    momentum = metrics.get("pricingPowerSoldCompsMomentum")
+    if not isinstance(momentum, dict):
+        return base_unavailable
 
-    # If local evidence is not a dict, fallback to baseline.
-    if not isinstance(local, dict):
-        return fallback("Housing metric unavailable. Using UK House Price Index baseline.")
+    headline = momentum.get("headline")
+    reason = momentum.get("reason")
 
-    headline = local.get("headline")
-    reason = local.get("reason")
     summary = ""
     if isinstance(headline, str) and headline.strip():
         summary = headline.strip()
     elif isinstance(reason, str) and reason.strip():
         summary = reason.strip()
 
-    cv = float(local.get("confidenceValue") or 0.0)
-    status = str(local.get("status") or "ok")
-    retrieved_at = str(local.get("retrievedAtISO") or retrieved)
+    cv = float(momentum.get("confidenceValue") or 0.0)
+    status = str(momentum.get("status") or "unknown")
+    retrieved_at = str(momentum.get("retrievedAtISO") or retrieved)
 
-    # Verified local signal: keep it, but still attach UK time-series so charts can render.
+    # Hard contract: only "real" if meets MIN_VERIFIED
     if cv >= float(MIN_VERIFIED):
-        out = fallback(summary or "Local pricing momentum detected.")
-        out["status"] = status
-        out["confidenceValue"] = cv
-        out["retrievedAtISO"] = retrieved_at
-        # Overwrite priceGrowth headline/direction if provided.
-        direction = local.get("directionLabel")
-        if isinstance(direction, str) and direction.strip():
-            out["signals"]["priceGrowth"]["directionLabel"] = direction.strip()
-        if summary:
-            out["signals"]["priceGrowth"]["headline"] = summary
-        out["signals"]["priceGrowth"]["local"] = local
-        return out
+        return {
+            "status": status,
+            "confidenceValue": cv,
+            "summary": summary,
+            "signals": momentum,
+            "retrievedAtISO": retrieved_at,
+        }
 
-    # Below threshold -> baseline (never suppression)
-    return fallback(summary or "Local evidence below confidence threshold. Using UK House Price Index baseline.")
-
+    # Below threshold: suppress but keep evidence attached
+    return {
+        "status": "suppressed",
+        "confidenceValue": 0.0,
+        "summary": summary or "Trend signal below minimum confidence threshold.",
+        "signals": momentum,
+        "retrievedAtISO": retrieved_at,
+    }
 
 
 def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
