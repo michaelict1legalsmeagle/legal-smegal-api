@@ -11,6 +11,13 @@ from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
 
+# --- Guaranteed Trends fallback (UI hard contract) ---
+try:
+    # Repo may place this module in backend/services; keep import forgiving.
+    from guaranteed_trends import get_guaranteed_market_trends  # type: ignore
+except Exception:
+    get_guaranteed_market_trends = None  # type: ignore
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
@@ -286,8 +293,9 @@ def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
 
-    if "marketTrends" in payload:
-        return payload
+    # NOTE: Historical name. This function now enforces BOTH:
+    # - marketTrends (legacy)
+    # - trends (time-series contract consumed by Market Trends UI)
 
     la = payload.get("localAreaAnalysis")
     la = la if isinstance(la, dict) else {}
@@ -295,8 +303,152 @@ def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
     housing = la.get("housing")
     housing = housing if isinstance(housing, dict) else {}
 
-    payload["marketTrends"] = build_market_trends(housing)
+    if "marketTrends" not in payload:
+        payload["marketTrends"] = build_market_trends(housing)
+
+    # HARD CONTRACT: trends must always exist (never missing).
+    if "trends" not in payload:
+        pc = normalize_postcode(payload.get("postcode", "") or "")
+        if callable(get_guaranteed_market_trends):
+            payload["trends"] = get_guaranteed_market_trends(pc)
+        else:
+            payload["trends"] = {
+                "status": "unavailable",
+                "summary": "Trends provider not configured.",
+                "confidenceValue": 0.0,
+                "signals": None,
+                "source": "none",
+                "retrievedAtISO": now_iso(),
+            }
     return payload
+
+
+def _trend_from_yoy(yoy: Optional[float]) -> str:
+    if yoy is None:
+        return "Stable"
+    if yoy > 0.5:
+        return "Increasing"
+    if yoy < -0.5:
+        return "Decreasing"
+    return "Stable"
+
+
+def _to_ym(v: Any) -> str:
+    """Convert RPC `period` (date/str) to YYYY-MM."""
+    if isinstance(v, str):
+        s = v.strip()
+        if len(s) >= 7:
+            return s[:7]
+        return ""
+    try:
+        if hasattr(v, "strftime"):
+            return v.strftime("%Y-%m")
+    except Exception:
+        pass
+    return ""
+
+
+def build_trends_from_uk_hpi(
+    postcode: str,
+    area_code: str,
+    months: int,
+    property_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the `trends` payload (time series) from Supabase UK HPI RPCs.
+
+    - Always returns a dict.
+    - If RPC fails or returns < 2 usable points, falls back to guaranteed trends.
+    """
+    pc = normalize_postcode(postcode or "")
+    ac = (area_code or "").strip()
+    m = int(months) if isinstance(months, int) and months > 0 else 24
+    m = max(2, min(m, 240))
+
+    # Fallback helper
+    def _fallback(reason: str) -> Dict[str, Any]:
+        if callable(get_guaranteed_market_trends):
+            out = get_guaranteed_market_trends(pc)
+            try:
+                out["summary"] = f"{out.get('summary','').strip()} ({reason})".strip()
+            except Exception:
+                pass
+            return out
+        return {
+            "status": "unavailable",
+            "summary": reason,
+            "confidenceValue": 0.0,
+            "signals": None,
+            "source": "none",
+            "retrievedAtISO": now_iso(),
+        }
+
+    if not supabase:
+        return _fallback("Supabase not configured")
+    if not ac:
+        return _fallback("No area_code provided")
+
+    fn = "rpc_uk_hpi_series"
+    params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
+    src = "hpi_area"
+
+    pt = (property_type or "").strip()
+    if pt:
+        fn = "rpc_uk_hpi_series_by_type"
+        params = {"p_area_code": ac, "p_property_type": pt, "p_months": m}
+        src = "hpi_area_by_type"
+
+    try:
+        res = supabase.rpc(fn, params).execute()
+        rows = res.data if hasattr(res, "data") else None
+        if not isinstance(rows, list):
+            rows = []
+    except Exception as e:
+        return _fallback(f"HPI RPC failed: {str(e)}")
+
+    # Convert to series (oldest->newest) using annual_change as price_change_pct
+    series: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        period = _to_ym(r.get("period"))
+        yoy = safe_float(r.get("annual_change"))
+        if period and yoy is not None:
+            series.append({"period": period, "price_change_pct": float(yoy)})
+
+    series.sort(key=lambda x: x["period"])
+
+    if len(series) < 2:
+        return _fallback("Insufficient HPI series points")
+
+    latest_yoy = safe_float(series[-1].get("price_change_pct"))
+    trend = _trend_from_yoy(latest_yoy)
+
+    # Start from guaranteed payload so rentalDemand/futureOutlook always exist.
+    base = get_guaranteed_market_trends(pc) if callable(get_guaranteed_market_trends) else {
+        "status": "ok",
+        "summary": "Market trends provided.",
+        "confidenceValue": 0.95,
+        "signals": {
+            "priceGrowth": {},
+            "rentalDemand": {},
+            "futureOutlook": {},
+        },
+        "source": "national",
+    }
+
+    base["status"] = "ok"
+    base["summary"] = "Local UK HPI trends provided (area-level series)."
+    base["confidenceValue"] = 0.96
+    base["source"] = src
+    base["retrievedAtISO"] = now_iso()
+    base.setdefault("signals", {})
+    base["signals"]["priceGrowth"] = {
+        "trend": trend,
+        "percentage": f"{float(latest_yoy):.2f}%" if latest_yoy is not None else "0.00%",
+        "commentary": "UK HPI annual change series (area-level).",
+        "historicalData": series,
+    }
+    return base
 
 
 @app.after_request
@@ -2170,6 +2322,15 @@ def market_insights():
     lat = safe_float(data.get("lat"))
     lng = safe_float(data.get("lng"))
 
+    # Optional UK HPI inputs (used to build `trends` time series).
+    # Frontend may send any of these; accept the common variants.
+    area_code = (data.get("area_code") or data.get("areaCode") or data.get("hpiAreaCode") or "")
+    area_code = str(area_code).strip()
+    months = safe_int(data.get("months"))
+    months = int(months) if isinstance(months, int) and months > 0 else 24
+    property_type = (data.get("property_type") or data.get("propertyType") or "")
+    property_type = str(property_type).strip() or None
+
     force_refresh = bool(data.get("forceRefresh") is True)
 
     def _finalize(payload: Dict[str, Any]) -> Any:
@@ -2180,6 +2341,8 @@ def market_insights():
     if MARKET_CONTRACT_MODE:
         nomis_geo = (NOMIS_DEFAULT_GEOGRAPHY or "stub").strip()
         results = build_market_contract_stub(postcode, lat, lng, nomis_geo)
+        # Contract mode must still satisfy the hard Trends contract.
+        results["trends"] = build_trends_from_uk_hpi(postcode, area_code, months, property_type=property_type)
         payload = {
             **results,
             "_contract": {"mode": True},
@@ -2267,6 +2430,9 @@ def market_insights():
                 "summary": "Comparable properties provider not configured in this build.",
             },
         }
+
+        # UK HPI trends (area-level series). Falls back to guaranteed trends if unavailable.
+        results["trends"] = build_trends_from_uk_hpi(postcode, area_code, months, property_type=property_type)
 
         # Ensure hard-contract fields are present BEFORE caching.
         results = ensure_market_trends(results)
