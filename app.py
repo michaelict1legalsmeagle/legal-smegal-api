@@ -289,6 +289,54 @@ def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def normalize_trends_payload(trends: Any) -> Any:
+    """Make trends series maximally compatible with frontend expectations.
+
+    The UI may look for a generic numeric field like `value`.
+    Our backend uses domain-specific keys (e.g. `price_change_pct`, `rental_demand_index`).
+    This normalizer adds `value` alongside the domain key without changing meaning.
+    """
+    if not isinstance(trends, dict):
+        return trends
+    signals = trends.get("signals")
+    if not isinstance(signals, dict):
+        return trends
+
+    # priceGrowth points
+    try:
+        pg = signals.get("priceGrowth")
+        hd = (pg or {}).get("historicalData") if isinstance(pg, dict) else None
+        if isinstance(hd, list):
+            for p in hd:
+                if not isinstance(p, dict):
+                    continue
+                if "value" not in p:
+                    if "price_change_pct" in p and isinstance(p.get("price_change_pct"), (int, float)):
+                        p["value"] = p.get("price_change_pct")
+                    elif "average_price" in p and isinstance(p.get("average_price"), (int, float)):
+                        p["value"] = p.get("average_price")
+    except Exception:
+        pass
+
+    # rentalDemand points
+    try:
+        rd = signals.get("rentalDemand")
+        hd = (rd or {}).get("historicalData") if isinstance(rd, dict) else None
+        if isinstance(hd, list):
+            for p in hd:
+                if not isinstance(p, dict):
+                    continue
+                if "value" not in p:
+                    if "rental_demand_index" in p and isinstance(p.get("rental_demand_index"), (int, float)):
+                        p["value"] = p.get("rental_demand_index")
+                    elif "index_value" in p and isinstance(p.get("index_value"), (int, float)):
+                        p["value"] = p.get("index_value")
+    except Exception:
+        pass
+
+    return trends
+
+
 def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
@@ -320,6 +368,24 @@ def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "source": "none",
                 "retrievedAtISO": now_iso(),
             }
+
+    # Normalize series points so the frontend can always read numeric values.
+    try:
+        payload["trends"] = normalize_trends_payload(payload.get("trends"))
+    except Exception:
+        pass
+
+    # Ultra-defensive: some UI builds still read `marketTrends` for charts.
+    # If `marketTrends` has no usable series but `trends` does, promote `trends`.
+    try:
+        mt = payload.get("marketTrends")
+        tr = payload.get("trends")
+        mt_series = (((mt or {}).get("signals") or {}).get("priceGrowth") or {}).get("historicalData")
+        tr_series = (((tr or {}).get("signals") or {}).get("priceGrowth") or {}).get("historicalData")
+        if (not isinstance(mt_series, list) or len(mt_series) < 2) and isinstance(tr_series, list) and len(tr_series) >= 2:
+            payload["marketTrends"] = tr
+    except Exception:
+        pass
     return payload
 
 
@@ -413,7 +479,9 @@ def build_trends_from_uk_hpi(
         period = _to_ym(r.get("period"))
         yoy = safe_float(r.get("annual_change"))
         if period and yoy is not None:
-            series.append({"period": period, "price_change_pct": float(yoy)})
+            v = float(yoy)
+            # Include a generic `value` field to maximize frontend compatibility.
+            series.append({"period": period, "price_change_pct": v, "value": v})
 
     series.sort(key=lambda x: x["period"])
 
