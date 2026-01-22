@@ -2528,7 +2528,6 @@ def market_insights():
             "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS, "forceRefresh": force_refresh},
         }
         return _finalize(payload), 500
-
 @app.route("/market_insights", methods=["POST"])
 def market_insights_alias():
     return market_insights()
