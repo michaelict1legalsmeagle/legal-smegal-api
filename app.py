@@ -1,4 +1,4 @@
-`from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify
 import requests
 import os
 import time
@@ -235,110 +235,58 @@ def metric_unavailable(summary: str, sources: list, retrieved_at: str, extra_met
 # -------------------------------
 
 def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
-    """Build market trends for UI.
-
-    Policy:
-    - Never return a null/None signals object (reduces downstream UI errors).
-    - 'status' reflects publish-quality gating; it should NOT prevent returning snapshot fields.
-    - When comps-driven momentum is low-confidence, we still try to enrich with UK HPI series so the UI
-      has structured fields (priceGrowth / rentalDemand / futureOutlook) even in snapshot mode.
-    """
     retrieved = now_iso()
 
     base_unavailable = {
         "status": "unavailable",
         "confidenceValue": 0.0,
-        "reason": "no_housing_metric",
+        "summary": "Market trends not computable from available evidence.",
+        "signals": None,
         "retrievedAtISO": retrieved,
-        "signals": {},  # never None
-        "summary": "",
     }
 
     if not isinstance(housing_metric, dict):
+        base_unavailable["summary"] = "Housing metric unavailable; market trends not computable."
         return base_unavailable
 
-    metrics = housing_metric.get("metrics") if isinstance(housing_metric.get("metrics"), dict) else {}
+    metrics = housing_metric.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
 
-    # ----------------------------
-    # 1) Comps-driven momentum
-    # ----------------------------
-    momentum = metrics.get("pricingPowerSoldCompsMomentum") if isinstance(metrics.get("pricingPowerSoldCompsMomentum"), dict) else {}
-    status = (momentum.get("status") or "").strip().lower() or "unavailable"
-    cv_raw = momentum.get("confidenceValue")
-    try:
-        cv = float(cv_raw) if cv_raw is not None else 0.0
-    except Exception:
-        cv = 0.0
+    momentum = metrics.get("pricingPowerSoldCompsMomentum")
+    if not isinstance(momentum, dict):
+        return base_unavailable
 
-    # If below verified threshold, publish-gate it, but keep snapshot signals.
-    if cv < MIN_VERIFIED:
-        status = "suppressed"
-        cv = 0.0
+    headline = momentum.get("headline")
+    reason = momentum.get("reason")
 
-    out: Dict[str, Any] = {
-        "status": status,
-        "confidenceValue": cv,
-        "reason": momentum.get("reason", ""),
-        "retrievedAtISO": retrieved,
-        "signals": dict(momentum) if isinstance(momentum, dict) else {},
-        "summary": (momentum.get("summary") if isinstance(momentum, dict) else "") or "",
+    summary = ""
+    if isinstance(headline, str) and headline.strip():
+        summary = headline.strip()
+    elif isinstance(reason, str) and reason.strip():
+        summary = reason.strip()
+
+    cv = float(momentum.get("confidenceValue") or 0.0)
+    status = str(momentum.get("status") or "unknown")
+    retrieved_at = str(momentum.get("retrievedAtISO") or retrieved)
+
+    # Hard contract: only "real" if meets MIN_VERIFIED
+    if cv >= float(MIN_VERIFIED):
+        return {
+            "status": status,
+            "confidenceValue": cv,
+            "summary": summary,
+            "signals": momentum,
+            "retrievedAtISO": retrieved_at,
+        }
+
+    # Below threshold: suppress but keep evidence attached
+    return {
+        "status": "suppressed",
+        "confidenceValue": 0.0,
+        "summary": summary or "Trend signal below minimum confidence threshold.",
+        "signals": momentum,
+        "retrievedAtISO": retrieved_at,
     }
-
-    # ----------------------------
-    # 2) Enrichment: UK HPI series (best-effort)
-    # ----------------------------
-    # We try to infer postcode from the housing metric payload so that even when
-    # momentum is suppressed, the UI can still show structured, evidence-bearing fields.
-    postcode = (
-        housing_metric.get("resolvedPostcode")
-        or housing_metric.get("postcode")
-        or housing_metric.get("inputPostcode")
-        or housing_metric.get("postcodeHint")
-    )
-    if isinstance(postcode, str):
-        postcode = postcode.strip()
-    else:
-        postcode = ""
-
-    radius_miles = housing_metric.get("radiusMiles") or housing_metric.get("radius_miles") or 3
-    try:
-        radius_miles = int(radius_miles)
-    except Exception:
-        radius_miles = 3
-
-    if postcode:
-        try:
-            hpi = build_trends_from_uk_hpi(postcode=postcode, radius_miles=radius_miles)
-        except Exception as e:
-            hpi = {"status": "error", "signals": {}, "reason": f"hpi_exception:{type(e).__name__}"}
-
-        # Merge signals: keep existing keys from momentum, fill missing from HPI.
-        hpi_signals = hpi.get("signals") if isinstance(hpi, dict) and isinstance(hpi.get("signals"), dict) else {}
-        merged_signals = dict(out.get("signals") or {})
-        for k, v in hpi_signals.items():
-            if k not in merged_signals or merged_signals.get(k) in (None, "", {}, []):
-                merged_signals[k] = v
-        out["signals"] = merged_signals
-
-        # If HPI is verified-quality, let it upgrade publish status/confidence (still keep momentum extras).
-        hpi_cv = hpi.get("confidenceValue") if isinstance(hpi, dict) else None
-        try:
-            hpi_cv_f = float(hpi_cv) if hpi_cv is not None else 0.0
-        except Exception:
-            hpi_cv_f = 0.0
-
-        if hpi_cv_f >= MIN_VERIFIED:
-            out["status"] = (hpi.get("status") or "ok") if isinstance(hpi, dict) else "ok"
-            out["confidenceValue"] = hpi_cv_f
-            # Prefer richer HPI summary if present
-            hpi_summary = hpi.get("summary") if isinstance(hpi, dict) else ""
-            if isinstance(hpi_summary, str) and hpi_summary.strip():
-                out["summary"] = hpi_summary.strip()
-            # Keep reason if momentum had one, otherwise use HPI reason
-            if not out.get("reason"):
-                out["reason"] = hpi.get("reason", "") if isinstance(hpi, dict) else ""
-
-    return normalize_trends_payload(out)
 
 
 def normalize_trends_payload(trends: Any) -> Any:
@@ -2580,6 +2528,7 @@ def market_insights():
             "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS, "forceRefresh": force_refresh},
         }
         return _finalize(payload), 500
+
 @app.route("/market_insights", methods=["POST"])
 def market_insights_alias():
     return market_insights()
