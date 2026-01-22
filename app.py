@@ -6,10 +6,12 @@ import json
 import re
 import math
 import random
+import csv
 from flask_cors import CORS
 from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # --- Guaranteed Trends fallback (UI hard contract) ---
 try:
@@ -414,6 +416,174 @@ def _to_ym(v: Any) -> str:
     return ""
 
 
+
+# ----------------------------
+# UK HPI CSV fallback (Option 1)
+# ----------------------------
+# Expected file: Average-prices-2025-11.csv (user-provided)
+# Columns (case-insensitive): Date, Region_Name, Area_Code, Average_Price, Monthly_Change, Annual_Change, Average_Price_SA
+HPI_CSV_PATH = (os.getenv("HPI_CSV_PATH") or "Average-prices-2025-11.csv").strip()
+
+def _normalise_csv_header(h: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (h or "").strip().lower())
+
+def _safe_float(x):
+    try:
+        if x is None:
+            return None
+        s = str(x).strip()
+        if s == "" or s.lower() in {"nan", "none", "null"}:
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+def _to_period_yyyy_mm(date_str: str):
+    """
+    Accepts date like '1968-04-01' or '1968-04' and returns 'YYYY-MM' or None.
+    """
+    s = (date_str or "").strip()
+    if not s:
+        return None
+    # common: YYYY-MM-DD
+    m = re.match(r"^(\d{4})-(\d{2})", s)
+    if not m:
+        return None
+    return f"{m.group(1)}-{m.group(2)}"
+
+def _load_hpi_csv_rows(path: str):
+    """
+    Returns: (by_area_code: dict[str, list[dict]], by_region_name: dict[str, list[dict]])
+    Cached in-process so we don't re-read per request.
+    """
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        return {}, {}
+
+    by_code = {}
+    by_region = {}
+
+    with p.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            return {}, {}
+        # map headers to canonical
+        field_map = {name: _normalise_csv_header(name) for name in reader.fieldnames}
+
+        for raw in reader:
+            row = {field_map.get(k, k): v for k, v in (raw or {}).items()}
+            period = _to_period_yyyy_mm(row.get("date") or row.get("date_"))
+            if not period:
+                continue
+            area_code = (row.get("area_code") or "").strip()
+            region_name = (row.get("region_name") or "").strip()
+
+            avg_price = _safe_float(row.get("average_price"))
+            annual_change = _safe_float(row.get("annual_change"))
+            monthly_change = _safe_float(row.get("monthly_change"))
+            avg_price_sa = _safe_float(row.get("average_price_sa"))
+
+            rec = {
+                "period": period,
+                "avg_price": avg_price,
+                "avg_price_sa": avg_price_sa,
+                "annual_change": annual_change,
+                "monthly_change": monthly_change,
+                "area_code": area_code,
+                "region_name": region_name,
+            }
+
+            if area_code:
+                by_code.setdefault(area_code, []).append(rec)
+            if region_name:
+                by_region.setdefault(region_name.lower(), []).append(rec)
+
+    # sort oldest->newest for determinism
+    for d in (by_code, by_region):
+        for k, rows in d.items():
+            rows.sort(key=lambda r: r.get("period") or "")
+
+    return by_code, by_region
+
+# simple in-process cache
+_HPI_CSV_CACHE = {"path": None, "by_code": None, "by_region": None}
+
+def _get_hpi_csv_index():
+    global _HPI_CSV_CACHE
+    path = HPI_CSV_PATH
+    if _HPI_CSV_CACHE["path"] == path and _HPI_CSV_CACHE["by_code"] is not None:
+        return _HPI_CSV_CACHE["by_code"], _HPI_CSV_CACHE["by_region"]
+
+    by_code, by_region = _load_hpi_csv_rows(path)
+    _HPI_CSV_CACHE = {"path": path, "by_code": by_code, "by_region": by_region}
+    return by_code, by_region
+
+def _build_trends_from_csv(area_code: str = "", region_name: str = ""):
+    by_code, by_region = _get_hpi_csv_index()
+
+    rows = []
+    if area_code:
+        rows = by_code.get(area_code, []) or []
+    if (not rows) and region_name:
+        rows = by_region.get(region_name.strip().lower(), []) or []
+
+    # If we still have nothing, fall back to England if present (better than empty).
+    if (not rows) and ("england" in by_region):
+        rows = by_region.get("england", []) or []
+
+    # Build annual % change series (QoY proxy for "price_change_pct")
+    series = []
+    for r in rows:
+        chg = r.get("annual_change")
+        period = r.get("period")
+        if period and isinstance(chg, (int, float)):
+            series.append({"period": period, "price_change_pct": float(chg)})
+
+    # keep last 120 months for payload size sanity (10y)
+    if len(series) > 120:
+        series = series[-120:]
+
+    # Snapshot
+    latest = series[-1]["price_change_pct"] if series else None
+    trend = "Stable"
+    if isinstance(latest, (int, float)):
+        if latest > 1:
+            trend = "Increasing"
+        elif latest < -1:
+            trend = "Decreasing"
+
+    commentary = (
+        f"Annual % change derived from UK HPI CSV ({Path(HPI_CSV_PATH).name})."
+        if series
+        else f"UK HPI CSV loaded ({Path(HPI_CSV_PATH).name}) but no usable annual change points for this area."
+    )
+
+    return {
+        "confidenceValue": 0,  # numeric evidence exists; confidence is a label upstream, not a hide gate
+        "returnedAtISO": datetime.utcnow().isoformat() + "Z",
+        "signals": {
+            "priceGrowth": {
+                "trend": trend,
+                "percentage": (f"{latest:.2f}%" if isinstance(latest, (int, float)) else ""),
+                "commentary": commentary,
+                "historicalData": series,
+            },
+            "rentalDemand": {
+                "trend": "Medium",
+                "commentary": "Rental demand series not wired in (CSV option 1 is price only).",
+                "historicalData": [],
+            },
+            "futureOutlook": {
+                "prediction": "Positive" if trend == "Increasing" else "Negative" if trend == "Decreasing" else "Neutral",
+                "commentary": "Rule-of-thumb outlook from annual change direction (replace with model later).",
+            },
+            "notes": commentary,
+        },
+        "status": "ok" if len(series) >= 2 else "snapshot",
+        "source": "hpi_csv",
+    }
+
+
 def build_trends_from_uk_hpi(
     postcode: str,
     area_code: str,
@@ -432,6 +602,22 @@ def build_trends_from_uk_hpi(
 
     # Fallback helper
     def _fallback(reason: str) -> Dict[str, Any]:
+        # Option 1 (CSV) takes priority when present: it provides real numeric series.
+        try:
+            csv_out = _build_trends_from_csv(area_code=ac)
+            # accept even snapshot (>=1 point), but charts need >=2
+            if isinstance(csv_out, dict) and isinstance((csv_out.get("signals") or {}).get("priceGrowth", {}).get("historicalData"), list):
+                # annotate why we fell back (without suppressing UI)
+                try:
+                    (csv_out.setdefault("signals", {}).setdefault("notes", ""))
+                    csv_out["signals"]["notes"] = f"{csv_out['signals'].get('notes','').strip()} (fallback: {reason})".strip()
+                except Exception:
+                    pass
+                return csv_out
+        except Exception:
+            pass
+
+        # Guaranteed fallback (last resort)
         if callable(get_guaranteed_market_trends):
             out = get_guaranteed_market_trends(pc)
             try:
