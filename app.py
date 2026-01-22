@@ -290,17 +290,82 @@ def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def normalize_trends_payload(trends: Any) -> Any:
-    """Make trends series maximally compatible with frontend expectations.
+    """Make trends payload maximally compatible with frontend expectations.
 
-    The UI may look for a generic numeric field like `value`.
-    Our backend uses domain-specific keys (e.g. `price_change_pct`, `rental_demand_index`).
-    This normalizer adds `value` alongside the domain key without changing meaning.
+    Goals (reduce user error / inconsistent schemas):
+    - `signals` is always a dict (never None) so UI can safely render cards.
+    - `signals.priceGrowth`, `signals.rentalDemand`, `signals.futureOutlook` always exist with sane defaults.
+    - time-series points may be domain-specific (`price_change_pct`, `rental_demand_index`), but some UI
+      builds look for a generic numeric field (`value`). We add `value` alongside domain keys.
     """
     if not isinstance(trends, dict):
         return trends
+
+    # Always provide a dict for signals (never None)
     signals = trends.get("signals")
     if not isinstance(signals, dict):
-        return trends
+        signals = {}
+        trends["signals"] = signals
+
+    # Ensure default signal blocks exist (so cards never disappear)
+    signals.setdefault(
+        "priceGrowth",
+        {
+            "trend": "Stable",
+            "percentage": "",
+            "commentary": "Price signal not supplied in this run.",
+            "historicalData": [],
+        },
+    )
+    signals.setdefault(
+        "rentalDemand",
+        {
+            "trend": "Medium",
+            "commentary": "Rental demand signal not supplied in this run.",
+            "historicalData": [],
+        },
+    )
+    signals.setdefault(
+        "futureOutlook",
+        {
+            "prediction": "Neutral",
+            "commentary": "Forward outlook not supplied in this run.",
+        },
+    )
+
+    # priceGrowth points
+    try:
+        pg = signals.get("priceGrowth")
+        hd = (pg or {}).get("historicalData") if isinstance(pg, dict) else None
+        if isinstance(hd, list):
+            for p in hd:
+                if not isinstance(p, dict):
+                    continue
+                if "value" not in p:
+                    if "price_change_pct" in p and isinstance(p.get("price_change_pct"), (int, float)):
+                        p["value"] = p.get("price_change_pct")
+                    elif "average_price" in p and isinstance(p.get("average_price"), (int, float)):
+                        p["value"] = p.get("average_price")
+    except Exception:
+        pass
+
+    # rentalDemand points
+    try:
+        rd = signals.get("rentalDemand")
+        hd = (rd or {}).get("historicalData") if isinstance(rd, dict) else None
+        if isinstance(hd, list):
+            for p in hd:
+                if not isinstance(p, dict):
+                    continue
+                if "value" not in p:
+                    if "rental_demand_index" in p and isinstance(p.get("rental_demand_index"), (int, float)):
+                        p["value"] = p.get("rental_demand_index")
+                    elif "index_value" in p and isinstance(p.get("index_value"), (int, float)):
+                        p["value"] = p.get("index_value")
+    except Exception:
+        pass
+
+    return trends
 
     # priceGrowth points
     try:
@@ -340,6 +405,62 @@ def normalize_trends_payload(trends: Any) -> Any:
 def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
+
+    # NOTE: Historical name. This function now enforces BOTH:
+    # - marketTrends (legacy; some UI builds still read it)
+    # - trends      (primary contract consumed by Market Trends UI)
+
+    la = payload.get("localAreaAnalysis")
+    la = la if isinstance(la, dict) else {}
+
+    housing = la.get("housing")
+    housing = housing if isinstance(housing, dict) else {}
+
+    # 1) Always produce a valid trends object
+    pc = normalize_postcode(payload.get("postcode", "") or "")
+    tr = payload.get("trends")
+    if not isinstance(tr, dict):
+        if callable(get_guaranteed_market_trends):
+            tr = get_guaranteed_market_trends(pc)
+        else:
+            tr = {
+                "status": "unavailable",
+                "summary": "Trends provider not configured.",
+                "confidenceValue": 0.0,
+                "signals": {},  # never None (UI-safe)
+                "source": "none",
+                "retrievedAtISO": now_iso(),
+            }
+        payload["trends"] = tr
+
+    # Normalize series points so the frontend can always read numeric values + defaults.
+    try:
+        payload["trends"] = normalize_trends_payload(payload.get("trends"))
+    except Exception:
+        pass
+
+    # 2) marketTrends: treat None / invalid as missing and replace.
+    mt = payload.get("marketTrends")
+    if not isinstance(mt, dict):
+        # Prefer the normalized trends payload (single source of truth)
+        payload["marketTrends"] = payload.get("trends") or build_market_trends(housing)
+
+    # 3) Keep marketTrends aligned with trends to reduce schema drift/user errors.
+    # If `marketTrends` is missing useful signals, promote `trends`.
+    try:
+        mt = payload.get("marketTrends") or {}
+        tr = payload.get("trends") or {}
+        mt_signals = (mt.get("signals") if isinstance(mt, dict) else None) or {}
+        tr_signals = (tr.get("signals") if isinstance(tr, dict) else None) or {}
+        if not isinstance(mt_signals, dict) or len(mt_signals.keys()) == 0:
+            payload["marketTrends"] = tr
+        else:
+            # Also normalize marketTrends for older UI reads
+            payload["marketTrends"] = normalize_trends_payload(mt)
+    except Exception:
+        pass
+
+    return payload
 
     # NOTE: Historical name. This function now enforces BOTH:
     # - marketTrends (legacy)
