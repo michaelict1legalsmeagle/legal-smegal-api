@@ -339,6 +339,59 @@ def normalize_trends_payload(trends: Any) -> Any:
     return trends
 
 
+def _fetch_ons_rent_yoy_series(
+    supabase: Client,
+    *,
+    region: str = "uk",
+    months: int = 24,
+) -> List[Dict[str, Any]]:
+    """Fetch ONS private rents YoY series (PIPR-derived) from Supabase RPC.
+
+    Expected RPC: rpc_ons_rent_yoy_series(p_region text, p_months int)
+    Returns rows with at least: period (date or YYYY-MM), rent_yoy_pct, avg_rent_gbp (optional)
+    """
+    try:
+        resp = supabase.rpc(
+            "rpc_ons_rent_yoy_series",
+            {"p_region": region, "p_months": int(months)},
+        ).execute()
+        rows = getattr(resp, "data", None) or []
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        raw_p = r.get("period") or r.get("date") or r.get("month") or r.get("period_start")
+        per = ""
+        if isinstance(raw_p, str):
+            per = raw_p[:7] if len(raw_p) >= 7 else ""
+        elif hasattr(raw_p, "strftime"):
+            per = raw_p.strftime("%Y-%m")
+        if not per:
+            continue
+
+        v = r.get("rent_yoy_pct")
+        if v is None:
+            v = r.get("rent_yoy") or r.get("yoy_pct")
+        try:
+            v_num = float(v)
+        except Exception:
+            continue
+
+        row: Dict[str, Any] = {"period": per, "rental_demand_index": v_num}
+        if r.get("avg_rent_gbp") is not None:
+            try:
+                row["avg_rent_gbp"] = float(r.get("avg_rent_gbp"))
+            except Exception:
+                pass
+        out.append(row)
+
+    out.sort(key=lambda x: x.get("period") or "")
+    return out
+
+
 def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
@@ -639,12 +692,9 @@ def build_trends_from_uk_hpi(
     if not ac:
         return _fallback("No area_code provided")
 
-    print(f"[HPI] area_code used for RPC = '{ac}'")
-
     fn = "rpc_uk_hpi_series"
     params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
     src = "hpi_area"
-
 
     pt = (property_type or "").strip()
     if pt:
@@ -698,6 +748,56 @@ def build_trends_from_uk_hpi(
     base["confidenceValue"] = 0.96
     base["source"] = src
     base["retrievedAtISO"] = now_iso()
+
+    # ---- Card 2 (Rental) + Card 3 (Outlook) enrichment from ONS PIPR-derived rents ----
+    # We treat ONS private rent YoY % as "rent pressure" (demand proxy). Honest, auditable data.
+    try:
+        if supabase:
+            rent_series = _fetch_ons_rent_yoy_series(supabase, region="uk", months=m)
+        else:
+            rent_series = []
+        if rent_series:
+            latest_rent_yoy = rent_series[-1].get("rental_demand_index")
+            latest_rent_yoy = float(latest_rent_yoy) if latest_rent_yoy is not None else None
+
+            # Simple, transparent classification (not pretending we have a true demand index).
+            if latest_rent_yoy is None:
+                rent_trend = "Medium"
+            elif latest_rent_yoy >= 6.0:
+                rent_trend = "High"
+            elif latest_rent_yoy >= 3.0:
+                rent_trend = "Medium"
+            else:
+                rent_trend = "Low"
+
+            # Locate the rental + outlook containers whether payload is wrapped (v2) or legacy.
+            signals = base.get("signals") if isinstance(base, dict) else None
+            if isinstance(signals, dict):
+                rental_obj = signals.setdefault("rentalDemand", {})
+                outlook_obj = signals.setdefault("futureOutlook", {})
+            elif isinstance(base, dict):
+                rental_obj = base.setdefault("rentalDemand", {})
+                outlook_obj = base.setdefault("futureOutlook", {})
+            else:
+                rental_obj, outlook_obj = {}, {}
+
+            if isinstance(rental_obj, dict):
+                rental_obj["trend"] = rent_trend
+                rental_obj["percentage"] = f"{latest_rent_yoy:.2f}%" if latest_rent_yoy is not None else ""
+                rental_obj["commentary"] = (
+                    f"ONS private rents (PIPR) YoY change. Latest: {latest_rent_yoy:.2f}%."
+                    if latest_rent_yoy is not None
+                    else "ONS private rents (PIPR) YoY change."
+                )
+                rental_obj["historicalData"] = rent_series
+
+            if isinstance(outlook_obj, dict) and latest_rent_yoy is not None:
+                note = f"Rental pressure (ONS PIPR) is {rent_trend.lower()} ({latest_rent_yoy:.2f}% YoY)."
+                existing = (outlook_obj.get("commentary") or "").strip()
+                outlook_obj["commentary"] = (existing + " " + note).strip() if existing else note
+    except Exception:
+        # Never let enrichment break the main analysis.
+        pass
     base.setdefault("signals", {})
     base["signals"]["priceGrowth"] = {
         "trend": trend,
@@ -1047,10 +1147,6 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
         codes = result.get("codes") if isinstance(result.get("codes"), dict) else {}
         lsoa_gss = codes.get("lsoa")
         lsoa_gss = lsoa_gss.strip() if isinstance(lsoa_gss, str) and lsoa_gss.strip() else None
-        # Admin district code (LAD) used by UK HPI tables (e.g., E06000001).
-        area_code = (codes.get("admin_district") or "").strip() if isinstance(codes, dict) else ""
-        meta["area_code"] = area_code or None
-
         if not lsoa_gss:
             meta["notes"] = "postcodes.io result missing codes.lsoa (GSS)."
             return None, meta
@@ -2587,7 +2683,6 @@ def market_insights():
     # Frontend may send any of these; accept the common variants.
     area_code = (data.get("area_code") or data.get("areaCode") or data.get("hpiAreaCode") or "")
     area_code = str(area_code).strip()
-
     months = safe_int(data.get("months"))
     months = int(months) if isinstance(months, int) and months > 0 else 24
     property_type = (data.get("property_type") or data.get("propertyType") or "")
@@ -2616,11 +2711,6 @@ def market_insights():
     lsoa_meta = None
     if postcode:
         lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
-
-
-    # area_code: if not provided, derive from postcode metadata (LAD/Area).
-    if not area_code and isinstance(lsoa_meta, dict):
-        area_code = (lsoa_meta.get("area_code") or lsoa_meta.get("lad19cd") or lsoa_meta.get("ladcd") or "").strip()
 
     if (lat is None or lng is None) and isinstance(lsoa_meta, dict):
         if lat is None:
