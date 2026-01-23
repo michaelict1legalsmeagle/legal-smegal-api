@@ -662,12 +662,17 @@ def build_trends_from_uk_hpi(
     for r in rows:
         if not isinstance(r, dict):
             continue
-        period = _to_ym(r.get("period"))
-        yoy = safe_float(r.get("annual_change"))
-        if period and yoy is not None:
-            v = float(yoy)
-            # Include a generic `value` field to maximize frontend compatibility.
-            series.append({"period": period, "price_change_pct": v, "value": v})
+        # SQL output is { "period": "2023-01-01", "annual_change": 5.2 }
+        p = r.get("period")
+        v = r.get("annual_change")
+
+        if p is not None and v is not None:
+            series.append({
+                "period": str(p),
+                "price_change_pct": float(v),
+                "value": float(v)  # Added for frontend chart compatibility
+            })
+
 
     series.sort(key=lambda x: x["period"])
 
