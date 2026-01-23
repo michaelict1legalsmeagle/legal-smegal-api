@@ -534,10 +534,19 @@ def _build_trends_from_csv(area_code: str = "", region_name: str = ""):
     # Build annual % change series (QoY proxy for "price_change_pct")
     series = []
     for r in rows:
-        chg = r.get("annual_change")
-        period = r.get("period")
-        if period and isinstance(chg, (int, float)):
-            series.append({"period": period, "price_change_pct": float(chg)})
+        # RPC returns: period (date) + annual_change (% YoY)
+        p = _to_ym(r.get("period"))
+        yoy = safe_float(r.get("annual_change"))
+
+        if p and yoy is not None:
+            v = float(yoy)
+            series.append({
+                "period": p,
+                "price_change_pct": v,
+                "value": v,  # UI/Chart compatibility
+            })
+
+    series.sort(key=lambda x: x["period"])
 
     # keep last 120 months for payload size sanity (10y)
     if len(series) > 120:
@@ -599,9 +608,6 @@ def build_trends_from_uk_hpi(
     ac = (area_code or "").strip()
     m = int(months) if isinstance(months, int) and months > 0 else 24
     m = max(2, min(m, 240))
-    
-print("DEBUG TRENDS ENTRY", {"pc": pc, "ac": ac, "m": m})
-
     # Fallback helper
     def _fallback(reason: str) -> Dict[str, Any]:
         # Option 1 (CSV) takes priority when present: it provides real numeric series.
