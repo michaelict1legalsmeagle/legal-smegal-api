@@ -599,6 +599,8 @@ def build_trends_from_uk_hpi(
     ac = (area_code or "").strip()
     m = int(months) if isinstance(months, int) and months > 0 else 24
     m = max(2, min(m, 240))
+    
+print("DEBUG TRENDS ENTRY", {"pc": pc, "ac": ac, "m": m})
 
     # Fallback helper
     def _fallback(reason: str) -> Dict[str, Any]:
