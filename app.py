@@ -639,11 +639,11 @@ def build_trends_from_uk_hpi(
     if not ac:
         return _fallback("No area_code provided")
 
- print(f"[HPI] area_code used for RPC = '{ac}'")
+       print(f"[HPI] area_code used for RPC = '{ac}'")
 
        fn = "rpc_uk_hpi_series"
-        params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
-         src = "hpi_area"
+       params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
+       src = "hpi_area"
 
 
     pt = (property_type or "").strip()
