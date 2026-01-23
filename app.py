@@ -639,11 +639,11 @@ def build_trends_from_uk_hpi(
     if not ac:
         return _fallback("No area_code provided")
 
-    print(f"[HPI] area_code used for RPC = '{ac}'")
+       print(f"[HPI] area_code used for RPC = '{ac}'")
 
-    fn = "rpc_uk_hpi_series"
-    params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
-    src = "hpi_area"
+       fn = "rpc_uk_hpi_series"
+       params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
+       src = "hpi_area"
 
 
     pt = (property_type or "").strip()
@@ -723,7 +723,9 @@ def inject_market_trends(response):
         if not isinstance(payload, dict):
             return response
 
-        if "marketTrends" not in payload:
+        # Ensure both snapshot cards and historical series are always present when available.
+        # We MUST not leave the UI with trends === null / missing.
+        if ("marketTrends" not in payload) or (payload.get("marketTrends") is None) or ("trends" not in payload):
             payload = ensure_market_trends(payload)
             response.set_data(json.dumps(payload))
             response.mimetype = "application/json"
@@ -2587,6 +2589,9 @@ def market_insights():
     # Frontend may send any of these; accept the common variants.
     area_code = (data.get("area_code") or data.get("areaCode") or data.get("hpiAreaCode") or "")
     area_code = str(area_code).strip()
+    # If frontend didn’t pass an area_code, derive it from postcode lookup (postcodes.io codes.admin_district).
+    if not area_code and isinstance(lsoa_meta, dict):
+        area_code = str(lsoa_meta.get("area_code") or "").strip()
 
     months = safe_int(data.get("months"))
     months = int(months) if isinstance(months, int) and months > 0 else 24
@@ -2616,11 +2621,6 @@ def market_insights():
     lsoa_meta = None
     if postcode:
         lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
-
-
-    # area_code: if not provided, derive from postcode metadata (LAD/Area).
-    if not area_code and isinstance(lsoa_meta, dict):
-        area_code = (lsoa_meta.get("area_code") or lsoa_meta.get("lad19cd") or lsoa_meta.get("ladcd") or "").strip()
 
     if (lat is None or lng is None) and isinstance(lsoa_meta, dict):
         if lat is None:
