@@ -592,168 +592,116 @@ def build_trends_from_uk_hpi(
 ) -> Dict[str, Any]:
     """Build the `trends` payload (time series) from Supabase UK HPI RPCs.
 
-    Card 1 (Price Growth): UK HPI annual % change series (area-level).
-    Card 2 (Rent Growth YoY): ONS average rent YoY% (region-level, currently UK-wide).
+    - Always returns a dict.
+    - If RPC fails or returns < 2 usable points, falls back to guaranteed trends.
     """
-
     pc = normalize_postcode(postcode or "")
     ac = (area_code or "").strip()
     m = int(months) if isinstance(months, int) and months > 0 else 24
     m = max(2, min(m, 240))
 
-    # -----------------------------
-    # Fallback helper (guaranteed)
-    # -----------------------------
+    # Fallback helper
     def _fallback(reason: str) -> Dict[str, Any]:
         # Option 1 (CSV) takes priority when present: it provides real numeric series.
         try:
             csv_out = _build_trends_from_csv(area_code=ac)
-            if (
-                isinstance(csv_out, dict)
-                and isinstance((csv_out.get("signals") or {}).get("priceGrowth", {}).get("historicalData"), list)
-            ):
+            # accept even snapshot (>=1 point), but charts need >=2
+            if isinstance(csv_out, dict) and isinstance((csv_out.get("signals") or {}).get("priceGrowth", {}).get("historicalData"), list):
+                # annotate why we fell back (without suppressing UI)
                 try:
-                    csv_out.setdefault("signals", {})
-                    csv_out["signals"]["notes"] = f"{(csv_out['signals'].get('notes','') or '').strip()} (fallback: {reason})".strip()
+                    (csv_out.setdefault("signals", {}).setdefault("notes", ""))
+                    csv_out["signals"]["notes"] = f"{csv_out['signals'].get('notes','').strip()} (fallback: {reason})".strip()
                 except Exception:
                     pass
                 return csv_out
         except Exception:
             pass
 
+        # Guaranteed fallback (last resort)
         if callable(get_guaranteed_market_trends):
-            out = get_guaranteed_market_trends()
+            out = get_guaranteed_market_trends(pc)
             try:
-                out.setdefault("signals", {})
-                out["signals"]["notes"] = f"{(out['signals'].get('notes','') or '').strip()} (fallback: {reason})".strip()
+                out["summary"] = f"{out.get('summary','').strip()} ({reason})".strip()
             except Exception:
                 pass
             return out
-
-        # Absolute last resort: return a structurally valid object
         return {
-            "signals": {
-                "priceGrowth": {"confidence": 0.2, "commentary": f"Fallback: {reason}", "historicalData": []},
-                "rentalDemand": {"confidence": 0.2, "commentary": f"Fallback: {reason}", "historicalData": []},
-            },
-            "notes": f"Fallback: {reason}",
+            "status": "unavailable",
+            "summary": reason,
+            "confidenceValue": 0.0,
+            "signals": None,
+            "source": "none",
+            "retrievedAtISO": now_iso(),
         }
 
+    if not supabase:
+        return _fallback("Supabase not configured")
     if not ac:
-        return _fallback("no area_code provided")
+        return _fallback("No area_code provided")
 
-    # -----------------------------
-    # Base structure (priceGrowth)
-    # -----------------------------
-    base = _fallback("init")  # start from known-good structure then overwrite where possible
+    fn = "rpc_uk_hpi_series"
+    params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
+    src = "hpi_area"
+
+    pt = (property_type or "").strip()
+    if pt:
+        fn = "rpc_uk_hpi_series_by_type"
+        params = {"p_area_code": ac, "p_property_type": pt, "p_months": m}
+        src = "hpi_area_by_type"
+
+    try:
+        res = supabase.rpc(fn, params).execute()
+        rows = res.data if hasattr(res, "data") else None
+        if not isinstance(rows, list):
+            rows = []
+    except Exception as e:
+        return _fallback(f"HPI RPC failed: {str(e)}")
+
+    # Convert to series (oldest->newest) using annual_change as price_change_pct
+    series: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        period = _to_ym(r.get("period"))
+        yoy = safe_float(r.get("annual_change"))
+        if period and yoy is not None:
+            v = float(yoy)
+            # Include a generic `value` field to maximize frontend compatibility.
+            series.append({"period": period, "price_change_pct": v, "value": v})
+
+    series.sort(key=lambda x: x["period"])
+
+    if len(series) < 2:
+        return _fallback("Insufficient HPI series points")
+
+    latest_yoy = safe_float(series[-1].get("price_change_pct"))
+    trend = _trend_from_yoy(latest_yoy)
+
+    # Start from guaranteed payload so rentalDemand/futureOutlook always exist.
+    base = get_guaranteed_market_trends(pc) if callable(get_guaranteed_market_trends) else {
+        "status": "ok",
+        "summary": "Market trends provided.",
+        "confidenceValue": 0.95,
+        "signals": {
+            "priceGrowth": {},
+            "rentalDemand": {},
+            "futureOutlook": {},
+        },
+        "source": "national",
+    }
+
+    base["status"] = "ok"
+    base["summary"] = "Local UK HPI trends provided (area-level series)."
+    base["confidenceValue"] = 0.96
+    base["source"] = src
+    base["retrievedAtISO"] = now_iso()
     base.setdefault("signals", {})
-
-    # -----------------------------
-    # Card 1: UK HPI annual change
-    # -----------------------------
-    try:
-        pt = (property_type or "").strip().lower() or None
-        fn = "rpc_uk_hpi_series"
-        params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
-        if pt:
-            params["p_property_type"] = pt
-
-        res = supabase.rpc(fn, params).execute()
-        rows = (getattr(res, "data", None) or [])
-
-        series: List[Dict[str, Any]] = []
-        for r in rows:
-            # Expected fields: period (YYYY-MM) and pct_change_annual (number)
-            p = r.get("period") or r.get("date") or r.get("month")
-            v = r.get("pct_change_annual") if "pct_change_annual" in r else r.get("annual_change_pct") or r.get("pct_change")
-            if p is None or v is None:
-                continue
-            try:
-                series.append({"period": str(p)[:7], "pct_change_annual": float(v)})
-            except Exception:
-                continue
-
-        series = sorted(series, key=lambda x: x["period"])
-
-        if len(series) >= 1:
-            latest = series[-1]["pct_change_annual"]
-            base["signals"]["priceGrowth"] = {
-                "confidence": 0.96 if len(series) >= 2 else 0.85,
-                "direction": "Increasing" if latest >= 0 else "Decreasing",
-                "latest": latest,
-                "historicalData": series,
-                "commentary": "UK HPI annual change series (area-level).",
-                "source": "UK HPI (ONS) via Supabase RPC",
-                "coverage": {"points": len(series), "from": series[0]["period"], "to": series[-1]["period"]},
-            }
-        else:
-            # keep fallback priceGrowth
-            pass
-
-    except Exception as e:
-        # Keep whatever fallback produced; annotate notes
-        try:
-            base["signals"]["priceGrowth"] = (base["signals"].get("priceGrowth") or {})
-            base["signals"]["priceGrowth"]["commentary"] = f"UK HPI series unavailable: {type(e).__name__}"
-        except Exception:
-            pass
-
-    # -----------------------------
-    # Card 2: ONS private rents YoY
-    # -----------------------------
-    try:
-        # Current UI is UK-wide. Region values present in table: uk, england, wales, scotland, northern_ireland.
-        region = "uk"
-        fn = "rpc_ons_rent_yoy_series"
-        params = {"p_region": region, "p_periods": m}
-
-        res = supabase.rpc(fn, params).execute()
-        rows = (getattr(res, "data", None) or [])
-
-        rseries: List[Dict[str, Any]] = []
-        for r in rows:
-            p = r.get("period") or r.get("date") or r.get("month")
-            v = r.get("rent_yoy_pct") if "rent_yoy_pct" in r else r.get("yoy") or r.get("yoy_pct")
-            if p is None or v is None:
-                continue
-            try:
-                rseries.append({"period": str(p)[:7], "rent_yoy_pct": float(v)})
-            except Exception:
-                continue
-
-        rseries = sorted(rseries, key=lambda x: x["period"])
-
-        if len(rseries) >= 1:
-            latest = rseries[-1]["rent_yoy_pct"]
-            # Simple status mapping (kept deliberately conservative)
-            if latest >= 8:
-                status = "High"
-            elif latest >= 4:
-                status = "Medium"
-            elif latest >= 0:
-                status = "Low"
-            else:
-                status = "Falling"
-
-            base["signals"]["rentalDemand"] = {
-                "confidence": 0.96 if len(rseries) >= 2 else 0.85,
-                "direction": "Increasing" if latest >= 0 else "Decreasing",
-                "status": status,
-                "latest": latest,
-                "historicalData": rseries,
-                "commentary": "ONS private rents (YoY %) — UK-wide.",
-                "source": "ONS private rents (PIPR/PRMS) via Supabase RPC",
-                "coverage": {"points": len(rseries), "from": rseries[0]["period"], "to": rseries[-1]["period"]},
-            }
-
-    except Exception as e:
-        # Leave rentalDemand as-is (fallback) but annotate
-        try:
-            base["signals"]["rentalDemand"] = (base["signals"].get("rentalDemand") or {})
-            base["signals"]["rentalDemand"]["commentary"] = f"Rent YoY series unavailable: {type(e).__name__}"
-        except Exception:
-            pass
-
+    base["signals"]["priceGrowth"] = {
+        "trend": trend,
+        "percentage": f"{float(latest_yoy):.2f}%" if latest_yoy is not None else "0.00%",
+        "commentary": "UK HPI annual change series (area-level).",
+        "historicalData": series,
+    }
     return base
 
 
@@ -772,7 +720,9 @@ def inject_market_trends(response):
         if not isinstance(payload, dict):
             return response
 
-        if "marketTrends" not in payload:
+        # Ensure both snapshot cards and historical series are always present when available.
+        # We MUST not leave the UI with trends === null / missing.
+        if ("marketTrends" not in payload) or (payload.get("marketTrends") is None) or ("trends" not in payload):
             payload = ensure_market_trends(payload)
             response.set_data(json.dumps(payload))
             response.mimetype = "application/json"
@@ -1096,6 +1046,10 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
         codes = result.get("codes") if isinstance(result.get("codes"), dict) else {}
         lsoa_gss = codes.get("lsoa")
         lsoa_gss = lsoa_gss.strip() if isinstance(lsoa_gss, str) and lsoa_gss.strip() else None
+        # Admin district code (LAD) used by UK HPI tables (e.g., E06000001).
+        area_code = (codes.get("admin_district") or "").strip() if isinstance(codes, dict) else ""
+        meta["area_code"] = area_code or None
+
         if not lsoa_gss:
             meta["notes"] = "postcodes.io result missing codes.lsoa (GSS)."
             return None, meta
@@ -2632,6 +2586,8 @@ def market_insights():
     # Frontend may send any of these; accept the common variants.
     area_code = (data.get("area_code") or data.get("areaCode") or data.get("hpiAreaCode") or "")
     area_code = str(area_code).strip()
+    # If frontend didn’t pass an area_code, we will try to derive it after postcode lookup.
+
     months = safe_int(data.get("months"))
     months = int(months) if isinstance(months, int) and months > 0 else 24
     property_type = (data.get("property_type") or data.get("propertyType") or "")
@@ -2660,6 +2616,10 @@ def market_insights():
     lsoa_meta = None
     if postcode:
         lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
+
+    # If frontend didn’t pass an area_code, derive it from postcode lookup (postcodes.io codes.admin_district).
+    if not area_code and isinstance(lsoa_meta, dict):
+        area_code = str(lsoa_meta.get("area_code") or "").strip()
 
     if (lat is None or lng is None) and isinstance(lsoa_meta, dict):
         if lat is None:
