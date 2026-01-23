@@ -639,11 +639,9 @@ def build_trends_from_uk_hpi(
     if not ac:
         return _fallback("No area_code provided")
 
-       
-       fn = "rpc_uk_hpi_series"
-       params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
-       src = "hpi_area"
-
+    fn = "rpc_uk_hpi_series"
+    params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
+    src = "hpi_area"
 
     pt = (property_type or "").strip()
     if pt:
@@ -2588,9 +2586,7 @@ def market_insights():
     # Frontend may send any of these; accept the common variants.
     area_code = (data.get("area_code") or data.get("areaCode") or data.get("hpiAreaCode") or "")
     area_code = str(area_code).strip()
-    # If frontend didn’t pass an area_code, derive it from postcode lookup (postcodes.io codes.admin_district).
-    if not area_code and isinstance(lsoa_meta, dict):
-        area_code = str(lsoa_meta.get("area_code") or "").strip()
+    # If frontend didn’t pass an area_code, we will try to derive it after postcode lookup.
 
     months = safe_int(data.get("months"))
     months = int(months) if isinstance(months, int) and months > 0 else 24
@@ -2620,6 +2616,10 @@ def market_insights():
     lsoa_meta = None
     if postcode:
         lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
+
+    # If frontend didn’t pass an area_code, derive it from postcode lookup (postcodes.io codes.admin_district).
+    if not area_code and isinstance(lsoa_meta, dict):
+        area_code = str(lsoa_meta.get("area_code") or "").strip()
 
     if (lat is None or lng is None) and isinstance(lsoa_meta, dict):
         if lat is None:
