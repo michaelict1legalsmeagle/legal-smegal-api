@@ -644,8 +644,6 @@ def build_trends_from_uk_hpi(
 
     if not supabase:
         return _fallback("Supabase not configured")
-    if not ac:
-        return _fallback("No area_code provided")
 
     fn = "rpc_uk_hpi_series"
     params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
