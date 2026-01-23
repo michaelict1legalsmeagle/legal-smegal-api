@@ -534,19 +534,10 @@ def _build_trends_from_csv(area_code: str = "", region_name: str = ""):
     # Build annual % change series (QoY proxy for "price_change_pct")
     series = []
     for r in rows:
-        # RPC returns: period (date) + annual_change (% YoY)
-        p = _to_ym(r.get("period"))
-        yoy = safe_float(r.get("annual_change"))
-
-        if p and yoy is not None:
-            v = float(yoy)
-            series.append({
-                "period": p,
-                "price_change_pct": v,
-                "value": v,  # UI/Chart compatibility
-            })
-
-    series.sort(key=lambda x: x["period"])
+        chg = r.get("annual_change")
+        period = r.get("period")
+        if period and isinstance(chg, (int, float)):
+            series.append({"period": period, "price_change_pct": float(chg)})
 
     # keep last 120 months for payload size sanity (10y)
     if len(series) > 120:
@@ -608,6 +599,7 @@ def build_trends_from_uk_hpi(
     ac = (area_code or "").strip()
     m = int(months) if isinstance(months, int) and months > 0 else 24
     m = max(2, min(m, 240))
+
     # Fallback helper
     def _fallback(reason: str) -> Dict[str, Any]:
         # Option 1 (CSV) takes priority when present: it provides real numeric series.
@@ -644,6 +636,8 @@ def build_trends_from_uk_hpi(
 
     if not supabase:
         return _fallback("Supabase not configured")
+    if not ac:
+        return _fallback("No area_code provided")
 
     fn = "rpc_uk_hpi_series"
     params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
@@ -668,17 +662,12 @@ def build_trends_from_uk_hpi(
     for r in rows:
         if not isinstance(r, dict):
             continue
-        # SQL output is { "period": "2023-01-01", "annual_change": 5.2 }
-        p = r.get("period")
-        v = r.get("annual_change")
-
-        if p is not None and v is not None:
-            series.append({
-                "period": str(p),
-                "price_change_pct": float(v),
-                "value": float(v)  # Added for frontend chart compatibility
-            })
-
+        period = _to_ym(r.get("period"))
+        yoy = safe_float(r.get("annual_change"))
+        if period and yoy is not None:
+            v = float(yoy)
+            # Include a generic `value` field to maximize frontend compatibility.
+            series.append({"period": period, "price_change_pct": v, "value": v})
 
     series.sort(key=lambda x: x["period"])
 
@@ -1055,6 +1044,10 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
         codes = result.get("codes") if isinstance(result.get("codes"), dict) else {}
         lsoa_gss = codes.get("lsoa")
         lsoa_gss = lsoa_gss.strip() if isinstance(lsoa_gss, str) and lsoa_gss.strip() else None
+        # Admin district code (LAD) used by UK HPI tables (e.g., E06000001).
+        area_code = (codes.get("admin_district") or "").strip() if isinstance(codes, dict) else ""
+        meta["area_code"] = area_code or None
+
         if not lsoa_gss:
             meta["notes"] = "postcodes.io result missing codes.lsoa (GSS)."
             return None, meta
@@ -2591,6 +2584,10 @@ def market_insights():
     # Frontend may send any of these; accept the common variants.
     area_code = (data.get("area_code") or data.get("areaCode") or data.get("hpiAreaCode") or "")
     area_code = str(area_code).strip()
+    # If frontend didn’t pass an area_code, derive it from postcode lookup (postcodes.io codes.admin_district).
+    if not area_code and isinstance(lsoa_meta, dict):
+        area_code = str(lsoa_meta.get("area_code") or "").strip()
+
     months = safe_int(data.get("months"))
     months = int(months) if isinstance(months, int) and months > 0 else 24
     property_type = (data.get("property_type") or data.get("propertyType") or "")
