@@ -272,63 +272,7 @@ def build_market_trends(housing_metric: Dict[str, Any]) -> Dict[str, Any]:
     retrieved_at = str(momentum.get("retrievedAtISO") or retrieved)
 
     # Hard contract: only "real" if meets MIN_VERIFIED
-    
-    # --- ONS private rents YoY series (UK) ---
-    # Source: ONS Price Index of Private Rents (PIPR) derived dataset ingested into Supabase.
-    # We treat this as verified (official stats) when we get a numeric series back.
-    rent_hist: List[Dict[str, Any]] = []
-    try:
-        if supabase:
-            rent_region = "uk"
-            rent_periods = 24
-            rent_res = supabase.rpc(
-                "rpc_ons_rent_yoy_series",
-                {"p_region": rent_region, "p_periods": rent_periods},
-            ).execute()
-            rows = rent_res.data or []
-            for row in rows:
-                p = str(row.get("period") or "")[:7]
-                yoy = row.get("rent_yoy_pct")
-                if not p:
-                    continue
-                if yoy is None:
-                    continue
-                try:
-                    rent_hist.append(
-                        {
-                            "period": p,
-                            "rent_yoy_pct": float(yoy),
-                            "avg_rent_gbp": float(row.get("avg_rent_gbp")) if row.get("avg_rent_gbp") is not None else None,
-                        }
-                    )
-                except Exception:
-                    continue
-            rent_hist.sort(key=lambda d: d["period"])
-    except Exception:
-        rent_hist = []
-
-    if rent_hist:
-        rd = momentum.setdefault("rentalDemand", {})
-        # Never touch card 1 (priceGrowth). Only enrich rentalDemand.
-        rd["historicalData"] = rent_hist
-
-        latest = rent_hist[-1]["rent_yoy_pct"]
-        if isinstance(latest, (int, float)):
-            if latest >= 7.0:
-                rd["trend"] = "High"
-            elif latest >= 4.0:
-                rd["trend"] = "Medium"
-            else:
-                rd["trend"] = "Low"
-
-        # Keep any existing commentary; otherwise provide an evidence-based line.
-        if not rd.get("commentary"):
-            rd["commentary"] = f"ONS private rents YoY: {latest:.1f}% (latest {rent_hist[-1]['period']})."
-
-        # Verified confidence (official data + numeric series)
-        cv = max(float(cv or 0.0), 0.96)
-
-if cv >= float(MIN_VERIFIED):
+    if cv >= float(MIN_VERIFIED):
         return {
             "status": status,
             "confidenceValue": cv,
@@ -695,9 +639,12 @@ def build_trends_from_uk_hpi(
     if not ac:
         return _fallback("No area_code provided")
 
+    print(f"[HPI] area_code used for RPC = '{ac}'")
+
     fn = "rpc_uk_hpi_series"
     params: Dict[str, Any] = {"p_area_code": ac, "p_months": m}
     src = "hpi_area"
+
 
     pt = (property_type or "").strip()
     if pt:
@@ -1100,6 +1047,10 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
         codes = result.get("codes") if isinstance(result.get("codes"), dict) else {}
         lsoa_gss = codes.get("lsoa")
         lsoa_gss = lsoa_gss.strip() if isinstance(lsoa_gss, str) and lsoa_gss.strip() else None
+        # Admin district code (LAD) used by UK HPI tables (e.g., E06000001).
+        area_code = (codes.get("admin_district") or "").strip() if isinstance(codes, dict) else ""
+        meta["area_code"] = area_code or None
+
         if not lsoa_gss:
             meta["notes"] = "postcodes.io result missing codes.lsoa (GSS)."
             return None, meta
@@ -2636,6 +2587,7 @@ def market_insights():
     # Frontend may send any of these; accept the common variants.
     area_code = (data.get("area_code") or data.get("areaCode") or data.get("hpiAreaCode") or "")
     area_code = str(area_code).strip()
+
     months = safe_int(data.get("months"))
     months = int(months) if isinstance(months, int) and months > 0 else 24
     property_type = (data.get("property_type") or data.get("propertyType") or "")
@@ -2664,6 +2616,11 @@ def market_insights():
     lsoa_meta = None
     if postcode:
         lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
+
+
+    # area_code: if not provided, derive from postcode metadata (LAD/Area).
+    if not area_code and isinstance(lsoa_meta, dict):
+        area_code = (lsoa_meta.get("area_code") or lsoa_meta.get("lad19cd") or lsoa_meta.get("ladcd") or "").strip()
 
     if (lat is None or lng is None) and isinstance(lsoa_meta, dict):
         if lat is None:
