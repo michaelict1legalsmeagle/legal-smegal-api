@@ -702,6 +702,71 @@ def build_trends_from_uk_hpi(
         "commentary": "UK HPI annual change series (area-level).",
         "historicalData": series,
     }
+    
+# --- Card 2: ONS private rents (YoY %) ---
+rent_rows = []
+try:
+    rent_rows = (
+        supabase.rpc(
+            "rpc_ons_rent_yoy_series",
+            {"p_region": "uk", "p_periods": periods},
+        )
+        .execute()
+        .data
+        or []
+    )
+except Exception:
+    rent_rows = []
+
+rent_series = []
+latest_rent_yoy = None
+if rent_rows:
+    for r in rent_rows:
+        period = r.get("period") or r.get("date")
+        yoy = r.get("rent_yoy_pct")
+        avg_rent = r.get("avg_rent_gbp")
+        if period is None:
+            continue
+        try:
+            yoy_f = float(yoy) if yoy is not None else None
+        except Exception:
+            yoy_f = None
+        try:
+            avg_f = float(avg_rent) if avg_rent is not None else None
+        except Exception:
+            avg_f = None
+        rent_series.append(
+            {
+                "period": str(period)[:10],
+                "rent_yoy_pct": yoy_f,
+                "avg_rent_gbp": avg_f,
+            }
+        )
+
+    # Keep only rows with a numeric YoY value and assume data is already sorted asc by period
+    rent_series = [x for x in rent_series if x.get("rent_yoy_pct") is not None]
+    if rent_series:
+        latest_rent_yoy = rent_series[-1]["rent_yoy_pct"]
+
+if rent_series:
+    # classify: basic thresholds (YoY %)
+    if latest_rent_yoy is None:
+        rent_trend = "stable"
+    elif latest_rent_yoy > 0.25:
+        rent_trend = "increasing"
+    elif latest_rent_yoy < -0.25:
+        rent_trend = "decreasing"
+    else:
+        rent_trend = "stable"
+
+    base.setdefault("signals", {})
+    base["signals"]["rentalDemand"] = {
+        "trend": rent_trend,
+        "percentage": f"{latest_rent_yoy:.2f}%" if latest_rent_yoy is not None else None,
+        "commentary": "ONS private rents (YoY).",
+        "historicalData": rent_series,
+    }
+
     return base
 
 
@@ -720,9 +785,7 @@ def inject_market_trends(response):
         if not isinstance(payload, dict):
             return response
 
-        # Ensure both snapshot cards and historical series are always present when available.
-        # We MUST not leave the UI with trends === null / missing.
-        if ("marketTrends" not in payload) or (payload.get("marketTrends") is None) or ("trends" not in payload):
+        if "marketTrends" not in payload:
             payload = ensure_market_trends(payload)
             response.set_data(json.dumps(payload))
             response.mimetype = "application/json"
@@ -1046,10 +1109,6 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
         codes = result.get("codes") if isinstance(result.get("codes"), dict) else {}
         lsoa_gss = codes.get("lsoa")
         lsoa_gss = lsoa_gss.strip() if isinstance(lsoa_gss, str) and lsoa_gss.strip() else None
-        # Admin district code (LAD) used by UK HPI tables (e.g., E06000001).
-        area_code = (codes.get("admin_district") or "").strip() if isinstance(codes, dict) else ""
-        meta["area_code"] = area_code or None
-
         if not lsoa_gss:
             meta["notes"] = "postcodes.io result missing codes.lsoa (GSS)."
             return None, meta
@@ -2586,8 +2645,6 @@ def market_insights():
     # Frontend may send any of these; accept the common variants.
     area_code = (data.get("area_code") or data.get("areaCode") or data.get("hpiAreaCode") or "")
     area_code = str(area_code).strip()
-    # If frontend didn’t pass an area_code, we will try to derive it after postcode lookup.
-
     months = safe_int(data.get("months"))
     months = int(months) if isinstance(months, int) and months > 0 else 24
     property_type = (data.get("property_type") or data.get("propertyType") or "")
@@ -2616,10 +2673,6 @@ def market_insights():
     lsoa_meta = None
     if postcode:
         lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
-
-    # If frontend didn’t pass an area_code, derive it from postcode lookup (postcodes.io codes.admin_district).
-    if not area_code and isinstance(lsoa_meta, dict):
-        area_code = str(lsoa_meta.get("area_code") or "").strip()
 
     if (lat is None or lng is None) and isinstance(lsoa_meta, dict):
         if lat is None:
