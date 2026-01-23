@@ -339,59 +339,6 @@ def normalize_trends_payload(trends: Any) -> Any:
     return trends
 
 
-def _fetch_ons_rent_yoy_series(
-    supabase: Client,
-    *,
-    region: str = "uk",
-    months: int = 24,
-) -> List[Dict[str, Any]]:
-    """Fetch ONS private rents YoY series (PIPR-derived) from Supabase RPC.
-
-    Expected RPC: rpc_ons_rent_yoy_series(p_region text, p_months int)
-    Returns rows with at least: period (date or YYYY-MM), rent_yoy_pct, avg_rent_gbp (optional)
-    """
-    try:
-        resp = supabase.rpc(
-            "rpc_ons_rent_yoy_series",
-            {"p_region": region, "p_months": int(months)},
-        ).execute()
-        rows = getattr(resp, "data", None) or []
-    except Exception:
-        return []
-
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        raw_p = r.get("period") or r.get("date") or r.get("month") or r.get("period_start")
-        per = ""
-        if isinstance(raw_p, str):
-            per = raw_p[:7] if len(raw_p) >= 7 else ""
-        elif hasattr(raw_p, "strftime"):
-            per = raw_p.strftime("%Y-%m")
-        if not per:
-            continue
-
-        v = r.get("rent_yoy_pct")
-        if v is None:
-            v = r.get("rent_yoy") or r.get("yoy_pct")
-        try:
-            v_num = float(v)
-        except Exception:
-            continue
-
-        row: Dict[str, Any] = {"period": per, "rental_demand_index": v_num}
-        if r.get("avg_rent_gbp") is not None:
-            try:
-                row["avg_rent_gbp"] = float(r.get("avg_rent_gbp"))
-            except Exception:
-                pass
-        out.append(row)
-
-    out.sort(key=lambda x: x.get("period") or "")
-    return out
-
-
 def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
@@ -429,6 +376,137 @@ def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload["trends"] = normalize_trends_payload(payload.get("trends"))
     except Exception:
         pass
+
+    # Augment with ONS rent inflation + rent level (cards 2/3). Never blocks card 1 (HPI).
+    try:
+        payload["trends"] = _augment_trends_with_ons_rents(payload.get("trends") or {}, months=24, region="uk")
+    except Exception:
+        pass
+
+
+
+def _fmt_gbp(v: float) -> str:
+    try:
+        # Format like £1,368 (no pennies)
+        return f"£{v:,.0f}"
+    except Exception:
+        return "—"
+
+def _rent_inflation_tier(yoy: float | None) -> str:
+    """Simple tiering for UI pill: High/Medium/Low = inflation pressure."""
+    if yoy is None:
+        return "Medium"
+    if yoy >= 6.0:
+        return "High"
+    if yoy >= 2.0:
+        return "Medium"
+    return "Low"
+
+def _safe_rpc_rows(resp: Any) -> list[dict]:
+    """Supabase python client returns {data:..., error:...} shapes depending on version."""
+    if resp is None:
+        return []
+    if isinstance(resp, dict):
+        data = resp.get("data")
+        if isinstance(data, list):
+            return [r for r in data if isinstance(r, dict)]
+    # Newer client style: resp.data
+    data = getattr(resp, "data", None)
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    return []
+
+def _augment_trends_with_ons_rents(trends: Dict[str, Any], months: int = 24, region: str = "uk") -> Dict[str, Any]:
+    """
+    Adds ONS-based rent inflation (YoY %) and average rent level (£) into `signals`:
+      - signals.rentalDemand: repurposed as 'Rent Inflation (YoY)' (uses rental_demand_index field as YoY % for UI compatibility)
+      - signals.rentLevel: average rent level series summary (latest £)
+    Never fails the overall trends object.
+    """
+    try:
+        if not isinstance(trends, dict):
+            return trends
+        sig = trends.get("signals")
+        if not isinstance(sig, dict):
+            return trends
+        if not supabase:
+            return trends
+
+        m = int(months or 24)
+        m = max(6, min(120, m))
+
+        # RPC expected: rpc_ons_rent_yoy_series(p_region text, p_months int)
+        resp = supabase.rpc("rpc_ons_rent_yoy_series", {"p_region": region, "p_months": m}).execute()
+        rows = _safe_rpc_rows(resp)
+        if not rows:
+            return trends
+
+        # Build series: newest last for chart.
+        series = []
+        for r in rows:
+            period = _to_ym(r.get("period") or r.get("date"))
+            yoy = r.get("rent_yoy_pct")
+            avg = r.get("avg_rent_gbp")
+            try:
+                yoy_f = float(yoy) if yoy is not None else None
+            except Exception:
+                yoy_f = None
+            try:
+                avg_f = float(avg) if avg is not None else None
+            except Exception:
+                avg_f = None
+            if not period:
+                continue
+            # For UI compatibility, place YoY % into `rental_demand_index` (it is a numeric series field).
+            point = {"period": period}
+            if yoy_f is not None and isinstance(yoy_f, float):
+                point["rental_demand_index"] = yoy_f
+            if avg_f is not None and isinstance(avg_f, float):
+                point["avg_rent_gbp"] = avg_f
+            series.append(point)
+
+        if not series:
+            return trends
+
+        # Sort by period ascending
+        series.sort(key=lambda d: d.get("period") or "")
+
+        latest = series[-1]
+        latest_yoy = latest.get("rental_demand_index")
+        latest_avg = latest.get("avg_rent_gbp")
+
+        # Card 2: rent inflation (YoY %)
+        sig["rentalDemand"] = {
+            "trend": _rent_inflation_tier(latest_yoy if isinstance(latest_yoy, (int, float)) else None),
+            "percentage": f"{float(latest_yoy):.2f}%" if isinstance(latest_yoy, (int, float)) else "",
+            "commentary": "ONS Price Index of Private Rents (PIPR) – year-on-year change proxy.",
+            "historicalData": series,
+            "source": "ons_pipr",
+        }
+
+        # Card 3: average rent level (GBP)
+        lvl_trend = "Stable"
+        try:
+            if isinstance(latest_yoy, (int, float)):
+                lvl_trend = "Increasing" if float(latest_yoy) > 0.5 else ("Decreasing" if float(latest_yoy) < -0.5 else "Stable")
+        except Exception:
+            lvl_trend = "Stable"
+
+        sig["rentLevel"] = {
+            "trend": lvl_trend,
+            "percentage": _fmt_gbp(float(latest_avg)) if isinstance(latest_avg, (int, float)) else "",
+            "commentary": "Average private rent level (ONS PIPR dataset; series as supplied).",
+            "historicalData": series,
+            "source": "ons_pipr",
+        }
+
+        trends["signals"] = sig
+        # Keep status ok if priceGrowth exists; do NOT downgrade because rent series missing.
+        if (trends.get("status") or "").lower() in ("unavailable", "error") and isinstance(sig.get("priceGrowth"), dict):
+            trends["status"] = "ok"
+        return trends
+    except Exception:
+        return trends
 
     # Ultra-defensive: some UI builds still read `marketTrends` for charts.
     # If `marketTrends` has no usable series but `trends` does, promote `trends`.
@@ -748,56 +826,6 @@ def build_trends_from_uk_hpi(
     base["confidenceValue"] = 0.96
     base["source"] = src
     base["retrievedAtISO"] = now_iso()
-
-    # ---- Card 2 (Rental) + Card 3 (Outlook) enrichment from ONS PIPR-derived rents ----
-    # We treat ONS private rent YoY % as "rent pressure" (demand proxy). Honest, auditable data.
-    try:
-        if supabase:
-            rent_series = _fetch_ons_rent_yoy_series(supabase, region="uk", months=m)
-        else:
-            rent_series = []
-        if rent_series:
-            latest_rent_yoy = rent_series[-1].get("rental_demand_index")
-            latest_rent_yoy = float(latest_rent_yoy) if latest_rent_yoy is not None else None
-
-            # Simple, transparent classification (not pretending we have a true demand index).
-            if latest_rent_yoy is None:
-                rent_trend = "Medium"
-            elif latest_rent_yoy >= 6.0:
-                rent_trend = "High"
-            elif latest_rent_yoy >= 3.0:
-                rent_trend = "Medium"
-            else:
-                rent_trend = "Low"
-
-            # Locate the rental + outlook containers whether payload is wrapped (v2) or legacy.
-            signals = base.get("signals") if isinstance(base, dict) else None
-            if isinstance(signals, dict):
-                rental_obj = signals.setdefault("rentalDemand", {})
-                outlook_obj = signals.setdefault("futureOutlook", {})
-            elif isinstance(base, dict):
-                rental_obj = base.setdefault("rentalDemand", {})
-                outlook_obj = base.setdefault("futureOutlook", {})
-            else:
-                rental_obj, outlook_obj = {}, {}
-
-            if isinstance(rental_obj, dict):
-                rental_obj["trend"] = rent_trend
-                rental_obj["percentage"] = f"{latest_rent_yoy:.2f}%" if latest_rent_yoy is not None else ""
-                rental_obj["commentary"] = (
-                    f"ONS private rents (PIPR) YoY change. Latest: {latest_rent_yoy:.2f}%."
-                    if latest_rent_yoy is not None
-                    else "ONS private rents (PIPR) YoY change."
-                )
-                rental_obj["historicalData"] = rent_series
-
-            if isinstance(outlook_obj, dict) and latest_rent_yoy is not None:
-                note = f"Rental pressure (ONS PIPR) is {rent_trend.lower()} ({latest_rent_yoy:.2f}% YoY)."
-                existing = (outlook_obj.get("commentary") or "").strip()
-                outlook_obj["commentary"] = (existing + " " + note).strip() if existing else note
-    except Exception:
-        # Never let enrichment break the main analysis.
-        pass
     base.setdefault("signals", {})
     base["signals"]["priceGrowth"] = {
         "trend": trend,
