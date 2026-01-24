@@ -596,35 +596,78 @@ def _build_trends_from_csv(area_code: str = "", region_name: str = ""):
 # If the RPC doesn't exist (or fails), Card 2 remains empty and the UI will show "Series: none returned".
 PRIVATE_RENTS_RPC_NAME = os.getenv("PRIVATE_RENTS_RPC_NAME", "rpc_private_rents_yoy_series").strip()
 
-def _fetch_private_rents_yoy_series(area_code: str, months: int) -> List[Dict[str, Any]]:
-    if not supabase:
-        return []
-    ac = (area_code or "").strip()
-    if not ac:
-        return []
-    m = max(2, min(int(months or 24), 240))
+# Optional direct table fallback (if the data is loaded into a table rather than exposed via an RPC)
+PRIVATE_RENTS_TABLE = os.getenv("PRIVATE_RENTS_TABLE", "private_rents_yoy").strip()
 
-    try:
-        res = supabase.rpc(PRIVATE_RENTS_RPC_NAME, {"p_area_code": ac, "p_months": m}).execute()
-        rows = res.data if hasattr(res, "data") else None
-        if not isinstance(rows, list):
-            return []
-    except Exception:
+def _fetch_private_rents_yoy_series(area_code: str, months: int) -> List[Dict[str, Any]]:
+    """Fetch ONS private rents YoY (%) series.
+
+    Notes:
+    - Your Supabase RPC/table often returns: period/date, rent_yoy_pct, avg_rent_gbp
+    - We keep the output keys aligned to the frontend chart dataKeys.
+    """
+    if not area_code:
         return []
+
+    # 1) Prefer RPC (recommended for RLS + stable API)
+    rows: List[Dict[str, Any]] = []
+    try:
+        res = (
+            supabase()
+            .rpc(PRIVATE_RENTS_RPC_NAME, {"p_area_code": area_code, "p_months": int(months)})
+            .execute()
+        )
+        rows = res.data or []
+    except Exception:
+        rows = []
+
+    # 2) Optional direct-table fallback (only if you loaded a table and haven't exposed an RPC yet)
+    if not rows and PRIVATE_RENTS_TABLE:
+        try:
+            res = (
+                supabase()
+                .table(PRIVATE_RENTS_TABLE)
+                .select("period,date,region,avg_rent_gbp,rent_yoy_pct,annual_change")
+                .eq("region", area_code)
+                .order("period", desc=False)
+                .limit(int(months))
+                .execute()
+            )
+            rows = res.data or []
+        except Exception:
+            rows = rows or []
 
     series: List[Dict[str, Any]] = []
     for r in rows:
-        if not isinstance(r, dict):
-            continue
-        period = _to_ym(r.get("period"))
-        yoy = safe_float(r.get("annual_change"))
-        if period and yoy is not None:
-            v = float(yoy)
-            series.append({"period": period, "rental_demand_index": v, "value": v})
+        period = r.get("period") or r.get("date")
+        yoy = r.get("rent_yoy_pct")
+        if yoy is None:
+            yoy = r.get("annual_change")
+        avg = r.get("avg_rent_gbp") or r.get("avg_rent")
+        try:
+            yoy_f = float(yoy) if yoy is not None else None
+        except Exception:
+            yoy_f = None
+        try:
+            avg_f = float(avg) if avg is not None else None
+        except Exception:
+            avg_f = None
 
+        if period is None:
+            continue
+
+        # Keep the series rows compatible with the frontend charts
+        series.append(
+            {
+                "period": str(period)[:10],
+                "rent_yoy_pct": yoy_f,
+                "avg_rent_gbp": avg_f,
+            }
+        )
+
+    # Ensure chronological order (oldest -> newest)
     series.sort(key=lambda x: x["period"])
     return series
-
 
 def build_trends_from_uk_hpi(
     postcode: str,
