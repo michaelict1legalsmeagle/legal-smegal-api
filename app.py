@@ -109,6 +109,50 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _fetch_ons_rent_yoy_series(months: int = 60):
+    """Deterministic ONS Rent YoY time series fetch.
+
+    Verified Supabase RPC signature:
+      rpc_ons_rent_yoy_series(p_region text, p_months integer)
+
+    We force p_region='UK' to guarantee data exists.
+    Returns points shaped for Card 2 UI:
+      [{ "period": "YYYY-MM-01", "rent_yoy_pct": float, "value": float }, ...]
+    """
+    try:
+        if not supabase:
+            return []
+    except Exception:
+        return []
+
+    try:
+        res = supabase.rpc(
+            "rpc_ons_rent_yoy_series",
+            {"p_region": "UK", "p_months": int(months)},
+        ).execute()
+        rows = res.data or []
+    except Exception:
+        return []
+
+    out = []
+    for r in rows:
+        period = r.get("period") or r.get("month") or r.get("date")
+        yoy = r.get("rent_yoy_pct") or r.get("yoy_pct") or r.get("value")
+        if period is None or yoy is None:
+            continue
+        try:
+            yoy_f = float(yoy)
+        except Exception:
+            continue
+        out.append({
+            "period": str(period)[:10],
+            "rent_yoy_pct": yoy_f,
+            "value": yoy_f,
+        })
+    return out
+
+
+
 def normalize_postcode(pc: str) -> str:
     if not isinstance(pc, str):
         return ""
@@ -377,7 +421,22 @@ def ensure_market_trends(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Ultra-defensive: some UI builds still read `marketTrends` for charts.
+    
+    # Card 2 (Rent Growth YoY): ensure historical series exists for legacy UI path.
+    # UI reads: marketTrends.rentalDemand.historicalData
+    try:
+        series = _fetch_ons_rent_yoy_series(months=60)
+        mt = payload.get("marketTrends")
+        if isinstance(mt, dict):
+            rd = mt.get("rentalDemand")
+            if not isinstance(rd, dict):
+                rd = {}
+                mt["rentalDemand"] = rd
+            rd["historicalData"] = series
+    except Exception:
+        pass
+
+# Ultra-defensive: some UI builds still read `marketTrends` for charts.
     # If `marketTrends` has no usable series but `trends` does, promote `trends`.
     try:
         mt = payload.get("marketTrends")
