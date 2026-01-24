@@ -584,6 +584,48 @@ def _build_trends_from_csv(area_code: str = "", region_name: str = ""):
     }
 
 
+
+# ----------------------------
+# Private Rents (YoY) optional series (Card 2)
+# ----------------------------
+# If you provide a Supabase RPC named `rpc_private_rents_yoy_series` that returns rows with:
+#   - period (date or YYYY-MM)
+#   - annual_change (YoY %, numeric)
+# this backend will automatically populate the `rentalDemand.historicalData` series for Card 2.
+#
+# If the RPC doesn't exist (or fails), Card 2 remains empty and the UI will show "Series: none returned".
+PRIVATE_RENTS_RPC_NAME = os.getenv("PRIVATE_RENTS_RPC_NAME", "rpc_private_rents_yoy_series").strip()
+
+def _fetch_private_rents_yoy_series(area_code: str, months: int) -> List[Dict[str, Any]]:
+    if not supabase:
+        return []
+    ac = (area_code or "").strip()
+    if not ac:
+        return []
+    m = max(2, min(int(months or 24), 240))
+
+    try:
+        res = supabase.rpc(PRIVATE_RENTS_RPC_NAME, {"p_area_code": ac, "p_months": m}).execute()
+        rows = res.data if hasattr(res, "data") else None
+        if not isinstance(rows, list):
+            return []
+    except Exception:
+        return []
+
+    series: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        period = _to_ym(r.get("period"))
+        yoy = safe_float(r.get("annual_change"))
+        if period and yoy is not None:
+            v = float(yoy)
+            series.append({"period": period, "rental_demand_index": v, "value": v})
+
+    series.sort(key=lambda x: x["period"])
+    return series
+
+
 def build_trends_from_uk_hpi(
     postcode: str,
     area_code: str,
@@ -702,6 +744,21 @@ def build_trends_from_uk_hpi(
         "commentary": "UK HPI annual change series (area-level).",
         "historicalData": series,
     }
+    # Card 2: Private rents (YoY) series if available
+    try:
+        rent_series = _fetch_private_rents_yoy_series(ac, m)
+        if isinstance(rent_series, list) and len(rent_series) >= 2:
+            latest_r = safe_float(rent_series[-1].get("value"))
+            base["signals"]["rentalDemand"] = {
+                "trend": "Medium",
+                "commentary": "Private rents YoY series (area-level), via Supabase RPC.",
+                "historicalData": rent_series,
+            }
+            if latest_r is not None:
+                base["signals"]["rentalDemand"]["percentage"] = f"{float(latest_r):.2f}%"
+    except Exception:
+        pass
+
     return base
 
 
