@@ -600,74 +600,82 @@ PRIVATE_RENTS_RPC_NAME = os.getenv("PRIVATE_RENTS_RPC_NAME", "rpc_private_rents_
 PRIVATE_RENTS_TABLE = os.getenv("PRIVATE_RENTS_TABLE", "private_rents_yoy").strip()
 
 def _fetch_private_rents_yoy_series(area_code: str, months: int) -> List[Dict[str, Any]]:
-    """Fetch ONS private rents YoY (%) series.
-
-    Notes:
-    - Your Supabase RPC/table often returns: period/date, rent_yoy_pct, avg_rent_gbp
-    - We keep the output keys aligned to the frontend chart dataKeys.
     """
-    if not area_code:
-        return []
+    Card 2 (Rent Growth YoY): pull private rent YoY % series from Supabase table `ons_private_rents_yoy`.
 
-    # 1) Prefer RPC (recommended for RLS + stable API)
-    rows: List[Dict[str, Any]] = []
+    Expected columns in the table (as loaded by your CSV):
+      - date (date)
+      - rent_yoy_pct (numeric)
+      - avg_rent_gbp (numeric)
+      - region (text)   (may be 'uk', 'england', etc.)
+
+    Some deployments store an admin-code instead (e.g., 'area_code'). We defensively try both.
+    """
     try:
-        res = (
-            supabase()
-            .rpc(PRIVATE_RENTS_RPC_NAME, {"p_area_code": area_code, "p_months": int(months)})
-            .execute()
-        )
-        rows = res.data or []
-    except Exception:
-        rows = []
+        sb = supabase  # created once at module import
+        if not sb:
+            return []
 
-    # 2) Optional direct-table fallback (only if you loaded a table and haven't exposed an RPC yet)
-    if not rows and PRIVATE_RENTS_TABLE:
-        try:
-            res = (
-                supabase()
-                .table(PRIVATE_RENTS_TABLE)
-                .select("period,date,region,avg_rent_gbp,rent_yoy_pct,annual_change")
-                .eq("region", area_code)
-                .order("period", desc=False)
-                .limit(int(months))
-                .execute()
+        # Try to filter by area_code first (if column exists), else fall back to region.
+        # Supabase will return a 400 if we reference a non-existent column; catch and retry.
+        def _query(filter_col: str) -> List[Dict[str, Any]]:
+            q = (
+                sb.table("ons_private_rents_yoy")
+                .select("date,region,avg_rent_gbp,rent_yoy_pct")
+                .eq(filter_col, area_code.lower())
+                .order("date", desc=True)
+                .limit(months)
             )
-            rows = res.data or []
-        except Exception:
-            rows = rows or []
+            res = q.execute()
+            rows = getattr(res, "data", None) or []
+            return rows
 
-    series: List[Dict[str, Any]] = []
-    for r in rows:
-        period = r.get("period") or r.get("date")
-        yoy = r.get("rent_yoy_pct")
-        if yoy is None:
-            yoy = r.get("annual_change")
-        avg = r.get("avg_rent_gbp") or r.get("avg_rent")
+        rows: List[Dict[str, Any]] = []
         try:
-            yoy_f = float(yoy) if yoy is not None else None
+            rows = _query("area_code")
         except Exception:
-            yoy_f = None
-        try:
-            avg_f = float(avg) if avg is not None else None
-        except Exception:
-            avg_f = None
+            rows = _query("region")
 
-        if period is None:
-            continue
+        if not rows:
+            # final fallback: UK aggregate (keeps card stable if caller passes a LAD code)
+            try:
+                rows = (
+                    sb.table("ons_private_rents_yoy")
+                    .select("date,region,avg_rent_gbp,rent_yoy_pct")
+                    .eq("region", "uk")
+                    .order("date", desc=True)
+                    .limit(months)
+                    .execute()
+                ).data or []
+            except Exception:
+                rows = []
 
-        # Keep the series rows compatible with the frontend charts
-        series.append(
-            {
-                "period": str(period)[:10],
-                "rent_yoy_pct": yoy_f,
-                "avg_rent_gbp": avg_f,
-            }
-        )
+        rows = list(reversed(rows))  # oldest -> newest
 
-    # Ensure chronological order (oldest -> newest)
-    series.sort(key=lambda x: x["period"])
-    return series
+        series: List[Dict[str, Any]] = []
+        for r in rows:
+            dt = r.get("date")
+            yoy = _safe_float(r.get("rent_yoy_pct"))
+            avg = _safe_float(r.get("avg_rent_gbp"))
+
+            if dt is None or yoy is None:
+                continue
+
+            # Frontend expects `value` for charts/tables (like card 1), so provide it.
+            series.append(
+                {
+                    "period": str(dt)[:10],  # YYYY-MM-DD
+                    "value": yoy,
+                    "rent_yoy_pct": yoy,
+                    "avg_rent_gbp": avg,
+                    "region": (r.get("region") or "").lower() or "unknown",
+                    "source": "ONS private rents (YoY)",
+                }
+            )
+
+        return series
+    except Exception:
+        return []
 
 def build_trends_from_uk_hpi(
     postcode: str,
