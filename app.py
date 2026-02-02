@@ -13,7 +13,11 @@ from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from services.solicitor_qa_engine import clarify_flag
+# --- Solicitor Q&A (bounded clarification) ---
+try:
+    from services.solicitor_qa_engine import clarify_flag  # type: ignore
+except Exception:
+    clarify_flag = None  # type: ignore
 from services.llm_openrouter import llm_json
 # --- Guaranteed Trends fallback (UI hard contract) ---
 try:
@@ -2920,7 +2924,14 @@ def qa_clarify():
     Returns a stable, UI-friendly object. If the engine is not available,
     returns 501 so the UI can degrade gracefully.
     """
-
+    if clarify_flag is None:
+        return (
+            jsonify({
+                "error": "not_implemented",
+                "message": "Solicitor Q&A engine is not available in this deployment.",
+            }),
+            501,
+        )
 
     payload = request.get_json(silent=True) or {}
     flag_id = payload.get("flag_id")
