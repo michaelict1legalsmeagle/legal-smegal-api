@@ -18,7 +18,12 @@ try:
     from services.solicitor_qa_engine import clarify_flag  # type: ignore
 except Exception:
     clarify_flag = None  # type: ignore
-from services.llm_openrouter import llm_json
+try:
+    from services.llm_openrouter import llm_json  # type: ignore
+except Exception:
+    # Do not crash the whole API if the optional LLM helper is missing/mispackaged.
+    def llm_json(*args, **kwargs):  # type: ignore
+        return {"ok": False, "error": "llm_helper_unavailable"}
 # --- Guaranteed Trends fallback (UI hard contract) ---
 try:
     # Repo may place this module in backend/services; keep import forgiving.
