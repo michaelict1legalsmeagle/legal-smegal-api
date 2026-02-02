@@ -2903,9 +2903,9 @@ def market_insights():
             "_cache": {"hit": False, "ttlSeconds": CACHE_TTL_SECONDS, "forceRefresh": force_refresh},
         }
         return _finalize(payload), 500
-@app.route("/market_insights", methods=["POST"])
-def market_insights_alias():
-    return market_insights()
+
+
+
 
 
 
@@ -2920,7 +2920,7 @@ def qa_clarify():
     Returns a stable, UI-friendly object. If the engine is not available,
     returns 501 so the UI can degrade gracefully.
     """
-        )
+
 
     payload = request.get_json(silent=True) or {}
     flag_id = payload.get("flag_id")
