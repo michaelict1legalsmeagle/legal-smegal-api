@@ -1,0 +1,21 @@
+services:
+  # Backend API (Python)
+  - type: web
+    name: legal-smegal-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    plan: free
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+
+  # Frontend (React + Vite)
+  - type: static
+    name: auction-property-analysis-platform
+    env: static
+    rootDir: .
+    buildCommand: npm install && npm run build
+    publishDir: dist
+    staticPublishPath: dist
+    autoDeploy: true
