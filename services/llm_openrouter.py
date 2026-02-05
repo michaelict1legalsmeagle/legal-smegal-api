@@ -3,7 +3,7 @@
 import os
 import json
 import re
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Optional, List
 
 import requests
 
@@ -32,7 +32,7 @@ def _extract_json(text: str) -> Optional[Any]:
     except Exception:
         pass
 
-    # Find first {...} or [...]
+    # Find first {...} or [...] (greedy; DOTALL)
     m = re.search(r"(\{.*\}|\[.*\])", s, flags=re.DOTALL)
     if m:
         candidate = m.group(1).strip()
@@ -100,8 +100,7 @@ def _normalize_messages(
 
     user_text = (prompt or "").strip()
     if not user_text:
-        # Caller provided neither messages nor prompt -> this is a caller error,
-        # but we fail in a controlled way for API stability.
+        # Controlled failure: downstream handler can treat this as "prompt missing"
         return [{"role": "system", "content": sys_text}, {"role": "user", "content": ""}]
 
     return [{"role": "system", "content": sys_text}, {"role": "user", "content": user_text}]
@@ -122,8 +121,10 @@ def llm_json(
     New-compat:
       - callers may pass messages=[{role, content}, ...] (system optional)
 
-    Returns:
-      {"ok": True, "data": <parsed_json>} OR {"ok": False, "error": "...", "raw": "..."}
+    Returns (expanded for UI compatibility):
+      - Always includes: {"ok": bool, "data": <parsed_json or None>}
+      - If parsed_json is a dict, also promotes its keys to top-level
+        (avoids breaking UIs that expect fields at root).
     """
     msg_list = _normalize_messages(system=system, prompt=prompt, messages=messages)
 
@@ -131,9 +132,20 @@ def llm_json(
 
     parsed = _extract_json(content)
     if parsed is None:
-        return {"ok": False, "error": "non_json_response", "raw": content}
+        return {"ok": False, "error": "non_json_response", "raw": content, "data": None}
 
-    return {"ok": True, "data": parsed}
+    # Base wrapper (stable)
+    out: Dict[str, Any] = {"ok": True, "data": parsed}
+
+    # Promote dict keys to top-level for UI/legacy consumers that expect root fields.
+    # Never overwrite reserved keys to avoid collisions.
+    if isinstance(parsed, dict):
+        reserved = {"ok", "data", "error", "raw"}
+        for k, v in parsed.items():
+            if isinstance(k, str) and k not in reserved:
+                out[k] = v
+
+    return out
 
 
 def rephrase_for_user(playbook: Dict[str, Any], question: Optional[str] = None) -> str:
