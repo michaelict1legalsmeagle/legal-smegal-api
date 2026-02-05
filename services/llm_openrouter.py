@@ -3,277 +3,135 @@
 import os
 import json
 import re
-import time
 from typing import Any, Dict, Optional, List, Union
 
 import requests
-from requests import Response
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-_DEFAULT_MODEL = (os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini") or "openai/gpt-4o-mini").strip()
-_TIMEOUT_SECONDS = int((os.getenv("OPENROUTER_TIMEOUT_SECONDS", "20") or "20").strip())
-_MAX_RESPONSE_CHARS = int((os.getenv("OPENROUTER_MAX_RESPONSE_CHARS", "200000") or "200000").strip())
-
-# Retry policy (tight + intentional)
-_MAX_RETRIES = int((os.getenv("OPENROUTER_MAX_RETRIES", "2") or "2").strip())  # total attempts = 1 + retries
-_BASE_BACKOFF_SECONDS = float((os.getenv("OPENROUTER_BACKOFF_SECONDS", "0.8") or "0.8").strip())
-
-# Optional: ask provider for JSON mode when supported.
-_ENABLE_JSON_MODE = (os.getenv("OPENROUTER_JSON_MODE", "1") or "1").strip().lower() in ("1", "true", "yes")
-
-
-class OpenRouterError(RuntimeError):
-    """Deterministic wrapper for upstream failures."""
-
-
-def _safe_trim(text: str, max_chars: int) -> str:
-    if not isinstance(text, str):
-        return ""
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars]
+_DEFAULT_MODEL = (os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini") or "").strip() or "openai/gpt-4o-mini"
+_TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30") or "30")
 
 
 def _extract_json(text: str) -> Optional[Any]:
-    """
-    Best-effort JSON extraction from a model response.
-    Bounded to avoid pathological regex/runtime on huge responses.
-    """
+    """Best-effort JSON extraction from a model response."""
     if not isinstance(text, str):
         return None
+    s = text.strip()
 
-    s = _safe_trim(text.strip(), _MAX_RESPONSE_CHARS)
-    if not s:
-        return None
-
-    # 1) Direct JSON
+    # Direct JSON
     try:
         return json.loads(s)
     except Exception:
         pass
 
-    # 2) Strip markdown fences (start/end only)
-    s2 = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", s, flags=re.IGNORECASE).strip()
-    if s2:
-        try:
-            return json.loads(s2)
-        except Exception:
-            pass
-
-    # 3) Find first JSON object/array in text, but bounded and non-greedy
-    m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", s2 or s)
-    if not m:
-        return None
-
-    candidate = _safe_trim(m.group(1).strip(), _MAX_RESPONSE_CHARS)
+    # Strip markdown fences
+    s2 = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE | re.MULTILINE).strip()
     try:
-        return json.loads(candidate)
+        return json.loads(s2)
     except Exception:
-        return None
+        pass
 
-
-def _headers() -> Dict[str, str]:
-    api_key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
-    if not api_key:
-        raise OpenRouterError("OPENROUTER_API_KEY not set")
-
-    headers: Dict[str, str] = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    referer = (os.getenv("OPENROUTER_HTTP_REFERER") or "").strip()
-    title = (os.getenv("OPENROUTER_APP_NAME") or "legal-smegal-api").strip()
-
-    if referer:
-        headers["HTTP-Referer"] = referer
-    if title:
-        headers["X-Title"] = title
-
-    return headers
-
-
-def _should_retry(resp: Optional[Response], exc: Optional[BaseException]) -> bool:
-    if exc is not None:
-        return isinstance(exc, (requests.Timeout, requests.ConnectionError))
-    if resp is None:
-        return False
-    return resp.status_code in (429, 500, 502, 503, 504)
-
-
-def _post_with_retries(payload: Dict[str, Any]) -> Dict[str, Any]:
-    last_exc: Optional[BaseException] = None
-    last_resp: Optional[Response] = None
-
-    for attempt in range(_MAX_RETRIES + 1):
+    # Find first {...} or [...]
+    m = re.search(r"(\{.*\}|\[.*\])", s, flags=re.DOTALL)
+    if m:
+        candidate = m.group(1).strip()
         try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers=_headers(),
-                json=payload,
-                timeout=_TIMEOUT_SECONDS,
-            )
-            last_resp = resp
-
-            if _should_retry(resp, None) and attempt < _MAX_RETRIES:
-                sleep_s = _BASE_BACKOFF_SECONDS * (2 ** attempt)
-                time.sleep(sleep_s)
-                continue
-
-            resp.raise_for_status()
-            return resp.json()
-
-        except Exception as e:
-            last_exc = e
-            if _should_retry(None, e) and attempt < _MAX_RETRIES:
-                sleep_s = _BASE_BACKOFF_SECONDS * (2 ** attempt)
-                time.sleep(sleep_s)
-                continue
-            break
-
-    if last_resp is not None:
-        body = ""
-        try:
-            body = _safe_trim(last_resp.text or "", 2000)
+            return json.loads(candidate)
         except Exception:
-            body = ""
-        raise OpenRouterError(
-            f"OpenRouter request failed (status={getattr(last_resp, 'status_code', 'n/a')}): {body}"
-        ) from last_exc
+            return None
 
-    raise OpenRouterError("OpenRouter request failed (no response)") from last_exc
+    return None
 
 
 def _openrouter_chat(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
-    model = _DEFAULT_MODEL.strip() or "openai/gpt-4o-mini"
+    api_key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
 
-    req: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "temperature": float(temperature),
-    }
-
-    if _ENABLE_JSON_MODE:
-        req["response_format"] = {"type": "json_object"}
-
-    data = _post_with_retries(req)
-
-    try:
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        raise OpenRouterError("Malformed OpenRouter response (missing choices/message/content)") from e
-
-
-def _coerce_str(v: Any) -> str:
-    if v is None:
-        return ""
-    if isinstance(v, str):
-        return v
-    try:
-        return str(v)
-    except Exception:
-        return ""
-
-
-def _extract_prompt_from_payload(payload: Dict[str, Any]) -> str:
-    """
-    Adapter: accept prompt from common shapes without requiring callers to match exactly.
-    Priority:
-      1) payload["prompt"]
-      2) payload["options"]["prompt"]
-      3) payload["input"] / payload["text"]
-      4) payload["messages"] -> last user content
-    """
-    if not isinstance(payload, dict):
-        return ""
-
-    p = _coerce_str(payload.get("prompt")).strip()
-    if p:
-        return p
-
-    opts = payload.get("options")
-    if isinstance(opts, dict):
-        p2 = _coerce_str(opts.get("prompt")).strip()
-        if p2:
-            return p2
-
-    p3 = _coerce_str(payload.get("input") or payload.get("text")).strip()
-    if p3:
-        return p3
-
-    msgs = payload.get("messages")
-    if isinstance(msgs, list):
-        # Find last user message content
-        for m in reversed(msgs):
-            if isinstance(m, dict) and m.get("role") == "user":
-                c = _coerce_str(m.get("content")).strip()
-                if c:
-                    return c
-
-    return ""
-
-
-def _extract_system_from_payload(payload: Dict[str, Any], fallback: str) -> str:
-    if not isinstance(payload, dict):
-        return (fallback or "").strip()
-    s = _coerce_str(payload.get("system")).strip()
-    if s:
-        return s
-    # Some callers may place system inside options
-    opts = payload.get("options")
-    if isinstance(opts, dict):
-        s2 = _coerce_str(opts.get("system")).strip()
-        if s2:
-            return s2
-    return (fallback or "").strip()
-
-
-def llm_json(*, system: str, prompt: Any, temperature: float = 0.2) -> Dict[str, Any]:
-    """
-    Return a JSON object for backend consumption.
-    IMPORTANT: This function must exist because app.py imports it at module import time.
-
-    Contract (preserved):
-    - If prompt is empty/blank -> return {ok:false, error:"prompt_required"} (no silent defaults).
-    - If model returns non-JSON -> return {ok:false, error:"non_json_response", raw:"..."}.
-
-    Adapter (added, production-safe):
-    - If `prompt` is a dict payload, extract prompt from {prompt, options.prompt, messages, ...}.
-    - If `prompt` is a list (messages), try to derive the last user prompt.
-    """
-    # Allow callers to pass a full payload dict instead of a string prompt.
-    payload_dict: Optional[Dict[str, Any]] = prompt if isinstance(prompt, dict) else None
-
-    system_prompt = (system or "").strip()
-    if payload_dict is not None:
-        system_prompt = _extract_system_from_payload(payload_dict, system_prompt)
-
-    system_prompt = system_prompt or "Return ONLY valid JSON. No prose."
-
-    user_prompt = ""
-    if payload_dict is not None:
-        user_prompt = _extract_prompt_from_payload(payload_dict)
-    elif isinstance(prompt, list):
-        # Some callers might pass messages directly.
-        user_prompt = _extract_prompt_from_payload({"messages": prompt})
-    else:
-        user_prompt = _coerce_str(prompt).strip()
-
-    if not user_prompt:
-        return {"ok": False, "error": "prompt_required"}
-
-    content = _openrouter_chat(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
+    resp = requests.post(
+        OPENROUTER_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            # Optional but recommended by OpenRouter; safe if unset
+            "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", ""),
+            "X-Title": os.getenv("OPENROUTER_APP_NAME", "legal-smegal-api"),
+        },
+        json={
+            "model": _DEFAULT_MODEL,
+            "messages": messages,
+            "temperature": float(temperature),
+        },
+        timeout=_TIMEOUT_SECONDS,
     )
+    resp.raise_for_status()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
+
+
+def _normalize_messages(
+    *,
+    system: Optional[str],
+    prompt: Optional[str],
+    messages: Optional[List[Dict[str, str]]],
+) -> List[Dict[str, str]]:
+    """
+    Adapter: accept either:
+      - system + prompt
+      - messages (optionally plus system)
+    Produces a valid OpenRouter chat-completions message list.
+    """
+    sys_text = (system or "Return ONLY valid JSON. No prose.").strip()
+
+    if messages and isinstance(messages, list):
+        out: List[Dict[str, str]] = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            content = m.get("content")
+            if role in ("system", "user", "assistant") and isinstance(content, str):
+                out.append({"role": role, "content": content})
+        # Ensure a system message exists (prepend if missing)
+        if not any(m.get("role") == "system" for m in out):
+            out.insert(0, {"role": "system", "content": sys_text})
+        return out
+
+    user_text = (prompt or "").strip()
+    if not user_text:
+        # Caller provided neither messages nor prompt -> this is a caller error,
+        # but we fail in a controlled way for API stability.
+        return [{"role": "system", "content": sys_text}, {"role": "user", "content": ""}]
+
+    return [{"role": "system", "content": sys_text}, {"role": "user", "content": user_text}]
+
+
+def llm_json(
+    *,
+    system: Optional[str] = None,
+    prompt: Optional[str] = None,
+    messages: Optional[List[Dict[str, str]]] = None,
+    temperature: float = 0.2,
+) -> Dict[str, Any]:
+    """
+    Contract-preserving JSON producer.
+
+    Back-compat:
+      - existing callers pass (system, prompt)
+    New-compat:
+      - callers may pass messages=[{role, content}, ...] (system optional)
+
+    Returns:
+      {"ok": True, "data": <parsed_json>} OR {"ok": False, "error": "...", "raw": "..."}
+    """
+    msg_list = _normalize_messages(system=system, prompt=prompt, messages=messages)
+
+    content = _openrouter_chat(msg_list, temperature=float(temperature))
 
     parsed = _extract_json(content)
     if parsed is None:
-        return {"ok": False, "error": "non_json_response", "raw": _safe_trim(content, 4000)}
+        return {"ok": False, "error": "non_json_response", "raw": content}
 
     return {"ok": True, "data": parsed}
 
@@ -292,7 +150,6 @@ def rephrase_for_user(playbook: Dict[str, Any], question: Optional[str] = None) 
     issue = (playbook or {}).get("what_it_means", "")
     why = (playbook or {}).get("why_it_matters", "")
     costs = (playbook or {}).get("cost_implications", "")
-    q = (question or "").strip()
 
     user_prompt = f"""Issue explanation:
 {issue}
@@ -303,8 +160,6 @@ Why it matters:
 Costs:
 {costs}
 """
-    if q:
-        user_prompt += f"\nUser question:\n{q}\n"
 
     return _openrouter_chat(
         [
