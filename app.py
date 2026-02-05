@@ -2972,16 +2972,57 @@ def qa_clarify():
 
 @app.route("/llm/json", methods=["POST"])
 def llm_json_route():
-    payload = request.get_json(force=True, silent=True) or {}
-    system = payload.get("system", "")
-    prompt = payload.get("prompt")
-    if not prompt:
+    """
+    Dual-mode endpoint:
+      - application/json  (legacy clients)
+      - multipart/form-data (frontend FormData uploads)
+    Required field: prompt (non-empty). Accepts prompt from:
+      - JSON body: { prompt } or { options: { prompt } }
+      - multipart: form field "prompt" or JSON in form field "options" containing { prompt }
+    """
+    system = ""
+    prompt = None
+    options = {}
+
+    # --- JSON mode (legacy) ---
+    if request.is_json:
+        payload = request.get_json(force=True, silent=True) or {}
+        system = payload.get("system", "") or ""
+        prompt = payload.get("prompt")
+        maybe_opts = payload.get("options")
+        if isinstance(maybe_opts, dict):
+            options = maybe_opts
+            if not prompt:
+                prompt = maybe_opts.get("prompt")
+
+    # --- multipart / form mode (frontend FormData) ---
+    else:
+        system = (request.form.get("system") or "").strip()
+        prompt = request.form.get("prompt")
+
+        raw_options = request.form.get("options")
+        if raw_options:
+            try:
+                parsed = json.loads(raw_options)
+                if isinstance(parsed, dict):
+                    options = parsed
+                else:
+                    options = {"_raw_options": parsed}
+            except Exception:
+                options = {"_raw_options": raw_options}
+
+        if not prompt and isinstance(options, dict):
+            prompt = options.get("prompt")
+
+    if not prompt or not str(prompt).strip():
         return jsonify({"error": "prompt is required"}), 400
+
     try:
-        result = llm_json(system=str(system), prompt=str(prompt))
+        result = llm_json(system=str(system), prompt=str(prompt).strip())
     except Exception as e:
         app.logger.exception("llm_json failed")
         return jsonify({"error": "llm_failed", "details": str(e)}), 500
+
     return jsonify(result), 200
 
 @app.route("/", methods=["GET"])
