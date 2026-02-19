@@ -1,4 +1,6 @@
 # services/llm_openrouter.py
+# CONTRACT-ENFORCED LLM JSON LAYER
+# Deterministic. No silent partial payloads.
 
 import os
 import json
@@ -14,12 +16,12 @@ _TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30") or "30")
 
 
 def _extract_json(text: str) -> Optional[Any]:
-    """Best-effort JSON extraction from a model response."""
     if not isinstance(text, str):
         return None
+
     s = text.strip()
 
-    # Direct JSON
+    # Direct parse
     try:
         return json.loads(s)
     except Exception:
@@ -32,7 +34,7 @@ def _extract_json(text: str) -> Optional[Any]:
     except Exception:
         pass
 
-    # Find first {...} or [...] (greedy; DOTALL)
+    # Extract first JSON block
     m = re.search(r"(\{.*\}|\[.*\])", s, flags=re.DOTALL)
     if m:
         candidate = m.group(1).strip()
@@ -54,7 +56,6 @@ def _openrouter_chat(messages: List[Dict[str, str]], temperature: float = 0.2) -
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            # Optional but recommended by OpenRouter; safe if unset
             "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", ""),
             "X-Title": os.getenv("OPENROUTER_APP_NAME", "legal-smegal-api"),
         },
@@ -65,8 +66,10 @@ def _openrouter_chat(messages: List[Dict[str, str]], temperature: float = 0.2) -
         },
         timeout=_TIMEOUT_SECONDS,
     )
+
     resp.raise_for_status()
     data = resp.json()
+
     return data["choices"][0]["message"]["content"]
 
 
@@ -76,12 +79,7 @@ def _normalize_messages(
     prompt: Optional[str],
     messages: Optional[List[Dict[str, str]]],
 ) -> List[Dict[str, str]]:
-    """
-    Adapter: accept either:
-      - system + prompt
-      - messages (optionally plus system)
-    Produces a valid OpenRouter chat-completions message list.
-    """
+
     sys_text = (system or "Return ONLY valid JSON. No prose.").strip()
 
     if messages and isinstance(messages, list):
@@ -93,17 +91,36 @@ def _normalize_messages(
             content = m.get("content")
             if role in ("system", "user", "assistant") and isinstance(content, str):
                 out.append({"role": role, "content": content})
-        # Ensure a system message exists (prepend if missing)
         if not any(m.get("role") == "system" for m in out):
             out.insert(0, {"role": "system", "content": sys_text})
         return out
 
-    user_text = (prompt or "").strip()
-    if not user_text:
-        # Controlled failure: downstream handler can treat this as "prompt missing"
-        return [{"role": "system", "content": sys_text}, {"role": "user", "content": ""}]
+    return [
+        {"role": "system", "content": sys_text},
+        {"role": "user", "content": (prompt or "").strip()},
+    ]
 
-    return [{"role": "system", "content": sys_text}, {"role": "user", "content": user_text}]
+
+def _validate_analysis_contract(parsed: Any) -> Dict[str, Any]:
+    if not isinstance(parsed, dict):
+        raise ValueError("Analysis output is not a JSON object")
+
+    if "score" not in parsed:
+        raise ValueError("Analysis contract violation: missing 'score'")
+
+    if "summary" not in parsed:
+        raise ValueError("Analysis contract violation: missing 'summary'")
+
+    if not isinstance(parsed["score"], (int, float)):
+        raise ValueError("Analysis contract violation: score must be numeric")
+
+    if not isinstance(parsed["summary"], str):
+        raise ValueError("Analysis contract violation: summary must be string")
+
+    parsed.setdefault("positives", [])
+    parsed.setdefault("risks", [])
+
+    return parsed
 
 
 def llm_json(
@@ -113,65 +130,32 @@ def llm_json(
     messages: Optional[List[Dict[str, str]]] = None,
     temperature: float = 0.2,
 ) -> Dict[str, Any]:
-    """
-    Contract-preserving JSON producer.
 
-    Back-compat:
-      - existing callers pass (system, prompt)
-    New-compat:
-      - callers may pass messages=[{role, content}, ...] (system optional)
-
-    Returns (expanded for UI compatibility):
-      - Always includes: {"ok": bool, "data": <parsed_json or None>}
-      - If parsed_json is a dict, also promotes its keys to top-level
-        (avoids breaking UIs that expect fields at root).
-    """
     msg_list = _normalize_messages(system=system, prompt=prompt, messages=messages)
 
     content = _openrouter_chat(msg_list, temperature=float(temperature))
 
     parsed = _extract_json(content)
+
     if parsed is None:
-        return {"ok": False, "error": "non_json_response", "raw": content, "data": None}
+        raise ValueError("Model returned non-JSON response")
 
-    # Base wrapper (stable)
-    out: Dict[str, Any] = {"ok": True, "data": parsed}
+    validated = _validate_analysis_contract(parsed)
 
-    # Promote dict keys to top-level for UI/legacy consumers that expect root fields.
-    # Never overwrite reserved keys to avoid collisions.
-    if isinstance(parsed, dict):
-        reserved = {"ok", "data", "error", "raw"}
-        for k, v in parsed.items():
-            if isinstance(k, str) and k not in reserved:
-                out[k] = v
-
-    return out
+    return validated
 
 
 def rephrase_for_user(playbook: Dict[str, Any], question: Optional[str] = None) -> str:
-    """
-    Uses OpenRouter ONLY to improve clarity and tone.
-    It must not add facts.
-    """
+
     system_prompt = (
-        "You are a calm, experienced UK property solicitor explaining a single issue. "
-        "Do not give advice. Do not introduce new risks. "
-        "Explain clearly and concisely in plain English."
+        "You are a calm UK property solicitor explaining one issue clearly."
     )
 
     issue = (playbook or {}).get("what_it_means", "")
     why = (playbook or {}).get("why_it_matters", "")
     costs = (playbook or {}).get("cost_implications", "")
 
-    user_prompt = f"""Issue explanation:
-{issue}
-
-Why it matters:
-{why}
-
-Costs:
-{costs}
-"""
+    user_prompt = f"Issue: {issue}\nWhy: {why}\nCosts: {costs}"
 
     return _openrouter_chat(
         [
