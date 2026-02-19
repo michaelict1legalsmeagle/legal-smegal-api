@@ -2976,9 +2976,13 @@ def llm_json_route():
     Dual-mode endpoint:
       - application/json  (legacy clients)
       - multipart/form-data (frontend FormData uploads)
+
     Required field: prompt (non-empty). Accepts prompt from:
       - JSON body: { prompt } or { options: { prompt } }
       - multipart: form field "prompt" or JSON in form field "options" containing { prompt }
+
+    Contract (always returned, even on failure):
+      { score:number, summary:string, positives:string[], risks:string[] }
     """
     system = ""
     prompt = None
@@ -3014,16 +3018,54 @@ def llm_json_route():
         if not prompt and isinstance(options, dict):
             prompt = options.get("prompt")
 
-    if not prompt or not str(prompt).strip():
+    prompt_str = (str(prompt).strip() if prompt is not None else "")
+    if not prompt_str:
         return jsonify({"error": "prompt is required"}), 400
 
+    # Deterministic health check (no LLM call)
+    if prompt_str.lower() in ("ping", "health", "healthcheck"):
+        return jsonify({"score": 0, "summary": "pong", "positives": [], "risks": []}), 200
+
     try:
-        result = llm_json(system=str(system), prompt=str(prompt).strip())
+        result = llm_json(system=str(system), prompt=prompt_str)
+
+        # Hard guard: if upstream returns unexpected shape, normalise here (never 500 the client)
+        if not isinstance(result, dict):
+            raise ValueError("LLM returned non-object")
+
+        score = result.get("score", 0)
+        summary = result.get("summary", "")
+        positives = result.get("positives", [])
+        risks = result.get("risks", [])
+
+        if not isinstance(score, (int, float)):
+            score = 0
+        if not isinstance(summary, str):
+            summary = ""
+        if not isinstance(positives, list):
+            positives = []
+        if not isinstance(risks, list):
+            risks = []
+
+        return jsonify({"score": score, "summary": summary, "positives": positives, "risks": risks}), 200
+
     except Exception as e:
         app.logger.exception("llm_json failed")
-        return jsonify({"error": "llm_failed", "details": str(e)}), 500
 
-    return jsonify(result), 200
+        # Never strand the UI with a 500. Return contract-compliant payload + error context.
+        return (
+            jsonify(
+                {
+                    "score": 0,
+                    "summary": "LLM unavailable. Returning safe fallback.",
+                    "positives": [],
+                    "risks": [],
+                    "_error": "llm_failed",
+                    "_details": str(e),
+                }
+            ),
+            200,
+        )
 
 @app.route("/", methods=["GET"])
 def home():
