@@ -1,9 +1,6 @@
 # services/llm_openrouter.py
 # CONTRACT-ENFORCED LLM JSON LAYER
-# Guarantees:
-# - Deterministic JSON extraction
-# - Auto-unwrap common wrapper shapes (ok/data, analysis, result)
-# - Enforce analysis contract at ROOT (score + summary always present or hard fail)
+# Deterministic. No silent partial payloads.
 
 import os
 import json
@@ -17,8 +14,6 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _DEFAULT_MODEL = (os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini") or "").strip() or "openai/gpt-4o-mini"
 _TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30") or "30")
 
-LLM_LAYER_VERSION = os.getenv("LLM_LAYER_VERSION", "llm_openrouter_v2_contract_root")
-
 
 def _extract_json(text: str) -> Optional[Any]:
     if not isinstance(text, str):
@@ -26,7 +21,7 @@ def _extract_json(text: str) -> Optional[Any]:
 
     s = text.strip()
 
-    # Direct JSON
+    # Direct parse
     try:
         return json.loads(s)
     except Exception:
@@ -39,7 +34,7 @@ def _extract_json(text: str) -> Optional[Any]:
     except Exception:
         pass
 
-    # First JSON block
+    # Extract first JSON block
     m = re.search(r"(\{.*\}|\[.*\])", s, flags=re.DOTALL)
     if m:
         candidate = m.group(1).strip()
@@ -71,8 +66,10 @@ def _openrouter_chat(messages: List[Dict[str, str]], temperature: float = 0.2) -
         },
         timeout=_TIMEOUT_SECONDS,
     )
+
     resp.raise_for_status()
     data = resp.json()
+
     return data["choices"][0]["message"]["content"]
 
 
@@ -82,7 +79,18 @@ def _normalize_messages(
     prompt: Optional[str],
     messages: Optional[List[Dict[str, str]]],
 ) -> List[Dict[str, str]]:
-    sys_text = (system or "Return ONLY valid JSON. No prose.").strip()
+
+    sys_text = (system or (
+        "Return ONLY valid JSON (no markdown, no prose).\n"
+        "Schema (MUST include all keys):\n"
+        "{\n"
+        '  "score": <number 0-100>,\n'
+        '  "summary": <string>,\n'
+        '  "positives": <array of strings>,\n'
+        '  "risks": <array of strings>\n'
+        "}\n"
+        "Do not include any other keys."
+    )).strip()
 
     if messages and isinstance(messages, list):
         out: List[Dict[str, str]] = []
@@ -97,29 +105,10 @@ def _normalize_messages(
             out.insert(0, {"role": "system", "content": sys_text})
         return out
 
-    return [{"role": "system", "content": sys_text}, {"role": "user", "content": (prompt or "").strip()}]
-
-
-def _unwrap_analysis_obj(obj: Any) -> Any:
-    """
-    Accepts common wrapper shapes and returns the likely analysis dict.
-    Handles cases like:
-      - {ok:true, data:{...}}
-      - {data:{...}}
-      - {analysis:{...}}
-      - {result:{...}}
-    If no wrapper found, returns obj as-is.
-    """
-    if not isinstance(obj, dict):
-        return obj
-
-    # Highest confidence wrappers first
-    for key in ("data", "analysis", "result", "output"):
-        inner = obj.get(key)
-        if isinstance(inner, dict):
-            return inner
-
-    return obj
+    return [
+        {"role": "system", "content": sys_text},
+        {"role": "user", "content": (prompt or "").strip()},
+    ]
 
 
 def _validate_analysis_contract(parsed: Any) -> Dict[str, Any]:
@@ -138,11 +127,19 @@ def _validate_analysis_contract(parsed: Any) -> Dict[str, Any]:
     if not isinstance(parsed["summary"], str):
         raise ValueError("Analysis contract violation: summary must be string")
 
-    # Normalize optional arrays for UI stability
-    if "positives" not in parsed or not isinstance(parsed.get("positives"), list):
+    parsed.setdefault("positives", [])
+    parsed.setdefault("risks", [])
+
+    # Normalise array types (strict on required keys, tolerant on optional arrays)
+    if not isinstance(parsed.get("positives"), list):
         parsed["positives"] = []
-    if "risks" not in parsed or not isinstance(parsed.get("risks"), list):
+    else:
+        parsed["positives"] = [str(x) for x in parsed["positives"] if isinstance(x, (str, int, float))]
+
+    if not isinstance(parsed.get("risks"), list):
         parsed["risks"] = []
+    else:
+        parsed["risks"] = [str(x) for x in parsed["risks"] if isinstance(x, (str, int, float))]
 
     return parsed
 
@@ -154,49 +151,32 @@ def llm_json(
     messages: Optional[List[Dict[str, str]]] = None,
     temperature: float = 0.2,
 ) -> Dict[str, Any]:
+
     msg_list = _normalize_messages(system=system, prompt=prompt, messages=messages)
 
     content = _openrouter_chat(msg_list, temperature=float(temperature))
 
     parsed = _extract_json(content)
+
     if parsed is None:
         raise ValueError("Model returned non-JSON response")
 
-    # Auto-unwrap wrappers so root has score/summary
-    candidate = _unwrap_analysis_obj(parsed)
-
-    # If still missing score but original had a dict, attempt one more unwrap layer
-    if isinstance(candidate, dict) and ("score" not in candidate or "summary" not in candidate):
-        candidate2 = _unwrap_analysis_obj(candidate)
-        candidate = candidate2
-
-    validated = _validate_analysis_contract(candidate)
-
-    # Stamp for deploy verification (safe extra key; frontend ignores)
-    validated["_llm_layer_version"] = LLM_LAYER_VERSION
+    validated = _validate_analysis_contract(parsed)
 
     return validated
 
 
 def rephrase_for_user(playbook: Dict[str, Any], question: Optional[str] = None) -> str:
+
     system_prompt = (
-        "You are a calm, experienced UK property solicitor explaining a single issue. "
-        "Do not introduce new facts. Explain clearly and concisely."
+        "You are a calm UK property solicitor explaining one issue clearly."
     )
 
     issue = (playbook or {}).get("what_it_means", "")
     why = (playbook or {}).get("why_it_matters", "")
     costs = (playbook or {}).get("cost_implications", "")
 
-    user_prompt = f"""Issue explanation:
-{issue}
-
-Why it matters:
-{why}
-
-Costs:
-{costs}
-"""
+    user_prompt = f"Issue: {issue}\nWhy: {why}\nCosts: {costs}"
 
     return _openrouter_chat(
         [
