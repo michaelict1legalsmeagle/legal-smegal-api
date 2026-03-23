@@ -3531,6 +3531,8 @@ def summarise_deal(deal_id: str):
             "summary_json": summary,
             "deal_score":   summary.get("deal_score"),
             "updated_at":   now_iso(),
+            "address":      (summary.get("property") or {}).get("address"),
+            "deal_type":    (summary.get("property") or {}).get("type"),
         }).eq("id", deal_id).execute()
     except Exception as e:
         app.logger.warning(f"Could not store summary: {e}")
