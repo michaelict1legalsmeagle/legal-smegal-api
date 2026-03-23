@@ -12,6 +12,12 @@ from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
 from pathlib import Path
+import jwt as pyjwt
+import io
+try:
+    import pdfplumber
+except ImportError:
+    pdfplumber = None
 
 # --- Solicitor Q&A (bounded clarification) ---
 try:
@@ -3066,6 +3072,396 @@ def llm_json_route():
             ),
             200,
         )
+
+
+
+# ============================================================
+# PDF UPLOAD PIPELINE
+# ============================================================
+import jwt as pyjwt
+#   import io
+#   try:
+#       import pdfplumber
+#   except ImportError:
+#       pdfplumber = None
+#
+# ============================================================
+
+# ── JWT VALIDATION ──────────────────────────────────────────
+SUPABASE_JWT_SECRET = (os.getenv("SUPABASE_JWT_SECRET") or "").strip()
+
+def get_user_id_from_request() -> Optional[str]:
+    """Extract and validate Supabase JWT from Authorization header.
+    Returns user_id (UUID string) or None if invalid/missing."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header[7:]
+    if not SUPABASE_JWT_SECRET or not token:
+        return None
+    try:
+        payload = pyjwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            audience="authenticated"
+        )
+        return payload.get("sub")
+    except Exception:
+        return None
+
+
+def require_auth(f):
+    """Decorator — returns 401 if no valid JWT."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user_id = get_user_id_from_request()
+        if not user_id:
+            return jsonify({"error": "Unauthorised — valid JWT required"}), 401
+        request.user_id = user_id
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ── PDF TEXT EXTRACTION ─────────────────────────────────────
+DOCUMENT_PATTERNS: Dict[str, List[str]] = {
+    "legal_pack":          ["legal pack", "auction pack", "lot information", "information pack"],
+    "special_conditions":  ["special conditions", "special condition of sale", "special conditions of sale"],
+    "addendum":            ["addendum", "day of sale", "lot amendment", "amendment notice",
+                            "late amendment", "revised conditions", "updated conditions",
+                            "pre auction notice", "vendor notice"],
+    "title_register":      ["title register", "hm land registry", "official copy", "land registry"],
+    "title_plan":          ["title plan", "filed plan", "ordnance survey"],
+    "local_auth_search":   ["local authority search", "con29", "llc1", "local land charges"],
+    "lease":               ["lease", "underlease", "sublease", "tenancy agreement", "leasehold"],
+    "epc":                 ["energy performance", "epc", "energy certificate", "domestic energy"],
+    "survey":              ["structural survey", "homebuyer", "building survey", "rics survey"],
+    "auction_tcs":         ["auction terms", "auctioneer terms", "conditions of auction", "bidding terms"],
+    "freehold":            ["freehold", "absolute freehold", "possessory freehold", "tr1"],
+    "deed":                ["transfer deed", "conveyance", "tr1", "deed of"],
+    "tenancy_ast":         ["assured shorthold", "ast", "tenancy agreement", "rental agreement"],
+}
+
+def detect_document_type(filename: str, text: str) -> str:
+    combined = (filename + " " + (text or "")[:3000]).lower()
+    combined = re.sub(r"[_\-.]", " ", combined)
+    for doc_type, patterns in DOCUMENT_PATTERNS.items():
+        if any(p in combined for p in patterns):
+            return doc_type
+    return "unknown"
+
+
+def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
+    """Extract text from PDF bytes. Returns (text, page_count).
+    Falls back gracefully if pdfplumber unavailable."""
+    if pdfplumber is None:
+        return "", 0
+    try:
+        text_parts = []
+        page_count = 0
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            page_count = len(pdf.pages)
+            for page in pdf.pages:
+                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                if page_text:
+                    text_parts.append(page_text)
+        return "\n\n".join(text_parts), page_count
+    except Exception as e:
+        app.logger.warning(f"PDF extraction failed: {e}")
+        return "", 0
+
+
+# ── DEALS ───────────────────────────────────────────────────
+@app.route("/api/deals", methods=["POST"])
+@require_auth
+def create_deal():
+    """Create a new deal record. Called before upload begins.
+    Body: { deal_name, postcode?, lot_number?, guide_price?, deal_type?, auction_date? }
+    Returns: { deal_id }"""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    data = request.get_json(silent=True) or {}
+    deal_name = (data.get("deal_name") or "").strip()
+    if not deal_name:
+        return jsonify({"error": "deal_name is required"}), 400
+
+    try:
+        result = supabase.table("deals").insert({
+            "user_id":      request.user_id,
+            "deal_name":    deal_name,
+            "title":        deal_name,
+            "postcode":     (data.get("postcode") or "").strip().upper() or None,
+            "lot_number":   (data.get("lot_number") or "").strip() or None,
+            "guide_price":  data.get("guide_price"),
+            "deal_type":    (data.get("deal_type") or "").strip() or None,
+            "auction_date": data.get("auction_date") or None,
+            "status":       "active",
+        }).execute()
+
+        deal_id = result.data[0]["id"]
+        return jsonify({"ok": True, "deal_id": deal_id}), 201
+
+    except Exception as e:
+        app.logger.exception("create_deal failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/deals", methods=["GET"])
+@require_auth
+def list_deals():
+    """List all deals for the authenticated user, newest first."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        result = supabase.table("deals") \
+            .select("*") \
+            .eq("user_id", request.user_id) \
+            .neq("status", "archived") \
+            .order("created_at", desc=True) \
+            .execute()
+        return jsonify({"ok": True, "deals": result.data}), 200
+    except Exception as e:
+        app.logger.exception("list_deals failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/deals/<deal_id>", methods=["GET"])
+@require_auth
+def get_deal(deal_id: str):
+    """Get a single deal by ID — user must own it."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        result = supabase.table("deals") \
+            .select("*, documents(*)") \
+            .eq("id", deal_id) \
+            .eq("user_id", request.user_id) \
+            .single() \
+            .execute()
+        if not result.data:
+            return jsonify({"error": "Deal not found"}), 404
+        return jsonify({"ok": True, "deal": result.data}), 200
+    except Exception as e:
+        app.logger.exception("get_deal failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/deals/<deal_id>", methods=["PATCH"])
+@require_auth
+def update_deal(deal_id: str):
+    """Update deal fields. Body: any subset of deal columns."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    # Whitelist updatable fields — never allow user_id to be changed
+    allowed = {
+        "deal_name", "title", "postcode", "lot_number", "guide_price",
+        "deal_type", "auction_date", "status", "bid_ceiling", "hammer_price",
+        "completion_period", "completion_deadline", "completion_actions",
+        "summary_json", "analysis_json", "area_json", "financials_json",
+        "deal_score", "address",
+    }
+    updates = {k: v for k, v in data.items() if k in allowed}
+    if not updates:
+        return jsonify({"error": "No valid fields to update"}), 400
+    updates["updated_at"] = now_iso()
+    try:
+        result = supabase.table("deals") \
+            .update(updates) \
+            .eq("id", deal_id) \
+            .eq("user_id", request.user_id) \
+            .execute()
+        return jsonify({"ok": True, "deal": result.data[0] if result.data else {}}), 200
+    except Exception as e:
+        app.logger.exception("update_deal failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── DOCUMENT UPLOAD ─────────────────────────────────────────
+@app.route("/api/documents/upload", methods=["POST"])
+@require_auth
+def upload_document():
+    """Upload a PDF legal pack document.
+    Multipart form: file (PDF), deal_id (required).
+    Returns: { document_id, doc_type, page_count, extraction_status }"""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    deal_id = (request.form.get("deal_id") or "").strip()
+    if not deal_id:
+        return jsonify({"error": "deal_id is required"}), 400
+
+    file = request.files.get("file")
+    if not file:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    filename = file.filename or "document.pdf"
+    if not filename.lower().endswith(".pdf"):
+        return jsonify({"error": "Only PDF files are accepted"}), 400
+
+    # Verify deal belongs to this user
+    try:
+        deal_check = supabase.table("deals") \
+            .select("id") \
+            .eq("id", deal_id) \
+            .eq("user_id", request.user_id) \
+            .single() \
+            .execute()
+        if not deal_check.data:
+            return jsonify({"error": "Deal not found or access denied"}), 403
+    except Exception:
+        return jsonify({"error": "Deal verification failed"}), 403
+
+    # Read file bytes
+    try:
+        file_bytes = file.read()
+        file_size = len(file_bytes)
+    except Exception as e:
+        return jsonify({"error": f"File read failed: {e}"}), 400
+
+    # Enforce 50MB limit
+    MAX_SIZE = 50 * 1024 * 1024
+    if file_size > MAX_SIZE:
+        return jsonify({"error": "File exceeds 50MB limit"}), 413
+
+    # Extract text
+    extracted_text, page_count = extract_pdf_text(file_bytes)
+    extraction_status = "complete" if extracted_text else "empty"
+
+    # Detect document type
+    doc_type = detect_document_type(filename, extracted_text)
+
+    # Store in Supabase Storage
+    storage_path = f"{request.user_id}/{deal_id}/{filename}"
+    try:
+        supabase.storage.from_("legal-packs").upload(
+            path=storage_path,
+            file=file_bytes,
+            file_options={"content-type": "application/pdf", "upsert": "true"}
+        )
+    except Exception as e:
+        app.logger.warning(f"Storage upload failed: {e} — continuing without storage")
+        storage_path = f"upload_failed/{filename}"
+
+    # Create document record in database
+    try:
+        doc_result = supabase.table("documents").insert({
+            "deal_id":           deal_id,
+            "user_id":           request.user_id,
+            "doc_type":          doc_type,
+            "file_name":         filename,
+            "storage_path":      storage_path,
+            "file_size_bytes":   file_size,
+            "page_count":        page_count,
+            "extracted_text":    extracted_text[:500000] if extracted_text else None,
+            "extraction_status": extraction_status,
+        }).execute()
+
+        document_id = doc_result.data[0]["id"]
+
+        return jsonify({
+            "ok":               True,
+            "document_id":      document_id,
+            "doc_type":         doc_type,
+            "page_count":       page_count,
+            "file_size_bytes":  file_size,
+            "extraction_status": extraction_status,
+            "has_text":         bool(extracted_text),
+        }), 201
+
+    except Exception as e:
+        app.logger.exception("document insert failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/documents/<deal_id>", methods=["GET"])
+@require_auth
+def list_documents(deal_id: str):
+    """List all documents for a deal."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        result = supabase.table("documents") \
+            .select("id, doc_type, file_name, page_count, file_size_bytes, extraction_status, created_at") \
+            .eq("deal_id", deal_id) \
+            .eq("user_id", request.user_id) \
+            .order("created_at") \
+            .execute()
+        return jsonify({"ok": True, "documents": result.data}), 200
+    except Exception as e:
+        app.logger.exception("list_documents failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── USAGE ───────────────────────────────────────────────────
+@app.route("/api/usage", methods=["GET"])
+@require_auth
+def get_usage():
+    """Get current month usage for authenticated user."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        profile = supabase.table("profiles") \
+            .select("plan, summaries_used, analyses_used, usage_reset_date") \
+            .eq("id", request.user_id) \
+            .single() \
+            .execute()
+
+        if not profile.data:
+            return jsonify({"error": "Profile not found"}), 404
+
+        p = profile.data
+        plan = p.get("plan", "starter")
+
+        PLAN_LIMITS = {
+            "free":         {"summaries": 1,  "analyses": 0},
+            "starter":      {"summaries": 3,  "analyses": 999},
+            "professional": {"summaries": 10, "analyses": 999},
+            "enterprise":   {"summaries": 30, "analyses": 999},
+        }
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
+
+        return jsonify({
+            "ok": True,
+            "plan":              plan,
+            "summaries_used":    p.get("summaries_used", 0),
+            "summaries_limit":   limits["summaries"],
+            "analyses_used":     p.get("analyses_used", 0),
+            "analyses_limit":    limits["analyses"],
+            "reset_date":        p.get("usage_reset_date"),
+        }), 200
+
+    except Exception as e:
+        app.logger.exception("get_usage failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── AUTH PROFILE ─────────────────────────────────────────────
+@app.route("/api/auth/me", methods=["GET"])
+@require_auth
+def get_me():
+    """Get current user profile."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        result = supabase.table("profiles") \
+            .select("*") \
+            .eq("id", request.user_id) \
+            .single() \
+            .execute()
+        if not result.data:
+            return jsonify({"error": "Profile not found"}), 404
+        # Never return sensitive fields
+        profile = result.data
+        profile.pop("stripe_customer_id", None)
+        profile.pop("stripe_subscription_id", None)
+        return jsonify({"ok": True, "profile": profile}), 200
+    except Exception as e:
+        app.logger.exception("get_me failed")
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/", methods=["GET"])
 def home():
