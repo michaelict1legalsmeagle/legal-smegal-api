@@ -3438,6 +3438,122 @@ def get_usage():
         return jsonify({"error": str(e)}), 500
 
 
+# ── DOCUMENT SUMMARY ────────────────────────────────────────
+@app.route("/api/deals/<deal_id>/summarise", methods=["POST"])
+@require_auth
+def summarise_deal(deal_id: str):
+    """Run two-stage document summary for a deal.
+    Reads all uploaded documents from Supabase, runs LLM pipeline,
+    stores result in deals.summary_json, returns full summary."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    # Verify deal ownership
+    try:
+        deal = supabase.table("deals") \
+            .select("id, deal_name, summary_json") \
+            .eq("id", deal_id) \
+            .eq("user_id", request.user_id) \
+            .single() \
+            .execute()
+        if not deal.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception as e:
+        return jsonify({"error": "Deal not found"}), 404
+
+    # Check usage allowance
+    try:
+        profile = supabase.table("profiles") \
+            .select("plan, summaries_used, usage_reset_date") \
+            .eq("id", request.user_id) \
+            .single() \
+            .execute()
+
+        if profile.data:
+            p = profile.data
+            plan = p.get("plan", "starter")
+            used = p.get("summaries_used", 0)
+            limits = {"free": 1, "starter": 3, "professional": 10, "enterprise": 30}
+            limit = limits.get(plan, 3)
+
+            if used >= limit:
+                return jsonify({
+                    "error": "summary_limit_reached",
+                    "used": used,
+                    "limit": limit,
+                    "plan": plan,
+                }), 402
+    except Exception as e:
+        app.logger.warning(f"Usage check failed: {e} — proceeding")
+
+    # Fetch all documents with extracted text
+    try:
+        docs_result = supabase.table("documents") \
+            .select("doc_type, file_name, extracted_text, page_count, extraction_status") \
+            .eq("deal_id", deal_id) \
+            .eq("user_id", request.user_id) \
+            .execute()
+        documents = docs_result.data or []
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch documents: {e}"}), 500
+
+    if not documents:
+        return jsonify({"error": "No documents found for this deal"}), 400
+
+    # Run two-stage pipeline
+    try:
+        from services.legal_analysis import run_document_summary
+        summary = run_document_summary(
+            documents=documents,
+            llm_json_fn=llm_json,
+        )
+    except ImportError:
+        # Fallback if services package path differs
+        try:
+            import sys
+            import os as _os
+            sys.path.insert(0, _os.path.dirname(__file__))
+            from legal_analysis import run_document_summary
+            summary = run_document_summary(
+                documents=documents,
+                llm_json_fn=llm_json,
+            )
+        except Exception as e:
+            app.logger.exception("legal_analysis import failed")
+            return jsonify({"error": f"Analysis service unavailable: {e}"}), 500
+    except Exception as e:
+        app.logger.exception("run_document_summary failed")
+        return jsonify({"error": str(e)}), 500
+
+    # Store summary in deal record
+    try:
+        supabase.table("deals").update({
+            "summary_json": summary,
+            "deal_score":   summary.get("deal_score"),
+            "updated_at":   now_iso(),
+        }).eq("id", deal_id).execute()
+    except Exception as e:
+        app.logger.warning(f"Could not store summary: {e}")
+
+    # Record usage
+    try:
+        supabase.table("profiles").update({
+            "summaries_used": (profile.data.get("summaries_used", 0) + 1)
+            if profile and profile.data else 1
+        }).eq("id", request.user_id).execute()
+
+        supabase.table("usage_events").insert({
+            "user_id":    request.user_id,
+            "event_type": "summary",
+            "deal_id":    deal_id,
+            "amount_pence": 0,
+        }).execute()
+    except Exception as e:
+        app.logger.warning(f"Usage recording failed: {e}")
+
+    return jsonify(summary), 200
+
+
 # ── AUTH PROFILE ─────────────────────────────────────────────
 @app.route("/api/auth/me", methods=["GET"])
 @require_auth
