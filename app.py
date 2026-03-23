@@ -3154,22 +3154,62 @@ def detect_document_type(filename: str, text: str) -> str:
 
 def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     """Extract text from PDF bytes. Returns (text, page_count).
-    Falls back gracefully if pdfplumber unavailable."""
-    if pdfplumber is None:
-        return "", 0
+    
+    Strategy:
+    1. pymupdf (fitz) — best on complex layouts, tables, multi-column
+    2. pdfplumber — fallback, good on standard text PDFs
+    3. Empty string — if both fail (scanned/image PDFs)
+    
+    Checks text density per page — if very low, likely scanned.
+    """
+    # ── Attempt 1: pymupdf ──
     try:
+        import fitz  # pymupdf
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        page_count = len(doc)
         text_parts = []
-        page_count = 0
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            page_count = len(pdf.pages)
-            for page in pdf.pages:
-                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
-                if page_text:
-                    text_parts.append(page_text)
-        return "\n\n".join(text_parts), page_count
+        for page in doc:
+            text = page.get_text("text", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+            if text and text.strip():
+                text_parts.append(text)
+        doc.close()
+        combined = "\n\n".join(text_parts)
+        # Check text density — if meaningful text extracted, use it
+        if combined.strip() and len(combined) > page_count * 50:
+            app.logger.info(f"pymupdf extracted {len(combined):,} chars from {page_count} pages")
+            return combined, page_count
+        app.logger.info(f"pymupdf low yield ({len(combined)} chars) — trying pdfplumber")
+    except ImportError:
+        app.logger.info("pymupdf not available — trying pdfplumber")
     except Exception as e:
-        app.logger.warning(f"PDF extraction failed: {e}")
-        return "", 0
+        app.logger.warning(f"pymupdf failed: {e} — trying pdfplumber")
+
+    # ── Attempt 2: pdfplumber ──
+    if pdfplumber is not None:
+        try:
+            text_parts = []
+            page_count = 0
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                page_count = len(pdf.pages)
+                for page in pdf.pages:
+                    # Try standard extraction first
+                    page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                    if not page_text:
+                        # Try with looser tolerances for complex layouts
+                        page_text = page.extract_text(x_tolerance=8, y_tolerance=8)
+                    if page_text and page_text.strip():
+                        text_parts.append(page_text)
+            combined = "\n\n".join(text_parts)
+            if combined.strip():
+                app.logger.info(f"pdfplumber extracted {len(combined):,} chars from {page_count} pages")
+                return combined, page_count
+        except Exception as e:
+            app.logger.warning(f"pdfplumber failed: {e}")
+
+    # ── Both failed — likely scanned PDF ──
+    app.logger.warning("Both extraction methods failed — PDF may be scanned/image-based")
+    return "", page_count if 'page_count' in dir() else 0
+
 
 
 # ── DEALS ───────────────────────────────────────────────────
