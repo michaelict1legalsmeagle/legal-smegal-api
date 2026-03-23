@@ -109,11 +109,12 @@ OUTPUT (STRICT JSON ONLY — no prose, no markdown):
 {
   "deal_score": number,
   "property": {
-    "address": "string or null",
+    "address": "string or null — full UK property address including postcode if present. Look for: lot description, property address, title, subject property, premises. Extract any address-like text.",
+    "postcode": "string or null — UK postcode e.g. B1 1AA",
     "type": "HMO | BTL | Commercial | Development | Unknown",
     "tenure": "Freehold | Leasehold | Unknown",
     "lease_years": number or null,
-    "lot_number": "string or null",
+    "lot_number": "string or null — look for Lot followed by a number",
     "guide_price_pence": number or null
   },
   "completion_terms": {
