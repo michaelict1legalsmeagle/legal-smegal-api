@@ -261,13 +261,25 @@ def run_document_summary(
     # Prioritise title register and special conditions — they always contain address
     address_data = {}
     try:
-        priority_types = {"title_register", "special_conditions", "title_plan", "legal_pack"}
+        # Priority 1: local_auth_search and special_conditions always have clean address at top
+        # Priority 2: title_register, title_plan, legal_pack
+        # Use ALL docs but weight the best sources first
+        priority_1 = {"local_auth_search", "special_conditions", "environmental"}
+        priority_2 = {"title_register", "title_plan", "legal_pack"}
+
         priority_text = ""
+        # Add priority 1 docs first (most likely to have clean address)
         for doc in documents:
-            if doc.get("doc_type") in priority_types and doc.get("extracted_text"):
+            if doc.get("doc_type") in priority_1 and doc.get("extracted_text"):
                 priority_text += f"\n=== {doc.get('doc_type')} ({doc.get('file_name','')}) ===\n"
-                priority_text += (doc.get("extracted_text") or "")[:8000]
-        addr_input = (priority_text.strip() or combined_text)[:50000]
+                priority_text += (doc.get("extracted_text") or "")[:5000]
+        # Then priority 2
+        for doc in documents:
+            if doc.get("doc_type") in priority_2 and doc.get("extracted_text"):
+                priority_text += f"\n=== {doc.get('doc_type')} ({doc.get('file_name','')}) ===\n"
+                priority_text += (doc.get("extracted_text") or "")[:5000]
+        # Fall back to combined text if nothing found
+        addr_input = (priority_text.strip() or combined_text)[:60000]
 
         addr_result = llm_json_fn(
             system="""Extract property identification from UK HM Land Registry title register documents.
@@ -411,7 +423,8 @@ def _build_combined_text(documents: List[Dict]) -> str:
     Priority docs (special_conditions, addendum, title_register) get 25,000 chars.
     Total cap: 120,000 chars to prevent memory issues on large packs.
     """
-    PRIORITY_TYPES = {"special_conditions", "addendum", "title_register", "legal_pack"}
+    PRIORITY_TYPES = {"special_conditions", "addendum", "title_register", "legal_pack",
+                      "local_auth_search"}
     PER_DOC_LIMIT  = 25000  # chars per priority document
     STD_DOC_LIMIT  = 12000  # chars per standard document
     TOTAL_LIMIT    = 120000 # total chars across all documents
