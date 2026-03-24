@@ -3625,6 +3625,163 @@ def summarise_deal(deal_id: str):
     return jsonify(summary), 200
 
 
+# ── FULL ANALYSIS ───────────────────────────────────────────
+FULL_ANALYSIS_SYSTEM = """You are a UK property legal analyst. Analyse the auction documents provided.
+Every finding must be directly evidenced from document text.
+Do not infer, suggest, or recommend. State only what the documents explicitly state.
+Return ONLY valid JSON — no prose, no markdown fences.
+
+{
+  "deal_score": number,
+  "adjusted_score": number,
+  "adjusted_score_rationale": string,
+  "jis_findings": [
+    {
+      "number": number,
+      "title": "string — one line, max 12 words, investor-facing",
+      "severity": "critical | high | opportunity",
+      "finding": "string — what the document states",
+      "evidence": "string — exact verbatim quote from document, max 40 words",
+      "implication": "string — magnitude and consequence, no inference beyond document",
+      "action": "string — what to do, not a recommendation",
+      "source_document": "string",
+      "source_clause": "string or null",
+      "source_page": number or null
+    }
+  ],
+  "flags": [
+    {
+      "severity": "critical | high | missing | note",
+      "title": "string — one line, max 12 words",
+      "summation": "string — one sentence, factual, clause-referenced",
+      "source_document": "string",
+      "source_clause": "string or null",
+      "source_page": number or null,
+      "legal_risk_weight": number
+    }
+  ],
+  "solicitor_questions": ["string"],
+  "flag_counts": {
+    "critical": number,
+    "high": number,
+    "missing": number,
+    "note": number
+  },
+  "viability_statement": "string — 2-3 sentences, factual, no verdict"
+}
+
+SCORING: Start at 100. Deduct: critical=12, high=6, missing=4.
+adjusted_score: score if resolvable flags resolved.
+jis_findings: 5-10 findings, most material issues first.
+flags: all issues including missing documents."""
+
+
+@app.route("/api/deals/<deal_id>/analyse", methods=["POST"])
+@require_auth
+def analyse_deal(deal_id: str):
+    """Run full legal analysis for a deal.
+    Uses all uploaded document text. Stores result in deals.analysis_json."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    # Verify ownership
+    try:
+        deal = supabase.table("deals")             .select("id, deal_name, analysis_json")             .eq("id", deal_id)             .eq("user_id", request.user_id)             .single().execute()
+        if not deal.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+
+    # Return cached analysis if available and not forced refresh
+    force = request.args.get("force", "").lower() in ("1", "true")
+    if deal.data.get("analysis_json") and not force:
+        return jsonify(deal.data["analysis_json"]), 200
+
+    # Fetch documents
+    try:
+        docs = supabase.table("documents")             .select("doc_type, file_name, extracted_text, page_count")             .eq("deal_id", deal_id)             .eq("user_id", request.user_id)             .execute()
+        documents = docs.data or []
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch documents: {e}"}), 500
+
+    if not documents:
+        return jsonify({"error": "No documents found for this deal"}), 400
+
+    # Build combined text
+    try:
+        from legal_analysis import _build_combined_text, DOC_TYPE_LABELS
+        combined = _build_combined_text(documents)
+    except Exception:
+        parts = []
+        for doc in documents:
+            text = (doc.get("extracted_text") or "").strip()
+            if text:
+                label = doc.get('doc_type', 'doc')
+                fname = doc.get('file_name', '')
+                parts.append(f"=== {label} ({fname}) ===\n{text[:15000]}")
+        combined = "\n\n".join(parts)
+
+    if not combined.strip():
+        return jsonify({"error": "No text extracted from documents"}), 400
+
+    # Truncate
+    if len(combined) > 100000:
+        truncated = combined[:70000] + "\n\n[...truncated...]\n\n" + combined[-20000:]
+    else:
+        truncated = combined
+
+    # Run LLM
+    try:
+        result = llm_json_raw(
+            system=FULL_ANALYSIS_SYSTEM,
+            prompt="Analyse these auction documents and return the full analysis JSON:\n\n" + truncated,
+            temperature=0.1,
+        )
+    except Exception as e:
+        app.logger.exception("Full analysis LLM failed")
+        return jsonify({"error": str(e)}), 500
+
+    # Add summary flags from deal if available
+    try:
+        deal_full = supabase.table("deals")             .select("summary_json, deal_score")             .eq("id", deal_id).single().execute()
+        if deal_full.data and deal_full.data.get("summary_json"):
+            summary = deal_full.data["summary_json"]
+            # Merge missing doc flags from summary if not in analysis
+            summary_flags = summary.get("flags", [])
+            missing_flags = [f for f in summary_flags if f.get("severity") == "missing"]
+            analysis_flags = result.get("flags", [])
+            existing_titles = {f.get("title","") for f in analysis_flags}
+            for mf in missing_flags:
+                if mf.get("title","") not in existing_titles:
+                    analysis_flags.append(mf)
+            result["flags"] = analysis_flags
+    except Exception:
+        pass
+
+    # Store result
+    try:
+        supabase.table("deals").update({
+            "analysis_json": result,
+            "deal_score": result.get("deal_score"),
+            "updated_at": now_iso(),
+        }).eq("id", deal_id).execute()
+    except Exception as e:
+        app.logger.warning(f"Could not store analysis: {e}")
+
+    # Record usage
+    try:
+        supabase.table("usage_events").insert({
+            "user_id":    request.user_id,
+            "event_type": "analysis",
+            "deal_id":    deal_id,
+            "amount_pence": 0,
+        }).execute()
+    except Exception:
+        pass
+
+    return jsonify(result), 200
+
+
 # ── AUTH PROFILE ─────────────────────────────────────────────
 @app.route("/api/auth/me", methods=["GET"])
 @require_auth
