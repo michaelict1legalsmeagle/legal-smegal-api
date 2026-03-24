@@ -25,10 +25,23 @@ try:
 except Exception:
     clarify_flag = None  # type: ignore
 try:
-    from services.llm_openrouter import llm_json  # type: ignore
+    from services.llm_openrouter import llm_json, _openrouter_chat, _extract_json, _normalize_messages  # type: ignore
+
+    def llm_json_raw(*, system=None, prompt=None, temperature=0.1):
+        """Like llm_json() but without the score/summary contract validation.
+        Returns the parsed JSON directly — used for our custom analysis prompts."""
+        msg_list = _normalize_messages(system=system, prompt=prompt, messages=None)
+        content = _openrouter_chat(msg_list, temperature=float(temperature))
+        parsed = _extract_json(content)
+        if parsed is None:
+            raise ValueError(f"Model returned non-JSON: {content[:200]}")
+        return parsed
+
 except Exception:
     # Do not crash the whole API if the optional LLM helper is missing/mispackaged.
     def llm_json(*args, **kwargs):  # type: ignore
+        return {"ok": False, "error": "llm_helper_unavailable"}
+    def llm_json_raw(*args, **kwargs):  # type: ignore
         return {"ok": False, "error": "llm_helper_unavailable"}
 # --- Guaranteed Trends fallback (UI hard contract) ---
 try:
@@ -3561,7 +3574,7 @@ def summarise_deal(deal_id: str):
         from services.legal_analysis import run_document_summary
         summary = run_document_summary(
             documents=documents,
-            llm_json_fn=llm_json,
+            llm_json_fn=llm_json_raw,
         )
     except ImportError:
         # Fallback if services package path differs
@@ -3572,7 +3585,7 @@ def summarise_deal(deal_id: str):
             from legal_analysis import run_document_summary
             summary = run_document_summary(
                 documents=documents,
-                llm_json_fn=llm_json,
+                llm_json_fn=llm_json_raw,
             )
         except Exception as e:
             app.logger.exception("legal_analysis import failed")
