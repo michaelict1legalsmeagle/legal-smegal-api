@@ -324,6 +324,21 @@ def _extract_address_regex(documents: List[Dict]) -> Dict:
     if lease_match:
         result['lease_years'] = int(lease_match.group(1))
 
+    # Filter out false positives — search companies, solicitors, lenders
+    FALSE_POSITIVE_KEYWORDS = [
+        'infotrack', 'devall law', 'lawful', 'solicitor', 'conveyancer',
+        'limited', 'ltd', 'plc', 'llp', 'llc', 'bank', 'mortgage',
+        'prepared for', 'prepared by', 'waterloo road', 'fleet street',
+        'chancery lane', 'legal services', 'law firm', 'chambers',
+        'national westminster', 'barclays', 'halifax', 'nationwide',
+        'Birmingham City Council', 'city council', 'district council',
+    ]
+    if result.get('address'):
+        addr_lower = result['address'].lower()
+        if any(kw.lower() in addr_lower for kw in FALSE_POSITIVE_KEYWORDS):
+            logger.info(f"Address rejected as false positive: {result['address']}")
+            result.pop('address', None)
+
     logger.info(f"Regex extraction: address={result.get('address')}, postcode={result.get('postcode')}, lot={result.get('lot_number')}")
     return result
 
