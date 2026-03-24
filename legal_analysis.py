@@ -235,6 +235,99 @@ def build_pack_completeness(documents: List[Dict]) -> Dict:
 
 
 # ── MAIN PIPELINE ────────────────────────────────────────────
+# ── REGEX-FIRST ENTITY EXTRACTION ───────────────────────────
+import re as _re
+
+def _extract_postcode(text: str) -> Optional[str]:
+    """Extract UK postcode using regex. Handles all UK postcode formats."""
+    pattern = r'([A-Z]{1,2}[0-9]{1,2}[A-Z]?\s*[0-9][A-Z]{2})'
+    matches = _re.findall(pattern, text.upper())
+    if not matches:
+        return None
+    # Filter out common false positives
+    false_positives = {'WM428', 'WM700', 'MM126', 'WM527'}
+    valid = [m.strip() for m in matches if not any(fp in m for fp in false_positives)]
+    if not valid:
+        return None
+    from collections import Counter
+    return Counter(valid).most_common(1)[0][0]
+
+
+def _extract_address_regex(documents: List[Dict]) -> Dict:
+    """
+    Structured regex extraction of property address.
+    Tries multiple document types and patterns in priority order.
+    Returns dict with address, postcode, lot_number fields.
+    """
+    result = {}
+
+    # Combine all extracted text for searching
+    all_text = ""
+    for doc in documents:
+        text = (doc.get("extracted_text") or "").strip()
+        if text:
+            all_text += f"\n{text}"
+
+    # ── Pattern 1: Local authority search — "Matter:" line followed by address
+    # Format: "Prepared for: [solicitor]\n[address]\n[postcode]"
+    # Or: "Property: [address]"
+    for pattern in [
+        r'[Pp]roperty[:\s]+([A-Z0-9][^\n]{5,80}(?:Birmingham|Wolverhampton|Manchester|Leeds|London|Bristol|Sheffield|Liverpool|Coventry|Leicester)[^\n]{0,50})',
+        r'[Ss]ubject [Pp]roperty[:\s]+([A-Z0-9][^\n]{5,100})',
+        r'[Pp]remises[:\s]+([A-Z0-9][^\n]{5,100})',
+    ]:
+        m = _re.search(pattern, all_text)
+        if m:
+            result['address'] = m.group(1).strip()
+            break
+
+    # ── Pattern 2: Land Registry — "being [address]" after WEST MIDLANDS etc
+    # "The Freehold/Leasehold land... and being [address]"
+    area_pattern = r'(?:WEST MIDLANDS|EAST MIDLANDS|GREATER MANCHESTER|WEST YORKSHIRE|SOUTH YORKSHIRE|MERSEYSIDE|TYNE AND WEAR)[^\n]*\n'
+    area_match = _re.search(area_pattern, all_text)
+    if area_match and not result.get('address'):
+        # Look for address in next 2000 chars
+        after_area = all_text[area_match.end():area_match.end()+2000]
+        being_match = _re.search(
+            r'being\s+(?:land at\s+|known as\s+|situate at\s+)?'
+            r'([A-Z0-9][^.]{5,150}(?:Road|Street|Lane|Avenue|Drive|Close|Way|Crescent|Grove|Place|Court|Gardens|Terrace|Hill|Rise|View|Walk|Mews)[^.]{0,80})',
+            after_area, _re.IGNORECASE
+        )
+        if being_match:
+            result['address'] = being_match.group(1).strip()
+
+    # ── Pattern 3: Lot number from any document
+    lot_patterns = [
+        r'[Ll]ot\s+[Nn]o\.?\s*:?\s*(\d+)',
+        r'[Ll]ot\s+(\d+)\s*[-:]',
+        r'LOT\s+(\d+)',
+    ]
+    for pattern in lot_patterns:
+        m = _re.search(pattern, all_text)
+        if m:
+            result['lot_number'] = m.group(1)
+            break
+
+    # ── Pattern 4: Postcode — always try regex regardless
+    postcode = _extract_postcode(all_text[:80000])
+    if postcode:
+        result['postcode'] = postcode
+
+    # ── Pattern 5: Tenure from title register
+    if _re.search(r'[Ff]reehold', all_text[:20000]):
+        result['tenure'] = 'Freehold'
+    elif _re.search(r'[Ll]easehold', all_text[:20000]):
+        result['tenure'] = 'Leasehold'
+
+    # ── Pattern 6: Lease term
+    lease_match = _re.search(r'[Tt]erm\s+of\s+(\d+)\s+years', all_text[:30000])
+    if lease_match:
+        result['lease_years'] = int(lease_match.group(1))
+
+    logger.info(f"Regex extraction: address={result.get('address')}, postcode={result.get('postcode')}, lot={result.get('lot_number')}")
+    return result
+
+
 def run_document_summary(
     documents: List[Dict],
     llm_json_fn: Any,
@@ -257,31 +350,36 @@ def run_document_summary(
     if not combined_text.strip():
         return _empty_summary("No text could be extracted from the uploaded documents.")
 
-    # ── Address pre-extraction — fast dedicated call ──
-    # Prioritise title register and special conditions — they always contain address
+    # ── Address pre-extraction — regex first, then LLM ──
     address_data = {}
+
+    # Stage 0: Regex extraction — fast, deterministic, no LLM cost
     try:
-        # Priority 1: local_auth_search and special_conditions always have clean address at top
-        # Priority 2: title_register, title_plan, legal_pack
-        # Use ALL docs but weight the best sources first
-        priority_1 = {"local_auth_search", "special_conditions", "environmental"}
-        priority_2 = {"title_register", "title_plan", "legal_pack"}
+        address_data = _extract_address_regex(documents)
+        logger.info(f"Regex address data: {address_data}")
+    except Exception as e:
+        logger.warning(f"Regex extraction failed: {e}")
 
-        priority_text = ""
-        # Add priority 1 docs first (most likely to have clean address)
-        for doc in documents:
-            if doc.get("doc_type") in priority_1 and doc.get("extracted_text"):
-                priority_text += f"\n=== {doc.get('doc_type')} ({doc.get('file_name','')}) ===\n"
-                priority_text += (doc.get("extracted_text") or "")[:5000]
-        # Then priority 2
-        for doc in documents:
-            if doc.get("doc_type") in priority_2 and doc.get("extracted_text"):
-                priority_text += f"\n=== {doc.get('doc_type')} ({doc.get('file_name','')}) ===\n"
-                priority_text += (doc.get("extracted_text") or "")[:5000]
-        # Fall back to combined text if nothing found
-        addr_input = (priority_text.strip() or combined_text)[:60000]
+    # Stage 0b: LLM address extraction — only if regex missed the address
+    try:
+        if not address_data.get('address'):
+            # Priority 1: local_auth_search and special_conditions always have clean address at top
+            # Priority 2: title_register, title_plan, legal_pack
+            priority_1 = {"local_auth_search", "special_conditions", "environmental"}
+            priority_2 = {"title_register", "title_plan", "legal_pack"}
 
-        addr_result = llm_json_fn(
+            priority_text = ""
+            for doc in documents:
+                if doc.get("doc_type") in priority_1 and doc.get("extracted_text"):
+                    priority_text += f"\n=== {doc.get('doc_type')} ({doc.get('file_name','')}) ===\n"
+                    priority_text += (doc.get("extracted_text") or "")[:5000]
+            for doc in documents:
+                if doc.get("doc_type") in priority_2 and doc.get("extracted_text"):
+                    priority_text += f"\n=== {doc.get('doc_type')} ({doc.get('file_name','')}) ===\n"
+                    priority_text += (doc.get("extracted_text") or "")[:5000]
+            addr_input = (priority_text.strip() or combined_text)[:60000]
+
+            addr_result = llm_json_fn(
             system="""Extract property identification from UK HM Land Registry title register documents.
 Return ONLY valid JSON — no prose, no markdown:
 {
@@ -312,21 +410,17 @@ ALSO check: lot description lines, special conditions property description,
 any line containing a house number followed by a street name.""",
             prompt=f"Extract property identification:\n\n{addr_input}",
             temperature=0.1,
-        )
-        address_data = addr_result
-        logger.info(f"Address extracted: {address_data.get('address')}")
+            )
+            address_data = addr_result
+            logger.info(f"Address extracted: {address_data.get('address')}")
 
-        # Postcode regex fallback — if LLM missed the postcode, find it directly
-        if not address_data.get("postcode"):
-            import re as _re
-            pc_pattern = r'([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})'
-            all_postcodes = _re.findall(pc_pattern, combined_text[:50000])
-            if all_postcodes:
-                # Take the most common postcode — likely the subject property
-                from collections import Counter as _Counter
-                most_common = _Counter(all_postcodes).most_common(1)[0][0]
-                address_data["postcode"] = most_common.strip()
-                logger.info(f"Postcode found via regex: {address_data['postcode']}")
+            # Merge LLM result with regex data — LLM fills gaps regex missed
+            if not address_data.get("postcode") and addr_result.get("postcode"):
+                address_data["postcode"] = addr_result.get("postcode")
+            if not address_data.get("tenure") and addr_result.get("tenure"):
+                address_data["tenure"] = addr_result.get("tenure")
+            if not address_data.get("lot_number") and addr_result.get("lot_number"):
+                address_data["lot_number"] = addr_result.get("lot_number")
 
     except Exception as e:
         logger.warning(f"Address pre-extraction failed: {e}")
