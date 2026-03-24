@@ -270,28 +270,52 @@ def run_document_summary(
         addr_input = (priority_text.strip() or combined_text)[:50000]
 
         addr_result = llm_json_fn(
-            system="""Extract property identification from UK auction legal pack documents.
+            system="""Extract property identification from UK HM Land Registry title register documents.
 Return ONLY valid JSON — no prose, no markdown:
 {
-  "address": "full UK property address including street, town, postcode — or null",
+  "address": "full UK property address including street number, street name, town/city — or null",
   "postcode": "UK postcode e.g. B15 2QT — or null",
-  "lot_number": "lot number digits only e.g. 15 — or null",
+  "lot_number": "lot number digits only — or null",
   "tenure": "Freehold or Leasehold or Unknown",
   "lease_years": number or null,
   "property_type": "HMO or BTL or Commercial or Development or Unknown",
   "guide_price_pence": number or null
 }
-SEARCH IN ORDER:
-1. Title register A: Property Register — describes the land and its location
-2. Lines like "Lot 15: [address]" or "The property known as..."
-3. Administrative area line e.g. "WEST MIDLANDS : BIRMINGHAM"
-4. "Subject property:", "The Property:", "The Premises:", "situate at"
-5. Any UK address: house number + street + town + postcode""",
+
+LAND REGISTRY FORMAT — the address appears in this exact pattern:
+The document contains "A: Property Register" or "A Property Register" section.
+Under it is an administrative area line e.g. "WEST MIDLANDS : BIRMINGHAM"
+Then a numbered entry like:
+  "1 (date) The Freehold land shown edged with red on the plan of the above Title 
+   filed at the Registry and being [THE ADDRESS YOU NEED]."
+OR:
+  "1 (date) The Leasehold land shown edged... being [ADDRESS]"
+OR paragraphs containing "known as", "situate at", "situate and being", "being land at"
+
+EXTRACT the street address from within these numbered paragraphs.
+The administrative area (WEST MIDLANDS : BIRMINGHAM) gives you the city.
+Combine the street address with the city to form the full address.
+
+ALSO check: lot description lines, special conditions property description, 
+any line containing a house number followed by a street name.""",
             prompt=f"Extract property identification:\n\n{addr_input}",
             temperature=0.1,
         )
         address_data = addr_result
         logger.info(f"Address extracted: {address_data.get('address')}")
+
+        # Postcode regex fallback — if LLM missed the postcode, find it directly
+        if not address_data.get("postcode"):
+            import re as _re
+            pc_pattern = r'([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})'
+            all_postcodes = _re.findall(pc_pattern, combined_text[:50000])
+            if all_postcodes:
+                # Take the most common postcode — likely the subject property
+                from collections import Counter as _Counter
+                most_common = _Counter(all_postcodes).most_common(1)[0][0]
+                address_data["postcode"] = most_common.strip()
+                logger.info(f"Postcode found via regex: {address_data['postcode']}")
+
     except Exception as e:
         logger.warning(f"Address pre-extraction failed: {e}")
 
