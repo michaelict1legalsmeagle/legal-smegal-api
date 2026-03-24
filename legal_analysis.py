@@ -257,12 +257,57 @@ def run_document_summary(
     if not combined_text.strip():
         return _empty_summary("No text could be extracted from the uploaded documents.")
 
+    # ── Address pre-extraction — fast dedicated call ──
+    # Prioritise title register and special conditions — they always contain address
+    address_data = {}
+    try:
+        priority_types = {"title_register", "special_conditions", "title_plan", "legal_pack"}
+        priority_text = ""
+        for doc in documents:
+            if doc.get("doc_type") in priority_types and doc.get("extracted_text"):
+                priority_text += f"\n=== {doc.get('doc_type')} ({doc.get('file_name','')}) ===\n"
+                priority_text += (doc.get("extracted_text") or "")[:8000]
+        addr_input = (priority_text.strip() or combined_text)[:50000]
+
+        addr_result = llm_json_fn(
+            system="""Extract property identification from UK auction legal pack documents.
+Return ONLY valid JSON — no prose, no markdown:
+{
+  "address": "full UK property address including street, town, postcode — or null",
+  "postcode": "UK postcode e.g. B15 2QT — or null",
+  "lot_number": "lot number digits only e.g. 15 — or null",
+  "tenure": "Freehold or Leasehold or Unknown",
+  "lease_years": number or null,
+  "property_type": "HMO or BTL or Commercial or Development or Unknown",
+  "guide_price_pence": number or null
+}
+SEARCH IN ORDER:
+1. Title register A: Property Register — describes the land and its location
+2. Lines like "Lot 15: [address]" or "The property known as..."
+3. Administrative area line e.g. "WEST MIDLANDS : BIRMINGHAM"
+4. "Subject property:", "The Property:", "The Premises:", "situate at"
+5. Any UK address: house number + street + town + postcode""",
+            prompt=f"Extract property identification:\n\n{addr_input}",
+            temperature=0.1,
+        )
+        address_data = addr_result
+        logger.info(f"Address extracted: {address_data.get('address')}")
+    except Exception as e:
+        logger.warning(f"Address pre-extraction failed: {e}")
+
     # ── Stage 1 — Extraction ──
     logger.info(f"Stage 1: extracting findings from {len(combined_text):,} chars")
+    # Truncate intelligently — keep first 60k chars (cover pages, key clauses)
+    # and last 20k chars (often contains schedules and special conditions)
+    if len(combined_text) > 120000:
+        truncated = combined_text[:80000] + "\n\n[...middle section truncated...]\n\n" + combined_text[-30000:]
+    else:
+        truncated = combined_text
+
     try:
         stage1_result = llm_json_fn(
             system=STAGE_1_SYSTEM,
-            prompt=f"Extract all qualifying findings from these auction documents:\n\n{combined_text[:100000]}",
+            prompt=f"Extract all qualifying findings from these auction documents:\n\n{truncated}",
             temperature=0.1,
         )
         findings = stage1_result.get("findings", [])
@@ -307,11 +352,22 @@ def run_document_summary(
     missing_deduction = flag_counts["missing"] * 4
     deal_score = max(0, base_score - missing_deduction)
 
+    # ── Merge address pre-extraction into property ──
+    prop = stage2_result.get("property", {}) or {}
+    if not prop.get("address") and address_data.get("address"):
+        prop["address"]     = address_data.get("address")
+        prop["postcode"]    = address_data.get("postcode")
+        prop["lot_number"]  = prop.get("lot_number") or address_data.get("lot_number")
+        prop["tenure"]      = prop.get("tenure") or address_data.get("tenure", "Unknown")
+        prop["lease_years"] = prop.get("lease_years") or address_data.get("lease_years")
+        prop["type"]        = prop.get("type") or address_data.get("property_type", "Unknown")
+        prop["guide_price_pence"] = prop.get("guide_price_pence") or address_data.get("guide_price_pence")
+
     # ── Assemble final output ──
     return {
         "ok":                True,
         "deal_score":        deal_score,
-        "property":          stage2_result.get("property", {}),
+        "property":          prop,
         "completion_terms":  stage2_result.get("completion_terms", {}),
         "flags":             flags,
         "flag_counts":       flag_counts,
@@ -325,17 +381,41 @@ def run_document_summary(
 
 # ── HELPERS ──────────────────────────────────────────────────
 def _build_combined_text(documents: List[Dict]) -> str:
-    """Concatenate all document text with clear section headers."""
+    """Concatenate all document text with clear section headers.
+    
+    Per-document limit: 15,000 chars (approx 10-12 pages of legal text).
+    Priority docs (special_conditions, addendum, title_register) get 25,000 chars.
+    Total cap: 120,000 chars to prevent memory issues on large packs.
+    """
+    PRIORITY_TYPES = {"special_conditions", "addendum", "title_register", "legal_pack"}
+    PER_DOC_LIMIT  = 25000  # chars per priority document
+    STD_DOC_LIMIT  = 12000  # chars per standard document
+    TOTAL_LIMIT    = 120000 # total chars across all documents
+
     parts = []
-    for doc in documents:
+    total_chars = 0
+
+    # Process priority documents first
+    priority_docs = [d for d in documents if d.get("doc_type") in PRIORITY_TYPES]
+    standard_docs = [d for d in documents if d.get("doc_type") not in PRIORITY_TYPES]
+
+    for doc in priority_docs + standard_docs:
+        if total_chars >= TOTAL_LIMIT:
+            break
         text = (doc.get("extracted_text") or "").strip()
         if not text:
             continue
-        label = DOC_TYPE_LABELS.get(doc.get("doc_type", "unknown"), "Document")
+        doc_type = doc.get("doc_type", "unknown")
+        limit = PER_DOC_LIMIT if doc_type in PRIORITY_TYPES else STD_DOC_LIMIT
+        text = text[:limit]
+        label = DOC_TYPE_LABELS.get(doc_type, "Document")
         filename = doc.get("file_name", "")
         pages = doc.get("page_count", 0)
         header = f"\n\n{'='*60}\nDOCUMENT: {label}\nFILE: {filename}\nPAGES: {pages}\n{'='*60}\n"
-        parts.append(header + text)
+        chunk = header + text
+        parts.append(chunk)
+        total_chars += len(chunk)
+
     return "\n".join(parts)
 
 
