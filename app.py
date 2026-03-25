@@ -59,7 +59,21 @@ except Exception:
     answer_flag = None  # type: ignore
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# CORS: wildcard origin + supports_credentials=True is rejected by all modern browsers.
+# Use an explicit allowlist. Add CORS_ORIGINS env var on Render if you add more origins.
+_CORS_ORIGINS = [
+    o.strip() for o in
+    (os.getenv("CORS_ORIGINS", "https://legalsmegal-frontend.onrender.com,http://localhost:3000,http://localhost:5173") or "").split(",")
+    if o.strip()
+]
+CORS(
+    app,
+    resources={r"/*": {"origins": _CORS_ORIGINS}},
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GOOGLE_MAPS_API_KEY = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
@@ -3349,6 +3363,19 @@ def update_deal(deal_id: str):
 
 
 # ── DOCUMENT UPLOAD ─────────────────────────────────────────
+# Hard cap: 20MB. Render free plan has 512MB RAM; pymupdf can 3-5× a PDF in
+# memory during extraction — a 50MB PDF could exhaust the worker and cause 502.
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB — Flask rejects larger before any read
+
+@app.errorhandler(413)
+def request_entity_too_large(e):
+    return jsonify({"error": "File exceeds 20MB limit. Split your legal pack into smaller documents."}), 413
+
+@app.route("/api/documents/upload", methods=["OPTIONS"])
+def upload_options():
+    """Explicit OPTIONS handler so CORS preflight always gets a 200, not a 502."""
+    return "", 200
+
 @app.route("/api/documents/upload", methods=["POST"])
 @require_auth
 def upload_document():
@@ -3383,26 +3410,30 @@ def upload_document():
     except Exception:
         return jsonify({"error": "Deal verification failed"}), 403
 
-    # Read file bytes
+    # Read file bytes — Flask has already enforced MAX_CONTENT_LENGTH above
     try:
         file_bytes = file.read()
         file_size = len(file_bytes)
     except Exception as e:
         return jsonify({"error": f"File read failed: {e}"}), 400
 
-    # Enforce 50MB limit
-    MAX_SIZE = 50 * 1024 * 1024
+    # Belt-and-braces size check (in case MAX_CONTENT_LENGTH was bypassed)
+    MAX_SIZE = 20 * 1024 * 1024
     if file_size > MAX_SIZE:
-        return jsonify({"error": "File exceeds 50MB limit"}), 413
+        return jsonify({"error": "File exceeds 20MB limit. Split your legal pack into smaller documents."}), 413
 
-    # Extract text
-    extracted_text, page_count = extract_pdf_text(file_bytes)
+    # Extract text — catch any OOM / crash gracefully
+    try:
+        extracted_text, page_count = extract_pdf_text(file_bytes)
+    except Exception as e:
+        app.logger.warning(f"PDF extraction failed: {e} — storing without text")
+        extracted_text, page_count = "", 0
     extraction_status = "complete" if extracted_text else "empty"
 
     # Detect document type
     doc_type = detect_document_type(filename, extracted_text)
 
-    # Store in Supabase Storage
+    # Store in Supabase Storage — non-fatal if this fails
     storage_path = f"{request.user_id}/{deal_id}/{filename}"
     try:
         supabase.storage.from_("legal-packs").upload(
@@ -3413,6 +3444,9 @@ def upload_document():
     except Exception as e:
         app.logger.warning(f"Storage upload failed: {e} — continuing without storage")
         storage_path = f"upload_failed/{filename}"
+
+    # Free memory before the DB write
+    del file_bytes
 
     # Create document record in database
     try:
@@ -3431,13 +3465,13 @@ def upload_document():
         document_id = doc_result.data[0]["id"]
 
         return jsonify({
-            "ok":               True,
-            "document_id":      document_id,
-            "doc_type":         doc_type,
-            "page_count":       page_count,
-            "file_size_bytes":  file_size,
+            "ok":                True,
+            "document_id":       document_id,
+            "doc_type":          doc_type,
+            "page_count":        page_count,
+            "file_size_bytes":   file_size,
             "extraction_status": extraction_status,
-            "has_text":         bool(extracted_text),
+            "has_text":          bool(extracted_text),
         }), 201
 
     except Exception as e:
@@ -3594,17 +3628,42 @@ def summarise_deal(deal_id: str):
         app.logger.exception("run_document_summary failed")
         return jsonify({"error": str(e)}), 500
 
+    prop = summary.get("property") or {}
+
     # Store summary in deal record
     try:
         supabase.table("deals").update({
             "summary_json": summary,
             "deal_score":   summary.get("deal_score"),
             "updated_at":   now_iso(),
-            "address":      (summary.get("property") or {}).get("address"),
-            "deal_type":    (summary.get("property") or {}).get("type"),
+            "address":      prop.get("address"),
+            "postcode":     prop.get("postcode") or None,
+            "deal_type":    prop.get("type"),
         }).eq("id", deal_id).execute()
     except Exception as e:
-        app.logger.warning(f"Could not store summary: {e}")
+        app.logger.warning(f"Could not store summary in deals: {e}")
+
+    # Write to analyses table — matches actual Supabase schema
+    # Columns: id, user_id, created_at, updated_at, analysis_data (jsonb), analysis_name (text), analysis (jsonb)
+    try:
+        supabase.table("analyses").insert({
+            "user_id":       request.user_id,
+            "analysis_name": f"Summary — {deal.data.get('deal_name') or deal_id[:8]}",
+            "analysis_data": {
+                "deal_id":           deal_id,
+                "analysis_type":     "summary",
+                "deal_score":        summary.get("deal_score"),
+                "flag_counts":       summary.get("flag_counts") or {},
+                "property":          prop,
+                "completion_terms":  summary.get("completion_terms") or {},
+                "viability_statement": summary.get("viability_statement") or "",
+                "findings_count":    summary.get("findings_count", 0),
+                "documents_processed": summary.get("documents_processed", 0),
+            },
+            "analysis": summary,
+        }).execute()
+    except Exception as e:
+        app.logger.warning(f"Could not write to analyses table: {e}")
 
     # Record usage
     try:
@@ -3758,15 +3817,40 @@ def analyse_deal(deal_id: str):
     except Exception:
         pass
 
-    # Store result
+    # Store result in deals table
     try:
         supabase.table("deals").update({
             "analysis_json": result,
-            "deal_score": result.get("deal_score"),
-            "updated_at": now_iso(),
+            "deal_score":    result.get("deal_score"),
+            "updated_at":    now_iso(),
         }).eq("id", deal_id).execute()
     except Exception as e:
-        app.logger.warning(f"Could not store analysis: {e}")
+        app.logger.warning(f"Could not store analysis in deals: {e}")
+
+    # Write to analyses table — matches actual Supabase schema
+    try:
+        fc = result.get("flag_counts") or {}
+        deal_name_short = deal_id[:8]
+        try:
+            dn = supabase.table("deals").select("deal_name").eq("id", deal_id).single().execute()
+            deal_name_short = (dn.data or {}).get("deal_name") or deal_id[:8]
+        except Exception:
+            pass
+        supabase.table("analyses").insert({
+            "user_id":       request.user_id,
+            "analysis_name": f"Full Analysis — {deal_name_short}",
+            "analysis_data": {
+                "deal_id":           deal_id,
+                "analysis_type":     "full_analysis",
+                "deal_score":        result.get("deal_score"),
+                "adjusted_score":    result.get("adjusted_score"),
+                "flag_counts":       fc,
+                "viability_statement": result.get("viability_statement") or "",
+            },
+            "analysis": result,
+        }).execute()
+    except Exception as e:
+        app.logger.warning(f"Could not write to analyses table: {e}")
 
     # Record usage
     try:
