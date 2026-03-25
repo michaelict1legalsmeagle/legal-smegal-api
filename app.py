@@ -3807,6 +3807,595 @@ def get_me():
         return jsonify({"error": str(e)}), 500
 
 
+# ── FINANCIAL MODEL ──────────────────────────────────────────
+
+def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Calculate property investment yields from raw inputs. All GBP in £ (float)."""
+    def _gbp(v: Any) -> Optional[float]:
+        f = safe_float(v)
+        if f is None:
+            return None
+        if f > 10_000 and isinstance(v, int):
+            return f / 100.0
+        return f
+
+    def _pct(v: Any) -> Optional[float]:
+        f = safe_float(v)
+        if f is None:
+            return None
+        return max(0.0, min(100.0, f))
+
+    purchase_price      = _gbp(inputs.get("purchase_price"))
+    guide_price         = _gbp(inputs.get("guide_price"))
+    renovation_cost     = _gbp(inputs.get("renovation_cost")) or 0.0
+    monthly_rent        = _gbp(inputs.get("monthly_rent"))
+    annual_rent         = _gbp(inputs.get("annual_rent"))
+    void_weeks          = safe_float(inputs.get("void_weeks")) or 0.0
+    management_pct      = _pct(inputs.get("management_pct")) or 0.0
+    service_charge_pa   = _gbp(inputs.get("service_charge_pa")) or 0.0
+    ground_rent_pa      = _gbp(inputs.get("ground_rent_pa")) or 0.0
+    insurance_pa        = _gbp(inputs.get("insurance_pa")) or 0.0
+    maintenance_pct     = _pct(inputs.get("maintenance_pct")) or 1.0
+    buyers_premium_pct  = _pct(inputs.get("buyers_premium_pct")) or 0.0
+    stamp_duty          = _gbp(inputs.get("stamp_duty")) or 0.0
+    legal_fees          = _gbp(inputs.get("legal_fees")) or 1500.0
+    survey_cost         = _gbp(inputs.get("survey_cost")) or 0.0
+    finance_rate_pct    = _pct(inputs.get("finance_rate_pct")) or 0.0
+    ltv_pct             = _pct(inputs.get("ltv_pct")) or 0.0
+    target_yield        = _pct(inputs.get("target_yield")) or 6.0
+    exit_price          = _gbp(inputs.get("exit_price"))
+    hold_years          = safe_float(inputs.get("hold_years")) or 5.0
+
+    if purchase_price is None:
+        return {"ok": False, "error": "purchase_price is required"}
+
+    buyers_premium      = purchase_price * (buyers_premium_pct / 100.0)
+    total_acquisition   = purchase_price + buyers_premium + stamp_duty + legal_fees + survey_cost
+    total_invested      = total_acquisition + renovation_cost
+
+    if annual_rent is None and monthly_rent is not None:
+        annual_rent = monthly_rent * 12.0
+    if annual_rent is None:
+        annual_rent = 0.0
+
+    void_weeks_pa       = min(float(void_weeks), 52.0)
+    occupied_weeks      = 52.0 - void_weeks_pa
+    void_adj_rent_pa    = annual_rent * (occupied_weeks / 52.0)
+
+    management_cost_pa  = void_adj_rent_pa * (management_pct / 100.0)
+    maintenance_cost_pa = purchase_price * (maintenance_pct / 100.0)
+    total_expenses_pa   = (management_cost_pa + maintenance_cost_pa +
+                           service_charge_pa + ground_rent_pa + insurance_pa)
+
+    loan_amount         = purchase_price * (ltv_pct / 100.0) if ltv_pct > 0 else 0.0
+    annual_interest     = loan_amount * (finance_rate_pct / 100.0)
+    equity              = total_invested - loan_amount
+
+    noi                 = void_adj_rent_pa - total_expenses_pa
+    net_cashflow_pa     = noi - annual_interest
+
+    gross_yield_pct     = (annual_rent / purchase_price * 100.0)  if purchase_price > 0 else None
+    net_yield_pct       = (noi / total_invested * 100.0)          if total_invested > 0 else None
+    cash_on_cash_pct    = (net_cashflow_pa / equity * 100.0)      if (equity and equity > 0) else None
+
+    max_bid_gross       = (annual_rent / (target_yield / 100.0))  if (annual_rent > 0 and target_yield > 0) else None
+    fixed_exp           = service_charge_pa + ground_rent_pa + insurance_pa
+    rent_after_mgmt     = void_adj_rent_pa * (1.0 - management_pct / 100.0)
+    denominator         = (target_yield / 100.0) + (maintenance_pct / 100.0)
+    max_bid_net         = ((rent_after_mgmt - fixed_exp) / denominator) if denominator > 0 else None
+
+    total_rent_received = net_cashflow_pa * hold_years
+    capital_gain        = (exit_price - purchase_price) if exit_price else None
+    total_return        = (total_rent_received + capital_gain) if capital_gain is not None else total_rent_received
+    simple_roi_pct      = (total_return / total_invested * 100.0)       if total_invested > 0 else None
+    annualised_roi_pct  = (simple_roi_pct / hold_years)                 if (simple_roi_pct is not None and hold_years > 0) else None
+    payback_years       = (total_invested / noi)                        if noi > 0 else None
+
+    flags = []
+    if gross_yield_pct is not None and gross_yield_pct < 5.0:
+        flags.append({"type": "warning", "msg": f"Gross yield {gross_yield_pct:.1f}% is below 5% threshold"})
+    if gross_yield_pct is not None and gross_yield_pct >= 8.0:
+        flags.append({"type": "positive", "msg": f"Strong gross yield of {gross_yield_pct:.1f}%"})
+    if net_cashflow_pa is not None and net_cashflow_pa < 0:
+        flags.append({"type": "critical", "msg": "Net cashflow is negative after finance costs"})
+    if guide_price and purchase_price > guide_price * 1.15:
+        flags.append({"type": "warning", "msg": f"Purchase {((purchase_price/guide_price)-1)*100:.0f}% above guide price"})
+    if max_bid_gross and purchase_price > max_bid_gross:
+        flags.append({"type": "warning", "msg": f"Price exceeds max bid for {target_yield}% target yield"})
+
+    def _r2(v: Optional[float]) -> Optional[float]:
+        return round(v, 2) if v is not None else None
+
+    return {
+        "ok": True,
+        "inputs": {
+            "purchase_price": _r2(purchase_price), "guide_price": _r2(guide_price),
+            "renovation_cost": _r2(renovation_cost), "annual_rent": _r2(annual_rent),
+            "monthly_rent": _r2(annual_rent / 12.0) if annual_rent else None,
+            "void_weeks": _r2(void_weeks), "management_pct": _r2(management_pct),
+            "service_charge_pa": _r2(service_charge_pa), "ground_rent_pa": _r2(ground_rent_pa),
+            "insurance_pa": _r2(insurance_pa), "maintenance_pct": _r2(maintenance_pct),
+            "buyers_premium_pct": _r2(buyers_premium_pct), "stamp_duty": _r2(stamp_duty),
+            "legal_fees": _r2(legal_fees), "survey_cost": _r2(survey_cost),
+            "finance_rate_pct": _r2(finance_rate_pct), "ltv_pct": _r2(ltv_pct),
+            "target_yield": _r2(target_yield), "exit_price": _r2(exit_price), "hold_years": _r2(hold_years),
+        },
+        "acquisition": {
+            "buyers_premium": _r2(buyers_premium), "stamp_duty": _r2(stamp_duty),
+            "legal_fees": _r2(legal_fees), "survey_cost": _r2(survey_cost),
+            "total_acquisition": _r2(total_acquisition), "renovation_cost": _r2(renovation_cost),
+            "total_invested": _r2(total_invested),
+        },
+        "income": {
+            "gross_annual_rent": _r2(annual_rent), "void_weeks_pa": _r2(void_weeks_pa),
+            "void_adj_rent_pa": _r2(void_adj_rent_pa), "monthly_net_rent": _r2(void_adj_rent_pa / 12.0),
+        },
+        "expenses": {
+            "management_cost_pa": _r2(management_cost_pa), "maintenance_cost_pa": _r2(maintenance_cost_pa),
+            "service_charge_pa": _r2(service_charge_pa), "ground_rent_pa": _r2(ground_rent_pa),
+            "insurance_pa": _r2(insurance_pa), "total_expenses_pa": _r2(total_expenses_pa),
+        },
+        "finance": {
+            "loan_amount": _r2(loan_amount), "ltv_pct": _r2(ltv_pct),
+            "annual_interest": _r2(annual_interest), "equity": _r2(equity),
+        },
+        "returns": {
+            "noi": _r2(noi), "net_cashflow_pa": _r2(net_cashflow_pa),
+            "net_cashflow_pm": _r2(net_cashflow_pa / 12.0),
+            "gross_yield_pct": _r2(gross_yield_pct), "net_yield_pct": _r2(net_yield_pct),
+            "cash_on_cash_pct": _r2(cash_on_cash_pct), "payback_years": _r2(payback_years),
+            "simple_roi_pct": _r2(simple_roi_pct), "annualised_roi_pct": _r2(annualised_roi_pct),
+            "total_return": _r2(total_return), "capital_gain": _r2(capital_gain),
+        },
+        "max_bid": {
+            "gross_target": _r2(max_bid_gross), "net_target": _r2(max_bid_net),
+            "target_yield_pct": _r2(target_yield),
+        },
+        "flags": flags,
+        "calculated_at": now_iso(),
+    }
+
+
+@app.route("/api/deals/<deal_id>/financials", methods=["GET"])
+@require_auth
+def get_financials(deal_id: str):
+    """Retrieve saved financial model for a deal, seeded with guide price if not yet saved."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        result = supabase.table("deals") \
+            .select("financials_json, guide_price, summary_json") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not result.data:
+            return jsonify({"error": "Deal not found"}), 404
+
+        financials = result.data.get("financials_json") or {}
+        if not financials:
+            guide = result.data.get("guide_price")
+            summary = result.data.get("summary_json") or {}
+            terms = summary.get("completion_terms") or {}
+            prop  = summary.get("property") or {}
+            gpp   = prop.get("guide_price_pence")
+            financials = {
+                "_seeded": True,
+                "inputs": {
+                    "purchase_price":    float(guide) if guide else None,
+                    "guide_price":       gpp / 100.0 if gpp else (float(guide) if guide else None),
+                    "buyers_premium_pct": terms.get("buyers_premium_pct"),
+                    "monthly_rent":      None,
+                    "renovation_cost":   None,
+                    "target_yield":      6.0,
+                    "ltv_pct":           0.0,
+                    "finance_rate_pct":  0.0,
+                    "management_pct":    10.0,
+                    "maintenance_pct":   1.0,
+                    "legal_fees":        1500.0,
+                    "void_weeks":        2.0,
+                    "hold_years":        5.0,
+                }
+            }
+        return jsonify({"ok": True, "financials": financials}), 200
+    except Exception as e:
+        app.logger.exception("get_financials failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/deals/<deal_id>/financials", methods=["POST"])
+@require_auth
+def save_financials(deal_id: str):
+    """
+    Save financial inputs + calculate yields. Persists to deals.financials_json.
+    Body: { purchase_price, monthly_rent, renovation_cost, ... }
+    """
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        deal = supabase.table("deals") \
+            .select("id, guide_price, summary_json") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not deal.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+
+    # Seed defaults from deal metadata when not provided
+    if not data.get("guide_price") and not data.get("purchase_price"):
+        gp = deal.data.get("guide_price")
+        if gp:
+            data.setdefault("guide_price", float(gp))
+    if not data.get("buyers_premium_pct"):
+        try:
+            bpp = (deal.data.get("summary_json") or {}).get("completion_terms", {}).get("buyers_premium_pct")
+            if bpp:
+                data.setdefault("buyers_premium_pct", float(bpp))
+        except Exception:
+            pass
+
+    result = _calculate_financials(data)
+    if not result.get("ok"):
+        return jsonify(result), 400
+
+    try:
+        supabase.table("deals").update({
+            "financials_json": result,
+            "updated_at":      now_iso(),
+        }).eq("id", deal_id).execute()
+    except Exception as e:
+        app.logger.warning(f"Could not persist financials: {e}")
+
+    return jsonify(result), 200
+
+
+# ── DASHBOARD ────────────────────────────────────────────────
+
+@app.route("/api/dashboard", methods=["GET"])
+@require_auth
+def get_dashboard():
+    """Aggregated dashboard stats for the authenticated user's deals."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        result = supabase.table("deals") \
+            .select("id, deal_name, title, address, postcode, status, deal_score, "
+                    "guide_price, auction_date, deal_type, created_at, updated_at, "
+                    "summary_json, financials_json, analysis_json") \
+            .eq("user_id", request.user_id) \
+            .neq("status", "archived") \
+            .order("created_at", desc=True) \
+            .execute()
+        deals = result.data or []
+    except Exception as e:
+        app.logger.exception("dashboard fetch failed")
+        return jsonify({"error": str(e)}), 500
+
+    total_deals      = len(deals)
+    scored           = [d for d in deals if d.get("deal_score") is not None]
+    avg_score        = (sum(d["deal_score"] for d in scored) / len(scored)) if scored else None
+
+    with_fin         = [d for d in deals if d.get("financials_json") and (d["financials_json"] or {}).get("ok")]
+    gy_vals = [d["financials_json"]["returns"]["gross_yield_pct"] for d in with_fin
+               if (d["financials_json"].get("returns") or {}).get("gross_yield_pct") is not None]
+    ny_vals = [d["financials_json"]["returns"]["net_yield_pct"] for d in with_fin
+               if (d["financials_json"].get("returns") or {}).get("net_yield_pct") is not None]
+    eq_vals = [d["financials_json"]["finance"]["equity"] for d in with_fin
+               if (d["financials_json"].get("finance") or {}).get("equity") and d["financials_json"]["finance"]["equity"] > 0]
+
+    total_critical = total_high = total_missing = 0
+    for d in deals:
+        fc = (d.get("summary_json") or {}).get("flag_counts") or {}
+        total_critical += int(fc.get("critical", 0))
+        total_high     += int(fc.get("high", 0))
+        total_missing  += int(fc.get("missing", 0))
+
+    status_counts: Dict[str, int] = {}
+    for d in deals:
+        st = d.get("status") or "active"
+        status_counts[st] = status_counts.get(st, 0) + 1
+
+    today_str = datetime.utcnow().date().isoformat()
+    cutoff    = (datetime.utcnow() + timedelta(days=30)).date().isoformat()
+    upcoming  = []
+    for d in deals:
+        ad = d.get("auction_date")
+        if ad and isinstance(ad, str) and today_str <= ad[:10] <= cutoff:
+            upcoming.append({
+                "deal_id":     d["id"],
+                "deal_name":   d.get("deal_name") or d.get("title", ""),
+                "address":     d.get("address") or d.get("postcode", ""),
+                "auction_date": ad[:10],
+                "deal_score":  d.get("deal_score"),
+                "guide_price": d.get("guide_price"),
+            })
+    upcoming.sort(key=lambda x: x["auction_date"])
+
+    recent_deals = []
+    for d in deals[:10]:
+        fin = d.get("financials_json") or {}
+        ret = (fin.get("returns") or {})
+        recent_deals.append({
+            "deal_id":         d["id"],
+            "deal_name":       d.get("deal_name") or d.get("title", ""),
+            "address":         d.get("address") or "",
+            "postcode":        d.get("postcode") or "",
+            "deal_score":      d.get("deal_score"),
+            "guide_price":     d.get("guide_price"),
+            "auction_date":    d.get("auction_date"),
+            "deal_type":       d.get("deal_type"),
+            "status":          d.get("status", "active"),
+            "created_at":      d.get("created_at"),
+            "gross_yield_pct": ret.get("gross_yield_pct"),
+            "net_yield_pct":   ret.get("net_yield_pct"),
+            "net_cashflow_pm": ret.get("net_cashflow_pm"),
+            "has_analysis":    bool(d.get("analysis_json")),
+            "has_financials":  bool(fin.get("ok")),
+            "flag_counts":     (d.get("summary_json") or {}).get("flag_counts") or {},
+        })
+
+    return jsonify({
+        "ok": True,
+        "summary": {
+            "total_deals":            total_deals,
+            "avg_deal_score":         round(avg_score, 1) if avg_score is not None else None,
+            "deals_analysed":         len(scored),
+            "deals_with_financials":  len(with_fin),
+            "avg_gross_yield_pct":    round(sum(gy_vals)/len(gy_vals), 2) if gy_vals else None,
+            "avg_net_yield_pct":      round(sum(ny_vals)/len(ny_vals), 2) if ny_vals else None,
+            "total_equity_deployed":  round(sum(eq_vals), 2) if eq_vals else None,
+            "total_critical_flags":   total_critical,
+            "total_high_flags":       total_high,
+            "total_missing_flags":    total_missing,
+            "upcoming_auction_count": len(upcoming),
+            "status_counts":          status_counts,
+        },
+        "recent_deals":  recent_deals,
+        "upcoming":      upcoming,
+        "retrieved_at":  now_iso(),
+    }), 200
+
+
+# ── AREA INTELLIGENCE ─────────────────────────────────────────
+
+@app.route("/api/deals/<deal_id>/area", methods=["GET"])
+@require_auth
+def get_area(deal_id: str):
+    """Retrieve saved area intelligence for a deal."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        result = supabase.table("deals") \
+            .select("area_json, postcode, address") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not result.data:
+            return jsonify({"error": "Deal not found"}), 404
+        area = result.data.get("area_json")
+        return jsonify({
+            "ok":       True,
+            "area":     area,
+            "postcode": result.data.get("postcode") or "",
+            "has_data": bool(area),
+        }), 200
+    except Exception as e:
+        app.logger.exception("get_area failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/deals/<deal_id>/area", methods=["POST"])
+@require_auth
+def save_area(deal_id: str):
+    """
+    Fetch & persist area intelligence for a deal's postcode.
+    Body (optional): { postcode, forceRefresh }
+    Returns cached data unless forceRefresh=true.
+    """
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        deal = supabase.table("deals") \
+            .select("id, postcode, area_json") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not deal.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+
+    body          = request.get_json(silent=True) or {}
+    postcode      = normalize_postcode(body.get("postcode") or deal.data.get("postcode") or "")
+    force_refresh = bool(body.get("forceRefresh") or body.get("force_refresh"))
+
+    if deal.data.get("area_json") and not force_refresh:
+        return jsonify({
+            "ok":       True,
+            "area":     deal.data["area_json"],
+            "postcode": postcode,
+            "cached":   True,
+        }), 200
+
+    if not postcode:
+        return jsonify({"error": "postcode is required (set on deal or pass in body)"}), 400
+
+    try:
+        lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
+        lat       = safe_float((lsoa_meta or {}).get("lat"))
+        lng       = safe_float((lsoa_meta or {}).get("lng"))
+        area_code = str((lsoa_meta or {}).get("area_code") or "").strip()
+
+        if lat is None or lng is None:
+            lat, lng, _ = nspl_lookup_latlng(postcode)
+        if lat is None or lng is None:
+            lat, lng, _ = geocode_postcode(postcode)
+
+        area_data = {
+            "postcode":   postcode,
+            "lsoa_gss":   lsoa_gss,
+            "lat":        lat,
+            "lng":        lng,
+            "area_code":  area_code,
+            "housing":    get_housing_data(postcode),
+            "crime":      get_crime_data(lat, lng),
+            "transport":  get_transport_data(lat, lng),
+            "amenities":  get_amenities_data(lat, lng),
+            "schools":    get_schools_data(postcode),
+            "broadband":  get_broadband_data(postcode),
+            "trends":     build_trends_from_uk_hpi(postcode, area_code, 24),
+            "fetched_at": now_iso(),
+        }
+
+        supabase.table("deals").update({
+            "area_json":  area_data,
+            "updated_at": now_iso(),
+        }).eq("id", deal_id).execute()
+
+        return jsonify({
+            "ok":       True,
+            "area":     area_data,
+            "postcode": postcode,
+            "cached":   False,
+        }), 200
+
+    except Exception as e:
+        app.logger.exception("save_area failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── AUCTION BRIEF ─────────────────────────────────────────────
+
+AUCTION_BRIEF_SYSTEM = """You are a UK property auction analyst. Generate a concise investor auction brief from the deal data provided.
+
+Return ONLY valid JSON — no prose, no markdown fences.
+
+{
+  "headline": "string — one compelling line summarising the deal",
+  "property_snapshot": {
+    "address": "string or null",
+    "type": "string or null",
+    "tenure": "string or null",
+    "guide_price_display": "string — e.g. £95,000",
+    "lot_number": "string or null"
+  },
+  "deal_verdict": "string — 2-3 sentences, factual, no recommendation. State what documents show.",
+  "top_risks": [
+    { "title": "string", "detail": "string — one sentence" }
+  ],
+  "top_opportunities": [
+    { "title": "string", "detail": "string — one sentence" }
+  ],
+  "financials_snapshot": {
+    "purchase_price_display": "string or null",
+    "gross_yield_display": "string or null",
+    "net_cashflow_pm_display": "string or null",
+    "total_invested_display": "string or null"
+  },
+  "key_legal_flags": [
+    { "severity": "critical|high|missing", "title": "string", "summation": "string" }
+  ],
+  "solicitor_actions": ["string"],
+  "auction_checklist": [
+    { "item": "string", "status": "done|pending|unknown" }
+  ]
+}
+
+top_risks and top_opportunities: max 3 each.
+key_legal_flags: max 5, critical/high only.
+solicitor_actions: max 5 specific actions from the flag data.
+auction_checklist: standard pre-auction items with status inferred from data."""
+
+
+@app.route("/api/deals/<deal_id>/auction-brief", methods=["GET"])
+@require_auth
+def get_auction_brief(deal_id: str):
+    """
+    Generate auction brief for a deal using LLM + stored deal data.
+    Combines summary_json + analysis_json + financials_json.
+    ?force=1 to regenerate (otherwise generates fresh each call — no caching yet).
+    """
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        deal = supabase.table("deals") \
+            .select("id, deal_name, title, address, postcode, guide_price, "
+                    "auction_date, deal_type, deal_score, status, "
+                    "summary_json, analysis_json, financials_json") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not deal.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+
+    d          = deal.data
+    summary    = d.get("summary_json") or {}
+    analysis   = d.get("analysis_json") or {}
+    financials = d.get("financials_json") or {}
+    prop       = summary.get("property") or {}
+    fin_ret    = (financials.get("returns") or {})
+    fin_acq    = (financials.get("acquisition") or {})
+
+    def _fmt_gbp(v: Any) -> Optional[str]:
+        f = safe_float(v)
+        return f"£{f:,.0f}" if f is not None else None
+
+    def _fmt_pct(v: Any) -> Optional[str]:
+        f = safe_float(v)
+        return f"{f:.1f}%" if f is not None else None
+
+    context = {
+        "deal_name":     d.get("deal_name") or d.get("title", ""),
+        "deal_score":    d.get("deal_score"),
+        "address":       d.get("address") or prop.get("address") or "",
+        "postcode":      d.get("postcode") or prop.get("postcode") or "",
+        "guide_price":   d.get("guide_price"),
+        "auction_date":  d.get("auction_date"),
+        "deal_type":     d.get("deal_type") or prop.get("type", ""),
+        "property":      prop,
+        "completion_terms": summary.get("completion_terms") or {},
+        "flags":         (summary.get("flags") or [])[:10],
+        "flag_counts":   summary.get("flag_counts") or {},
+        "viability_statement": summary.get("viability_statement") or "",
+        "solicitor_questions": summary.get("solicitor_questions") or [],
+        "financials": {
+            "purchase_price":  safe_float((financials.get("inputs") or {}).get("purchase_price")),
+            "gross_yield_pct": fin_ret.get("gross_yield_pct"),
+            "net_yield_pct":   fin_ret.get("net_yield_pct"),
+            "net_cashflow_pm": fin_ret.get("net_cashflow_pm"),
+            "total_invested":  fin_acq.get("total_invested"),
+        },
+        "analysis_flags":  (analysis.get("flags") or [])[:10],
+        "jis_findings":    (analysis.get("jis_findings") or [])[:5],
+    }
+
+    try:
+        brief = llm_json_raw(
+            system=AUCTION_BRIEF_SYSTEM,
+            prompt=f"Generate auction brief from this deal data:\n\n{json.dumps(context, indent=2)}",
+            temperature=0.2,
+        )
+    except Exception as e:
+        app.logger.exception("auction_brief LLM failed")
+        return jsonify({"error": f"Brief generation failed: {e}"}), 500
+
+    # Fill display values if LLM left them blank
+    try:
+        pp = safe_float((financials.get("inputs") or {}).get("purchase_price")) or d.get("guide_price")
+        fs = brief.setdefault("financials_snapshot", {})
+        if not fs.get("purchase_price_display"):
+            fs["purchase_price_display"] = _fmt_gbp(pp)
+        if not fs.get("gross_yield_display"):
+            fs["gross_yield_display"] = _fmt_pct(fin_ret.get("gross_yield_pct"))
+        if not fs.get("net_cashflow_pm_display"):
+            ncf = fin_ret.get("net_cashflow_pm")
+            if ncf is not None:
+                fs["net_cashflow_pm_display"] = f"£{ncf:,.0f}/mo"
+        if not fs.get("total_invested_display"):
+            fs["total_invested_display"] = _fmt_gbp(fin_acq.get("total_invested"))
+    except Exception:
+        pass
+
+    brief["brief_generated_at"] = now_iso()
+    brief["deal_id"]             = deal_id
+    return jsonify(brief), 200
+
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
