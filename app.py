@@ -3362,6 +3362,51 @@ def update_deal(deal_id: str):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/deals/<deal_id>", methods=["DELETE"])
+@require_auth
+def delete_deal(deal_id: str):
+    """Archive (soft-delete) a deal. Sets status=archived so it disappears from dashboard
+    but data is retained. Pass ?hard=1 to permanently delete."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    hard_delete = request.args.get("hard", "").lower() in ("1", "true")
+
+    # Verify ownership first
+    try:
+        check = supabase.table("deals") \
+            .select("id") \
+            .eq("id", deal_id) \
+            .eq("user_id", request.user_id) \
+            .single() \
+            .execute()
+        if not check.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+
+    try:
+        if hard_delete:
+            # Permanently delete — cascades to documents via FK
+            supabase.table("deals") \
+                .delete() \
+                .eq("id", deal_id) \
+                .eq("user_id", request.user_id) \
+                .execute()
+            return jsonify({"ok": True, "deleted": True, "deal_id": deal_id}), 200
+        else:
+            # Soft delete — archive
+            supabase.table("deals") \
+                .update({"status": "archived", "updated_at": now_iso()}) \
+                .eq("id", deal_id) \
+                .eq("user_id", request.user_id) \
+                .execute()
+            return jsonify({"ok": True, "archived": True, "deal_id": deal_id}), 200
+    except Exception as e:
+        app.logger.exception("delete_deal failed")
+        return jsonify({"error": str(e)}), 500
+
+
 # ── DOCUMENT UPLOAD ─────────────────────────────────────────
 # Hard cap: 20MB. Render free plan has 512MB RAM; pymupdf can 3-5× a PDF in
 # memory during extraction — a 50MB PDF could exhaust the worker and cause 502.
