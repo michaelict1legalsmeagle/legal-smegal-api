@@ -3266,9 +3266,9 @@ def create_deal():
         return jsonify({"error": "Database unavailable"}), 503
 
     data = request.get_json(silent=True) or {}
-    deal_name = (data.get("deal_name") or "").strip()
-    if not deal_name:
-        return jsonify({"error": "deal_name is required"}), 400
+    # deal_name is optional — address is extracted from documents during analysis
+    from datetime import datetime as _dt
+    deal_name = (data.get("deal_name") or "").strip() or f"Deal — {_dt.now().strftime('%d %b %Y')}" 
 
     try:
         result = supabase.table("deals").insert({
@@ -4524,6 +4524,232 @@ def get_auction_brief(deal_id: str):
     brief["deal_id"]             = deal_id
     return jsonify(brief), 200
 
+
+
+# ── SSE STREAMING SUMMARISE ─────────────────────────────────
+# Streams real-time progress events as the LLM pipeline runs.
+# Frontend connects with EventSource — each event is a JSON line.
+# Event types: progress | finding | complete | error | limit
+#
+# Usage: GET /api/deals/<deal_id>/summarise/stream
+# Auth:  Bearer token in Authorization header (EventSource can't set headers
+#        natively, so we accept token as a query param too: ?token=<jwt>)
+
+@app.route("/api/deals/<deal_id>/summarise/stream", methods=["GET"])
+def summarise_stream(deal_id: str):
+    """SSE endpoint — streams summary pipeline progress to the frontend."""
+    import json as _json
+    from flask import Response, stream_with_context
+
+    # Auth — accept token from header OR query param (EventSource limitation)
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else request.args.get("token", "")
+    user_id = None
+    if token and SUPABASE_JWT_SECRET:
+        try:
+            payload = pyjwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
+            user_id = payload.get("sub")
+        except Exception:
+            pass
+    if not user_id:
+        def err():
+            yield "data: " + _json.dumps({"type": "error", "msg": "Unauthorised"}) + "\n\n"
+        return Response(stream_with_context(err()), mimetype="text/event-stream")
+
+    def generate():
+        def ev(type_, **kwargs):
+            return "data: " + _json.dumps({"type": type_, **kwargs}) + "\n\n"
+
+        try:
+            if not supabase:
+                yield ev("error", msg="Database unavailable")
+                return
+
+            # ── Check deal ownership ──
+            try:
+                deal = supabase.table("deals").select("id, deal_name, summary_json")                     .eq("id", deal_id).eq("user_id", user_id).single().execute()
+                if not deal.data:
+                    yield ev("error", msg="Deal not found")
+                    return
+            except Exception:
+                yield ev("error", msg="Deal not found")
+                return
+
+            # ── Check usage ──
+            try:
+                profile = supabase.table("profiles")                     .select("plan, summaries_used, usage_reset_date")                     .eq("id", user_id).single().execute()
+                if profile.data:
+                    p = profile.data
+                    plan = p.get("plan", "starter")
+                    used = p.get("summaries_used", 0)
+                    limits = {"free": 1, "starter": 3, "professional": 10, "enterprise": 30}
+                    limit = limits.get(plan, 3)
+                    if used >= limit:
+                        yield ev("limit", used=used, limit=limit, plan=plan)
+                        return
+            except Exception as e:
+                app.logger.warning(f"Usage check failed in stream: {e}")
+
+            # ── Return cached summary if available ──
+            if deal.data.get("summary_json"):
+                yield ev("progress", msg="Loading existing analysis…", step=1, total=6)
+                import time as _time
+                _time.sleep(0.3)
+                summary = deal.data["summary_json"]
+                yield ev("complete", summary=summary)
+                return
+
+            # ── Fetch documents ──
+            yield ev("progress", msg="Connecting to document store…", step=1, total=6)
+            try:
+                docs_result = supabase.table("documents")                     .select("doc_type, file_name, extracted_text, page_count, extraction_status")                     .eq("deal_id", deal_id).eq("user_id", user_id).execute()
+                documents = docs_result.data or []
+            except Exception as e:
+                yield ev("error", msg=f"Could not fetch documents: {e}")
+                return
+
+            if not documents:
+                yield ev("error", msg="No documents found for this deal")
+                return
+
+            # ── Emit document inventory ──
+            total_pages = sum(d.get("page_count") or 0 for d in documents)
+            yield ev("progress",
+                     msg=f"Loaded {len(documents)} documents — {total_pages} pages",
+                     step=2, total=6, doc_count=len(documents), page_count=total_pages)
+
+            # Emit each doc type found
+            DOC_LABELS = {
+                "special_conditions": "Special Conditions of Sale",
+                "addendum": "Addendum",
+                "title_register": "Title Register",
+                "title_plan": "Title Plan",
+                "local_auth_search": "Local Authority Search",
+                "lease": "Lease",
+                "epc": "EPC Certificate",
+                "legal_pack": "Legal Pack",
+                "environmental": "Environmental Search",
+                "freehold": "Freehold Title",
+                "deed": "Transfer Deed",
+                "tenancy_ast": "Tenancy Agreement",
+                "survey": "Survey Report",
+                "auction_tcs": "Auction T&Cs",
+                "unknown": "Document",
+            }
+            for doc in documents:
+                label = DOC_LABELS.get(doc.get("doc_type", "unknown"), "Document")
+                pages = doc.get("page_count") or 0
+                yield ev("document", doc_type=doc.get("doc_type"), label=label, pages=pages,
+                         filename=doc.get("file_name", ""))
+
+            # ── Stage 1: LLM extraction ──
+            yield ev("progress", msg="Reading clauses and identifying legal obligations…", step=3, total=6)
+
+            try:
+                import sys as _sys
+                import os as _os
+                _sys.path.insert(0, _os.path.dirname(__file__))
+                try:
+                    from services.legal_analysis import run_document_summary, _build_combined_text, STAGE_1_SYSTEM, STAGE_2_SYSTEM
+                except ImportError:
+                    from legal_analysis import run_document_summary, _build_combined_text, STAGE_1_SYSTEM, STAGE_2_SYSTEM
+
+                combined = _build_combined_text(documents)
+                yield ev("progress", msg=f"Extracted {len(combined):,} characters from documents…", step=3, total=6)
+
+                # Stage 1 — extraction
+                yield ev("progress", msg="Stage 1 — extracting verbatim findings…", step=4, total=6)
+                if len(combined) > 120000:
+                    truncated = combined[:80000] + "\n\n[...middle section truncated...]\n\n" + combined[-30000:]
+                else:
+                    truncated = combined
+
+                stage1_result = llm_json_raw(
+                    system=STAGE_1_SYSTEM,
+                    prompt=f"Extract all qualifying findings from these auction documents:\n\n{truncated}",
+                    temperature=0.1,
+                )
+                findings = stage1_result.get("findings", [])
+                yield ev("progress",
+                         msg=f"Found {len(findings)} evidenced findings — classifying severity…",
+                         step=4, total=6, findings_count=len(findings))
+
+                # Emit individual findings as they come (teaser — title + severity only)
+                for f in findings[:8]:
+                    sev = (f.get("severity") or "note").lower()
+                    claim = f.get("claim") or f.get("evidence", "")[:80]
+                    if claim:
+                        yield ev("finding", severity=sev, claim=claim)
+
+                # Stage 2 — classification
+                yield ev("progress", msg="Stage 2 — scoring deal and building risk profile…", step=5, total=6)
+                stage2_result = {}
+                if findings:
+                    import json as _json2
+                    findings_json = _json2.dumps({"findings": findings}, indent=2)
+                    try:
+                        from services.legal_analysis import STAGE_2_SYSTEM as S2
+                    except ImportError:
+                        from legal_analysis import STAGE_2_SYSTEM as S2
+                    stage2_result = llm_json_raw(
+                        system=S2,
+                        prompt=f"Classify these verified findings into the summary schema:\n\n{findings_json}",
+                        temperature=0.1,
+                    )
+
+                # Build final summary using existing pipeline
+                yield ev("progress", msg="Calculating deal score and finalising report…", step=6, total=6)
+                summary = run_document_summary(documents=documents, llm_json_fn=llm_json_raw)
+
+            except Exception as e:
+                app.logger.exception("SSE pipeline failed")
+                yield ev("error", msg=f"Analysis failed: {str(e)}")
+                return
+
+            # ── Persist ──
+            prop = summary.get("property") or {}
+            try:
+                supabase.table("deals").update({
+                    "summary_json": summary,
+                    "deal_score":   summary.get("deal_score"),
+                    "updated_at":   now_iso(),
+                    "address":      prop.get("address"),
+                    "postcode":     prop.get("postcode") or None,
+                    "deal_type":    prop.get("type"),
+                }).eq("id", deal_id).execute()
+            except Exception as e:
+                app.logger.warning(f"Could not persist summary: {e}")
+
+            # Record usage
+            try:
+                profile_data = profile.data if profile and profile.data else {}
+                supabase.table("profiles").update({
+                    "summaries_used": (profile_data.get("summaries_used", 0) + 1)
+                }).eq("id", user_id).execute()
+                supabase.table("usage_events").insert({
+                    "user_id": user_id, "event_type": "summary",
+                    "deal_id": deal_id, "amount_pence": 0,
+                }).execute()
+            except Exception as e:
+                app.logger.warning(f"Usage recording failed: {e}")
+
+            yield ev("complete", summary=summary)
+
+        except Exception as e:
+            app.logger.exception("SSE outer error")
+            yield "data: " + _json.dumps({"type": "error", "msg": str(e)}) + "\n\n"
+
+    response = Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": ",".join(_CORS_ORIGINS),
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        }
+    )
+    return response
 
 @app.route("/", methods=["GET"])
 def home():
