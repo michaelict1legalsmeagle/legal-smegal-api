@@ -3659,11 +3659,35 @@ def summarise_deal(deal_id: str):
         except ImportError:
             from legal_analysis import _build_combined_text
 
-        combined = _build_combined_text(documents)
-        if len(combined) > 100000:
-            truncated = combined[:70000] + "\n\n[...truncated...]\n\n" + combined[-25000:]
-        else:
-            truncated = combined
+        # Smart prioritised text — legal docs first, large searches truncated
+        PRIORITY = ['special_conditions','addendum','title_register','lease',
+                    'title_plan','deed','freehold','tenancy_ast',
+                    'local_auth_search','environmental','epc','survey','auction_tcs','unknown']
+        docs_sorted = sorted(documents,
+            key=lambda d: PRIORITY.index(d.get('doc_type','unknown'))
+                          if d.get('doc_type','unknown') in PRIORITY else 99)
+
+        parts = []
+        total = 0
+        HARD_CAP = 55000  # ~14k tokens — fast enough for 25-35s response
+        PER_DOC_CAP = 8000  # cap any single large document
+
+        for doc in docs_sorted:
+            text = (doc.get('extracted_text') or '').strip()
+            if not text:
+                continue
+            label = f"=== {doc.get('doc_type','unknown').upper()}: {doc.get('file_name','')} ===\n"
+            capped = text[:PER_DOC_CAP] + ('\n[...truncated...]' if len(text) > PER_DOC_CAP else '')
+            chunk = label + capped + '\n\n'
+            if total + len(chunk) > HARD_CAP:
+                remaining = HARD_CAP - total - len(label) - 30
+                if remaining > 200:
+                    parts.append(label + text[:remaining] + '\n[...truncated...]\n\n')
+                break
+            parts.append(chunk)
+            total += len(chunk)
+
+        truncated = ''.join(parts)
 
         COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
 
@@ -4678,15 +4702,33 @@ def summarise_stream(deal_id: str):
                     from legal_analysis import run_document_summary, _build_combined_text
 
                 # Build combined text from all documents
-                combined = _build_combined_text(documents)
-                char_count = len(combined)
-                yield ev("progress", msg=f"Extracted {char_count:,} characters from {len(documents)} documents", step=3, total=4)
-
-                # Truncate if needed
-                if char_count > 100000:
-                    truncated = combined[:70000] + "\n\n[...truncated...]\n\n" + combined[-25000:]
-                else:
-                    truncated = combined
+                # Smart prioritised text — legal docs first, searches capped
+                PRIORITY = ['special_conditions','addendum','title_register','lease',
+                            'title_plan','deed','freehold','tenancy_ast',
+                            'local_auth_search','environmental','epc','survey','auction_tcs','unknown']
+                docs_sorted = sorted(documents,
+                    key=lambda d: PRIORITY.index(d.get('doc_type','unknown'))
+                                  if d.get('doc_type','unknown') in PRIORITY else 99)
+                parts = []
+                total = 0
+                HARD_CAP = 55000
+                PER_DOC_CAP = 8000
+                for doc in docs_sorted:
+                    text = (doc.get('extracted_text') or '').strip()
+                    if not text: continue
+                    label = f"=== {doc.get('doc_type','unknown').upper()}: {doc.get('file_name','')} ===\n"
+                    capped = text[:PER_DOC_CAP] + ('\n[...truncated...]' if len(text) > PER_DOC_CAP else '')
+                    chunk = label + capped + '\n\n'
+                    if total + len(chunk) > HARD_CAP:
+                        remaining = HARD_CAP - total - len(label) - 30
+                        if remaining > 200:
+                            parts.append(label + text[:remaining] + '\n[...truncated...]\n\n')
+                        break
+                    parts.append(chunk)
+                    total += len(chunk)
+                truncated = ''.join(parts)
+                char_count = len(truncated)
+                yield ev("progress", msg=f"Prepared {char_count:,} characters from {len(documents)} documents", step=3, total=4)
 
                 # ── Single LLM call — extract + classify + score in one pass ──
                 yield ev("progress", msg="Reading clauses and identifying risks…", step=4, total=4)
