@@ -3611,6 +3611,11 @@ def summarise_deal(deal_id: str):
     except Exception as e:
         return jsonify({"error": "Deal not found"}), 404
 
+    # Return cached result immediately if already analysed
+    existing = deal.data.get("summary_json")
+    if existing and existing.get("flags"):
+        return jsonify({"ok": True, "status": "complete", **existing}), 200
+
     # Check usage allowance
     try:
         profile = supabase.table("profiles") \
@@ -3710,6 +3715,10 @@ Reference exact clause numbers. Return only JSON, no other text."""
         # Run LLM in background thread — return immediately, frontend polls for result
         import threading as _t
 
+        # Capture request context vars before thread (Flask request doesn't survive threads)
+        _user_id = request.user_id
+        _deal_id = deal_id
+
         def _run_and_store():
             try:
                 result = llm_json_raw(
@@ -3727,19 +3736,19 @@ Reference exact clause numbers. Return only JSON, no other text."""
                     "address":      prop.get("address"),
                     "postcode":     prop.get("postcode") or None,
                     "deal_type":    prop.get("type"),
-                }).eq("id", deal_id).execute()
+                }).eq("id", _deal_id).execute()
                 # Increment usage counter
                 try:
-                    prof = supabase.table("profiles").select("summaries_used").eq("id", request.user_id).single().execute()
+                    prof = supabase.table("profiles").select("summaries_used").eq("id", _user_id).single().execute()
                     used = (prof.data or {}).get("summaries_used", 0)
-                    supabase.table("profiles").update({"summaries_used": used + 1}).eq("id", request.user_id).execute()
+                    supabase.table("profiles").update({"summaries_used": used + 1}).eq("id", _user_id).execute()
                 except Exception:
                     pass
-                app.logger.info(f"Background analysis complete for deal {deal_id}")
+                app.logger.info(f"Background analysis complete for deal {_deal_id}")
             except Exception as e:
-                app.logger.exception(f"Background analysis failed for deal {deal_id}: {e}")
+                app.logger.exception(f"Background analysis failed for deal {_deal_id}: {e}")
                 try:
-                    supabase.table("deals").update({"status": "error"}).eq("id", deal_id).execute()
+                    supabase.table("deals").update({"status": "error"}).eq("id", _deal_id).execute()
                 except Exception:
                     pass
 
