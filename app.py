@@ -3659,40 +3659,32 @@ def summarise_deal(deal_id: str):
     try:
         import sys as _sys, os as _os
         _sys.path.insert(0, _os.path.dirname(__file__))
-        try:
-            from services.legal_analysis import _build_combined_text
-        except ImportError:
-            from legal_analysis import _build_combined_text
-
-        # Smart prioritised text — legal docs first, large searches truncated
-        PRIORITY = ['special_conditions','addendum','title_register','lease',
-                    'title_plan','deed','freehold','tenancy_ast',
-                    'local_auth_search','environmental','epc','survey','auction_tcs','unknown']
-        docs_sorted = sorted(documents,
-            key=lambda d: PRIORITY.index(d.get('doc_type','unknown'))
-                          if d.get('doc_type','unknown') in PRIORITY else 99)
-
-        parts = []
-        total = 0
-        HARD_CAP = 55000  # ~14k tokens — fast enough for 25-35s response
-        PER_DOC_CAP = 8000  # cap any single large document
-
-        for doc in docs_sorted:
-            text = (doc.get('extracted_text') or '').strip()
-            if not text:
+        # Build prioritised text inline — bypass external service
+        _PRIORITY = ['special_conditions','addendum','title_register','lease',
+                     'title_plan','deed','freehold','tenancy_ast',
+                     'local_auth_search','environmental','epc','survey','auction_tcs','unknown']
+        _docs_sorted = sorted(documents,
+            key=lambda d: _PRIORITY.index(d.get('doc_type','unknown'))
+                          if d.get('doc_type','unknown') in _PRIORITY else 99)
+        _parts = []
+        _total = 0
+        _HARD_CAP = 40000   # ~10k tokens — target <20s LLM response
+        _PER_DOC  = 6000    # max per document
+        for _doc in _docs_sorted:
+            _txt = (_doc.get('extracted_text') or '').strip()
+            if not _txt:
                 continue
-            label = f"=== {doc.get('doc_type','unknown').upper()}: {doc.get('file_name','')} ===\n"
-            capped = text[:PER_DOC_CAP] + ('\n[...truncated...]' if len(text) > PER_DOC_CAP else '')
-            chunk = label + capped + '\n\n'
-            if total + len(chunk) > HARD_CAP:
-                remaining = HARD_CAP - total - len(label) - 30
-                if remaining > 200:
-                    parts.append(label + text[:remaining] + '\n[...truncated...]\n\n')
+            _label = f"=== {_doc.get('doc_type','unknown').upper()}: {_doc.get('file_name','')} ===\n"
+            _capped = _txt[:_PER_DOC] + ('\n[...truncated...]' if len(_txt) > _PER_DOC else '')
+            _chunk  = _label + _capped + '\n\n'
+            if _total + len(_chunk) > _HARD_CAP:
+                _rem = _HARD_CAP - _total - len(_label) - 20
+                if _rem > 300:
+                    _parts.append(_label + _txt[:_rem] + '\n[...truncated...]\n\n')
                 break
-            parts.append(chunk)
-            total += len(chunk)
-
-        truncated = ''.join(parts)
+            _parts.append(_chunk)
+            _total += len(_chunk)
+        truncated = ''.join(_parts).join(parts)
 
         COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
 
