@@ -3650,29 +3650,48 @@ def summarise_deal(deal_id: str):
     if not documents:
         return jsonify({"error": "No documents found for this deal"}), 400
 
-    # Run two-stage pipeline
+    # Single combined LLM call — fast path
     try:
-        from services.legal_analysis import run_document_summary
-        summary = run_document_summary(
-            documents=documents,
-            llm_json_fn=llm_json_raw,
-        )
-    except ImportError:
-        # Fallback if services package path differs
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.dirname(__file__))
         try:
-            import sys
-            import os as _os
-            sys.path.insert(0, _os.path.dirname(__file__))
-            from legal_analysis import run_document_summary
-            summary = run_document_summary(
-                documents=documents,
-                llm_json_fn=llm_json_raw,
-            )
-        except Exception as e:
-            app.logger.exception("legal_analysis import failed")
-            return jsonify({"error": f"Analysis service unavailable: {e}"}), 500
+            from services.legal_analysis import _build_combined_text
+        except ImportError:
+            from legal_analysis import _build_combined_text
+
+        combined = _build_combined_text(documents)
+        if len(combined) > 100000:
+            truncated = combined[:70000] + "\n\n[...truncated...]\n\n" + combined[-25000:]
+        else:
+            truncated = combined
+
+        COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
+
+Return ONLY valid JSON with this exact structure:
+{
+  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot number", "type": "BTL/HMO/Commercial/etc", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
+  "deal_score": 0,
+  "viability_statement": "2-3 sentence investor verdict",
+  "documents_processed": 0,
+  "pack_completeness": {"completeness_pct": 0, "present_count": 0, "total": 13},
+  "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": "working", "buyers_premium_pct": null, "vacant_possession": null},
+  "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
+  "flags": [{"severity": "critical|high|missing|note", "title": "concise flag title", "summation": "what this means for the investor", "evidence": "verbatim quote", "implication": "financial or legal impact", "action": "what investor must do", "source_document": "doc name", "source_clause": "clause ref", "source_page": null, "legal_risk_weight": 1}]
+}
+
+Score: 80-100=clean, 60-79=manageable, 40-59=significant issues, 0-39=severe.
+Flag all non-standard clauses, financial exposures, missing docs, covenants, title issues.
+Reference exact clause numbers. Return only JSON, no other text."""
+
+        summary = llm_json_raw(
+            system=COMBINED_SYSTEM,
+            prompt=f"Analyse this auction legal pack:\n\n{truncated}",
+            temperature=0.1,
+        )
+        summary["documents_processed"] = summary.get("documents_processed") or len(documents)
+
     except Exception as e:
-        app.logger.exception("run_document_summary failed")
+        app.logger.exception("Single-pass LLM failed")
         return jsonify({"error": str(e)}), 500
 
     prop = summary.get("property") or {}
