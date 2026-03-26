@@ -3707,32 +3707,53 @@ Score: 80-100=clean, 60-79=manageable, 40-59=significant issues, 0-39=severe.
 Flag all non-standard clauses, financial exposures, missing docs, covenants, title issues.
 Reference exact clause numbers. Return only JSON, no other text."""
 
-        summary = llm_json_raw(
-            system=COMBINED_SYSTEM,
-            prompt=f"Analyse this auction legal pack:\n\n{truncated}",
-            temperature=0.1,
-        )
-        summary["documents_processed"] = summary.get("documents_processed") or len(documents)
+        # Run LLM in background thread — return immediately, frontend polls for result
+        import threading as _t
+
+        def _run_and_store():
+            try:
+                result = llm_json_raw(
+                    system=COMBINED_SYSTEM,
+                    prompt=f"Analyse this auction legal pack:\n\n{truncated}",
+                    temperature=0.1,
+                )
+                result["documents_processed"] = result.get("documents_processed") or len(documents)
+                prop = result.get("property") or {}
+                supabase.table("deals").update({
+                    "summary_json": result,
+                    "deal_score":   result.get("deal_score"),
+                    "status":       "analysed",
+                    "updated_at":   now_iso(),
+                    "address":      prop.get("address"),
+                    "postcode":     prop.get("postcode") or None,
+                    "deal_type":    prop.get("type"),
+                }).eq("id", deal_id).execute()
+                # Increment usage counter
+                try:
+                    prof = supabase.table("profiles").select("summaries_used").eq("id", request.user_id).single().execute()
+                    used = (prof.data or {}).get("summaries_used", 0)
+                    supabase.table("profiles").update({"summaries_used": used + 1}).eq("id", request.user_id).execute()
+                except Exception:
+                    pass
+                app.logger.info(f"Background analysis complete for deal {deal_id}")
+            except Exception as e:
+                app.logger.exception(f"Background analysis failed for deal {deal_id}: {e}")
+                try:
+                    supabase.table("deals").update({"status": "error"}).eq("id", deal_id).execute()
+                except Exception:
+                    pass
+
+        thread = _t.Thread(target=_run_and_store, daemon=True)
+        thread.start()
+
+        # Return immediately — frontend polls /api/deals/<id> for summary_json
+        return jsonify({"ok": True, "status": "processing", "deal_id": deal_id}), 202
 
     except Exception as e:
-        app.logger.exception("Single-pass LLM failed")
+        app.logger.exception("Summarise setup failed")
         return jsonify({"error": str(e)}), 500
 
-    prop = summary.get("property") or {}
-
-    # Store summary in deal record
-    try:
-        supabase.table("deals").update({
-            "summary_json": summary,
-            "deal_score":   summary.get("deal_score"),
-            "updated_at":   now_iso(),
-            "address":      prop.get("address"),
-            "postcode":     prop.get("postcode") or None,
-            "deal_type":    prop.get("type"),
-        }).eq("id", deal_id).execute()
-    except Exception as e:
-        app.logger.warning(f"Could not store summary in deals: {e}")
-
+    prop = {}  # unreachable but keeps linter happy
     # Write to analyses table — matches actual Supabase schema
     # Columns: id, user_id, created_at, updated_at, analysis_data (jsonb), analysis_name (text), analysis (jsonb)
     try:
