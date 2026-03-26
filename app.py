@@ -3684,7 +3684,7 @@ def summarise_deal(deal_id: str):
                 break
             _parts.append(_chunk)
             _total += len(_chunk)
-        truncated = ''.join(_parts).join(parts)
+        truncated = ''.join(_parts)
 
         COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
 
