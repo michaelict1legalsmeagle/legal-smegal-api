@@ -4383,10 +4383,15 @@ def save_area(deal_id: str):
     """
     Fetch & persist area intelligence for a deal's postcode.
     Body (optional): { postcode, forceRefresh }
-    Returns cached data unless forceRefresh=true.
+
+    Architecture: returns immediately with cached data if available.
+    If no cache (or forceRefresh), fires a background thread to fetch all
+    external APIs and writes result to area_json. Frontend polls GET endpoint.
+    This avoids Render's 60s load-balancer timeout killing sync workers.
     """
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
+
     try:
         deal = supabase.table("deals") \
             .select("id, postcode, area_json") \
@@ -4400,59 +4405,89 @@ def save_area(deal_id: str):
     postcode      = normalize_postcode(body.get("postcode") or deal.data.get("postcode") or "")
     force_refresh = bool(body.get("forceRefresh") or body.get("force_refresh"))
 
+    # Return cached data immediately if available and not force-refreshing
     if deal.data.get("area_json") and not force_refresh:
-        return jsonify({
-            "ok":       True,
-            "area":     deal.data["area_json"],
-            "postcode": postcode,
-            "cached":   True,
-        }), 200
+        cached = deal.data["area_json"]
+        # Don't return error-marker cache as valid data
+        if cached.get("fetch_status") != "error":
+            return jsonify({
+                "ok":       True,
+                "area":     cached,
+                "postcode": postcode,
+                "cached":   True,
+                "fetching": False,
+            }), 200
 
     if not postcode:
         return jsonify({"error": "postcode is required (set on deal or pass in body)"}), 400
 
-    try:
-        lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(postcode)
-        lat       = safe_float((lsoa_meta or {}).get("lat"))
-        lng       = safe_float((lsoa_meta or {}).get("lng"))
-        area_code = str((lsoa_meta or {}).get("area_code") or "").strip()
+    # Capture for background thread — Flask request context does not survive threads
+    _deal_id  = deal_id
+    _postcode = postcode
 
-        if lat is None or lng is None:
-            lat, lng, _ = nspl_lookup_latlng(postcode)
-        if lat is None or lng is None:
-            lat, lng, _ = geocode_postcode(postcode)
+    def _fetch_and_store():
+        try:
+            lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(_postcode)
+            lat       = safe_float((lsoa_meta or {}).get("lat"))
+            lng       = safe_float((lsoa_meta or {}).get("lng"))
+            area_code = str((lsoa_meta or {}).get("area_code") or "").strip()
 
-        area_data = {
-            "postcode":   postcode,
-            "lsoa_gss":   lsoa_gss,
-            "lat":        lat,
-            "lng":        lng,
-            "area_code":  area_code,
-            "housing":    get_housing_data(postcode),
-            "crime":      get_crime_data(lat, lng),
-            "transport":  get_transport_data(lat, lng),
-            "amenities":  get_amenities_data(lat, lng),
-            "schools":    get_schools_data(postcode),
-            "broadband":  get_broadband_data(postcode),
-            "trends":     build_trends_from_uk_hpi(postcode, area_code, 24),
-            "fetched_at": now_iso(),
-        }
+            if lat is None or lng is None:
+                lat, lng, _ = nspl_lookup_latlng(_postcode)
+            if lat is None or lng is None:
+                lat, lng, _ = geocode_postcode(_postcode)
 
-        supabase.table("deals").update({
-            "area_json":  area_data,
-            "updated_at": now_iso(),
-        }).eq("id", deal_id).execute()
+            area_data = {
+                "postcode":     _postcode,
+                "lsoa_gss":     lsoa_gss,
+                "lat":          lat,
+                "lng":          lng,
+                "area_code":    area_code,
+                "housing":      get_housing_data(_postcode),
+                "crime":        get_crime_data(lat, lng),
+                "transport":    get_transport_data(lat, lng),
+                "amenities":    get_amenities_data(lat, lng),
+                "schools":      get_schools_data(_postcode),
+                "broadband":    get_broadband_data(_postcode),
+                "trends":       build_trends_from_uk_hpi(_postcode, area_code, 24),
+                "fetched_at":   now_iso(),
+                "fetch_status": "complete",
+            }
 
-        return jsonify({
-            "ok":       True,
-            "area":     area_data,
-            "postcode": postcode,
-            "cached":   False,
-        }), 200
+            supabase.table("deals").update({
+                "area_json":  area_data,
+                "updated_at": now_iso(),
+            }).eq("id", _deal_id).execute()
 
-    except Exception as e:
-        app.logger.exception("save_area failed")
-        return jsonify({"error": str(e)}), 500
+            print(f"✅ Area data fetched and stored for deal {_deal_id} ({_postcode})")
+
+        except Exception as exc:
+            print(f"❌ Background area fetch failed for {_deal_id}: {exc}")
+            try:
+                supabase.table("deals").update({
+                    "area_json": {
+                        "postcode":     _postcode,
+                        "fetch_status": "error",
+                        "fetch_error":  str(exc),
+                        "fetched_at":   now_iso(),
+                    },
+                    "updated_at": now_iso(),
+                }).eq("id", _deal_id).execute()
+            except Exception:
+                pass
+
+    import threading as _t
+    _t.Thread(target=_fetch_and_store, daemon=True).start()
+
+    # Return 202 immediately — frontend polls GET /api/deals/:id/area
+    return jsonify({
+        "ok":       True,
+        "area":     None,
+        "postcode": postcode,
+        "cached":   False,
+        "fetching": True,
+        "message":  "Area data is being fetched in the background.",
+    }), 202
 
 
 # ── AUCTION BRIEF ─────────────────────────────────────────────
