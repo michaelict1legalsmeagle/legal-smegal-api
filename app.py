@@ -3108,6 +3108,7 @@ def llm_json_route():
 # PDF UPLOAD PIPELINE
 # ============================================================
 import jwt as pyjwt
+import anthropic as _anthropic
 #   import io
 #   try:
 #       import pdfplumber
@@ -3151,6 +3152,60 @@ def require_auth(f):
         request.user_id = user_id
         return f(*args, **kwargs)
     return decorated
+
+
+# ── AI EXPLAIN — Flag workbench Ask AI proxy ────────────────
+_anthropic_client = None
+
+def _get_anthropic_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY environment variable not set on Render")
+        _anthropic_client = _anthropic.Anthropic(api_key=api_key)
+    return _anthropic_client
+
+
+@app.route("/api/ai-explain", methods=["POST"])
+@require_auth
+def ai_explain():
+    """Flag workbench Ask AI proxy. POST {prompt} -> {text}. Bearer token required."""
+    body = request.get_json(silent=True) or {}
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "prompt is required"}), 400
+    if len(prompt) > 4000:
+        return jsonify({"error": "prompt too long (max 4000 chars)"}), 400
+    try:
+        client = _get_anthropic_client()
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            system=(
+                "You are a concise UK property auction legal analyst. "
+                "You explain legal pack issues to investors in plain English. "
+                "Give specific cost estimates in \u00a3 where relevant. "
+                "Never give legal advice. "
+                "Keep responses to 120 words maximum."
+            ),
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = message.content[0].text if message.content else ""
+        return jsonify({"text": text})
+    except _anthropic.AuthenticationError:
+        app.logger.error("Anthropic auth failed — check ANTHROPIC_API_KEY on Render")
+        return jsonify({"error": "AI service authentication failed — check ANTHROPIC_API_KEY on Render"}), 500
+    except _anthropic.RateLimitError:
+        return jsonify({"error": "AI rate limit reached — please try again"}), 429
+    except _anthropic.APIError as e:
+        app.logger.exception("Anthropic API error in ai_explain")
+        return jsonify({"error": f"AI service error: {str(e)}"}), 500
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        app.logger.exception("Unexpected error in ai_explain")
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 
 # ── PDF TEXT EXTRACTION ─────────────────────────────────────
@@ -4971,6 +5026,7 @@ def home():
         "supabaseEnabled": bool(supabase),
         "routes": {
             "POST /market-insights": "{ 'postcode': 'EC3A 5DE', 'forceRefresh': true }  // optional: lat/lng",
+            "POST /api/ai-explain": "{ 'prompt': '...' } — Bearer token required — Ask AI proxy for flag workbench",
             "POST /adapters/geocode/batch": "{ 'queries': ['PARROT ROW, ABERTILLERY, NP13 3AH', ...] }",
             "GET /adapters/geo?postcode=EC1A%201BB": "debug postcode -> LSOA(GSS) + coords",
             "GET /adapters/nomis?table=ts003&geography=2092957699": "Nomis TS003 (requires numeric geography id)",
@@ -4981,6 +5037,7 @@ def home():
             "GET /adapters/housing/comps?postcode=EC3A%205DE&radius_miles=3&limit=20": "debug housing sold comps (RPC)",
         },
         "envHints": {
+            "ANTHROPIC_API_KEY": "REQUIRED for /api/ai-explain (Ask AI in flag workbench)",
             "APP_CACHE_BUSTER": "change this value to force refresh of cached /market-insights payloads",
             "MARKET_CONTRACT_MODE": "set to 1 to force deterministic UI-safe payload (bypasses cache/providers)",
             "SUPABASE_URL": "required for supabase providers",
