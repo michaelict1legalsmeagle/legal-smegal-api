@@ -3774,6 +3774,32 @@ Reference exact clause numbers. Return only JSON, no other text."""
                     prompt=f"Analyse this auction legal pack:\n\n{truncated}",
                     temperature=0.1,
                 )
+
+                # ── Schema enforcement: guarantee frontend contract is always met ──
+                # flags must be a list (never null/missing — workbench reads data.flags || [])
+                if not isinstance(result.get("flags"), list):
+                    result["flags"] = []
+                # flag_counts must be a dict
+                if not isinstance(result.get("flag_counts"), dict):
+                    result["flag_counts"] = {
+                        "critical": sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "critical"),
+                        "high":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "high"),
+                        "missing":  sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "missing"),
+                        "note":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "note"),
+                    }
+                # deal_score must be a number
+                if result.get("deal_score") is None:
+                    result["deal_score"] = 50  # safe fallback — signals analysis ran
+                # property must be a dict
+                if not isinstance(result.get("property"), dict):
+                    result["property"] = {}
+                # completion_terms must be a dict
+                if not isinstance(result.get("completion_terms"), dict):
+                    result["completion_terms"] = {}
+                # pack_completeness must be a dict
+                if not isinstance(result.get("pack_completeness"), dict):
+                    result["pack_completeness"] = {"completeness_pct": 0, "present_count": 0, "total": 13}
+
                 result["documents_processed"] = result.get("documents_processed") or len(documents)
                 prop = result.get("property") or {}
                 supabase.table("deals").update({
@@ -4965,7 +4991,22 @@ Be specific — reference exact clause numbers and page numbers. Return only the
 
                 # Use LLM result directly as summary — no second pipeline call
                 summary = llm_result
-                # Ensure documents_processed is set
+                # ── Schema enforcement: guarantee frontend contract ──
+                if not isinstance(summary.get("flags"), list):
+                    summary["flags"] = []
+                if not isinstance(summary.get("flag_counts"), dict):
+                    summary["flag_counts"] = {
+                        "critical": sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "critical"),
+                        "high":     sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "high"),
+                        "missing":  sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "missing"),
+                        "note":     sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "note"),
+                    }
+                if summary.get("deal_score") is None:
+                    summary["deal_score"] = 50
+                if not isinstance(summary.get("property"), dict):
+                    summary["property"] = {}
+                if not isinstance(summary.get("completion_terms"), dict):
+                    summary["completion_terms"] = {}
                 if not summary.get("documents_processed"):
                     summary["documents_processed"] = len(documents)
 
