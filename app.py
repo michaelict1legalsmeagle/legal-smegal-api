@@ -3667,8 +3667,9 @@ def summarise_deal(deal_id: str):
         return jsonify({"error": "Deal not found"}), 404
 
     # Return cached result immediately if already analysed
+    # Fix: check deal_score is set, not flags (empty flags list [] is falsy but valid)
     existing = deal.data.get("summary_json")
-    if existing and existing.get("flags"):
+    if existing and existing.get("deal_score") is not None:
         return jsonify({"ok": True, "status": "complete", **existing}), 200
 
     # Check usage allowance
