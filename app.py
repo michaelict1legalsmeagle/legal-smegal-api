@@ -3182,7 +3182,7 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
 
     client = _get_anthropic_client()
     message = client.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-6",
         max_tokens=8192,
         temperature=float(temperature),
         system=system,
@@ -3228,7 +3228,7 @@ def ai_explain():
     try:
         client = _get_anthropic_client()
         message = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=300,
             system=(
                 "You are a concise UK property auction legal analyst. "
@@ -3790,6 +3790,22 @@ def summarise_deal(deal_id: str):
             _total += len(_chunk)
         truncated = ''.join(_parts)
 
+        # ── Guard: refuse to call LLM with empty text ──
+        # If every document has extraction_status='empty' (scanned PDFs), truncated="" here.
+        # A blank prompt to the LLM produces garbage or an API error. Surface it clearly.
+        if not truncated.strip():
+            docs_with_text = sum(1 for d in documents if (d.get('extracted_text') or '').strip())
+            return jsonify({
+                "error": "no_text_extracted",
+                "detail": (
+                    f"All {len(documents)} documents appear to be image-based or scanned PDFs. "
+                    f"No text could be extracted ({docs_with_text} of {len(documents)} had text). "
+                    "Please ensure your PDFs contain selectable text, not scanned images."
+                ),
+                "documents_count": len(documents),
+                "docs_with_text": docs_with_text,
+            }), 400
+
         COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
 
 Return ONLY valid JSON with this exact structure:
@@ -3868,11 +3884,46 @@ Reference exact clause numbers. Return only JSON, no other text."""
                     pass
                 app.logger.info(f"Background analysis complete for deal {_deal_id}")
             except Exception as e:
-                app.logger.exception(f"Background analysis failed for deal {_deal_id}: {e}")
+                import traceback as _tb
+                # anthropic SDK exceptions often have empty str(e) — extract all fields
+                error_type  = type(e).__name__
+                error_str   = str(e)
+                error_repr  = repr(e)
+                # anthropic-specific: status_code, response body, request_id
+                status_code = getattr(e, 'status_code', None)
+                body        = getattr(e, 'body', None) or getattr(e, 'response', None)
+                request_id  = getattr(e, 'request_id', None)
+                tb_short    = _tb.format_exc()[-600:]
+
+                # Build a non-empty error message from whatever is available
+                error_msg = (
+                    error_str
+                    or (f"{error_type}: status={status_code} body={body}" if status_code else "")
+                    or error_repr
+                    or tb_short
+                    or "Unknown error in analysis thread"
+                )
+                detail_msg = (
+                    f"type={error_type} | status={status_code} | body={body} | "
+                    f"request_id={request_id} | repr={error_repr}"
+                )
+                app.logger.error(
+                    f"[summarise] THREAD FAILED deal={_deal_id} | {detail_msg}\n{tb_short}"
+                )
                 try:
-                    supabase.table("deals").update({"status": "error"}).eq("id", _deal_id).execute()
-                except Exception:
-                    pass
+                    supabase.table("deals").update({
+                        "status": "error",
+                        "summary_json": {
+                            "error":       error_msg,
+                            "error_detail": detail_msg,
+                            "deal_score":  None,
+                            "flags":       [],
+                            "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
+                        },
+                        "updated_at": now_iso(),
+                    }).eq("id", _deal_id).execute()
+                except Exception as _se:
+                    app.logger.error(f"[summarise] Could not write error state to DB: {_se}")
 
         thread = _t.Thread(target=_run_and_store, daemon=True)
         thread.start()
@@ -5107,6 +5158,32 @@ Be specific — reference exact clause numbers and page numbers. Return only the
         }
     )
     return response
+
+@app.route("/api/test-llm", methods=["GET"])
+def test_llm():
+    """Diagnostic endpoint — tests Anthropic client directly. No auth required.
+    Returns the exact error if something is wrong with the key or model."""
+    result = {"ok": False, "model": "claude-sonnet-4-6", "error": None, "detail": None}
+    try:
+        client = _get_anthropic_client()
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=50,
+            system="Reply with valid JSON only.",
+            messages=[{"role": "user", "content": "Return: {\"ok\": true}"}],
+        )
+        text = msg.content[0].text if msg.content else ""
+        result["ok"] = True
+        result["response"] = text
+        result["stop_reason"] = msg.stop_reason
+    except Exception as e:
+        result["error"]        = type(e).__name__
+        result["detail"]       = str(e) or repr(e)
+        result["status_code"]  = getattr(e, 'status_code', None)
+        result["body"]         = str(getattr(e, 'body', None) or '')
+        result["request_id"]   = getattr(e, 'request_id', None)
+    return jsonify(result)
+
 
 @app.route("/", methods=["GET"])
 def home():
