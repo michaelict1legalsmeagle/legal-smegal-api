@@ -3183,7 +3183,7 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     client = _get_anthropic_client()
     message = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=8192,
+        max_tokens=16000,
         temperature=float(temperature),
         system=system,
         messages=[{"role": "user", "content": prompt}],
@@ -3808,21 +3808,39 @@ def summarise_deal(deal_id: str):
 
         COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
 
-Return ONLY valid JSON with this exact structure:
+Return ONLY valid JSON. No prose, no markdown fences. Use exactly this structure:
 {
-  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot number", "type": "BTL/HMO/Commercial/etc", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
-  "deal_score": 0,
-  "viability_statement": "2-3 sentence investor verdict",
-  "documents_processed": 0,
-  "pack_completeness": {"completeness_pct": 0, "present_count": 0, "total": 13},
-  "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": "working", "buyers_premium_pct": null, "vacant_possession": null},
+  "flags": [
+    {
+      "severity": "critical|high|missing|note",
+      "title": "concise flag title — max 10 words",
+      "summation": "one sentence: what this means for the investor",
+      "evidence": "verbatim quote from document — max 30 words",
+      "implication": "financial or legal impact — max 20 words",
+      "action": "what investor must do — max 15 words",
+      "source_document": "document filename",
+      "source_clause": "clause reference or null",
+      "source_page": null,
+      "legal_risk_weight": 5
+    }
+  ],
   "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
-  "flags": [{"severity": "critical|high|missing|note", "title": "concise flag title", "summation": "what this means for the investor", "evidence": "verbatim quote", "implication": "financial or legal impact", "action": "what investor must do", "source_document": "doc name", "source_clause": "clause ref", "source_page": null, "legal_risk_weight": 1}]
+  "deal_score": 0,
+  "viability_statement": "2-3 sentences: investor verdict",
+  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot", "type": "BTL/HMO/Commercial/etc", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
+  "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": "working", "buyers_premium_pct": null, "vacant_possession": null},
+  "pack_completeness": {"completeness_pct": 0, "present_count": 0, "total": 13},
+  "documents_processed": 0
 }
 
-Score: 80-100=clean, 60-79=manageable, 40-59=significant issues, 0-39=severe.
-Flag all non-standard clauses, financial exposures, missing docs, covenants, title issues.
-Reference exact clause numbers. Return only JSON, no other text."""
+CRITICAL RULES:
+- flags array MUST come first in the JSON object
+- Generate ALL flags — do not truncate the array
+- Score: 80-100=clean, 60-79=manageable, 40-59=significant issues, 0-39=severe
+- Deduct: critical=-12, high=-6, missing=-4 from 100
+- Flag every non-standard clause, financial exposure, missing doc, covenant, title issue
+- Keep evidence quotes short (max 30 words) to fit all flags within token limit
+- Return only the JSON object, nothing else"""
 
         # Run LLM in background thread — return immediately, frontend polls for result
         import threading as _t
@@ -3843,14 +3861,15 @@ Reference exact clause numbers. Return only JSON, no other text."""
                 # flags must be a list (never null/missing — workbench reads data.flags || [])
                 if not isinstance(result.get("flags"), list):
                     result["flags"] = []
-                # flag_counts must be a dict
-                if not isinstance(result.get("flag_counts"), dict):
-                    result["flag_counts"] = {
-                        "critical": sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "critical"),
-                        "high":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "high"),
-                        "missing":  sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "missing"),
-                        "note":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "note"),
-                    }
+                # ALWAYS recompute flag_counts from the actual flags array.
+                # The LLM sometimes returns mismatched counts vs the array contents,
+                # especially if the response was near the token limit.
+                result["flag_counts"] = {
+                    "critical": sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "critical"),
+                    "high":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "high"),
+                    "missing":  sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "missing"),
+                    "note":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "note"),
+                }
                 # deal_score must be a number
                 if result.get("deal_score") is None:
                     result["deal_score"] = 50  # safe fallback — signals analysis ran
@@ -4973,70 +4992,39 @@ def summarise_stream(deal_id: str):
 
                 COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
 
-Return ONLY valid JSON with this exact structure:
+Return ONLY valid JSON. No prose, no markdown fences. Use exactly this structure:
 {
-  "property": {
-    "address": "full address",
-    "postcode": "postcode",
-    "lot_number": "lot number",
-    "type": "BTL/HMO/Commercial/etc",
-    "tenure": "Freehold/Leasehold",
-    "lease_years": null_or_number,
-    "guide_price_pence": null_or_integer
-  },
-  "deal_score": integer_0_to_100,
-  "viability_statement": "2-3 sentence investor verdict",
-  "documents_processed": integer,
-  "pack_completeness": {
-    "completeness_pct": integer,
-    "present_count": integer,
-    "total": 13
-  },
-  "completion_terms": {
-    "deposit_pct": null_or_number,
-    "deposit_refundable": null_or_boolean,
-    "completion_days": null_or_integer,
-    "completion_type": "working_or_calendar",
-    "buyers_premium_pct": null_or_number,
-    "vacant_possession": null_or_boolean
-  },
-  "flag_counts": {
-    "critical": integer,
-    "high": integer,
-    "missing": integer,
-    "note": integer
-  },
   "flags": [
     {
       "severity": "critical|high|missing|note",
-      "title": "concise flag title",
-      "summation": "what this means for the investor",
-      "evidence": "verbatim quote from document",
-      "implication": "financial or legal implication",
-      "action": "what the investor must do",
-      "source_document": "document name",
-      "source_clause": "clause reference",
-      "source_page": null_or_integer,
-      "legal_risk_weight": integer_1_to_10
+      "title": "concise flag title — max 10 words",
+      "summation": "one sentence: what this means for the investor",
+      "evidence": "verbatim quote from document — max 30 words",
+      "implication": "financial or legal impact — max 20 words",
+      "action": "what investor must do — max 15 words",
+      "source_document": "document filename",
+      "source_clause": "clause reference or null",
+      "source_page": null,
+      "legal_risk_weight": 5
     }
   ],
-  "jis_findings": [
-    {
-      "severity": "critical|high|missing|note",
-      "title": "finding title",
-      "finding": "detailed explanation",
-      "evidence": "verbatim clause text",
-      "implication": "investor impact",
-      "action": "required action",
-      "source_document": "document",
-      "source_clause": "clause"
-    }
-  ]
+  "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
+  "deal_score": 0,
+  "viability_statement": "2-3 sentences: investor verdict",
+  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot", "type": "BTL/HMO/Commercial/etc", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
+  "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": "working", "buyers_premium_pct": null, "vacant_possession": null},
+  "pack_completeness": {"completeness_pct": 0, "present_count": 0, "total": 13},
+  "documents_processed": 0
 }
 
-Scoring guide: 80-100 = clean deal, 60-79 = manageable risks, 40-59 = significant issues, 0-39 = severe problems.
-Flag all non-standard clauses, financial exposures, missing documents, restrictive covenants, and title issues.
-Be specific — reference exact clause numbers and page numbers. Return only the JSON object, no other text."""
+CRITICAL RULES:
+- flags array MUST come first in the JSON object
+- Generate ALL flags — do not truncate the array
+- Score: 80-100=clean, 60-79=manageable, 40-59=significant issues, 0-39=severe
+- Deduct: critical=-12, high=-6, missing=-4 from 100
+- Flag every non-standard clause, financial exposure, missing doc, covenant, title issue
+- Keep evidence quotes short (max 30 words) to fit all flags within token limit
+- Return only the JSON object, nothing else"""
 
                 _res = {}
                 def _run_analysis():
@@ -5093,13 +5081,13 @@ Be specific — reference exact clause numbers and page numbers. Return only the
                 # ── Schema enforcement: guarantee frontend contract ──
                 if not isinstance(summary.get("flags"), list):
                     summary["flags"] = []
-                if not isinstance(summary.get("flag_counts"), dict):
-                    summary["flag_counts"] = {
-                        "critical": sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "critical"),
-                        "high":     sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "high"),
-                        "missing":  sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "missing"),
-                        "note":     sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "note"),
-                    }
+                # ALWAYS recompute flag_counts from actual flags array
+                summary["flag_counts"] = {
+                    "critical": sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "critical"),
+                    "high":     sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "high"),
+                    "missing":  sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "missing"),
+                    "note":     sum(1 for f in summary["flags"] if (f.get("severity") or "").lower() == "note"),
+                }
                 if summary.get("deal_score") is None:
                     summary["deal_score"] = 50
                 if not isinstance(summary.get("property"), dict):
