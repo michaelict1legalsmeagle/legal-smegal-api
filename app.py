@@ -3182,7 +3182,7 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
 
     client = _get_anthropic_client()
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=8192,
         temperature=float(temperature),
         system=system,
@@ -3228,7 +3228,7 @@ def ai_explain():
     try:
         client = _get_anthropic_client()
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=300,
             system=(
                 "You are a concise UK property auction legal analyst. "
