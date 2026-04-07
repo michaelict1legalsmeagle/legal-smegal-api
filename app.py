@@ -3167,6 +3167,54 @@ def _get_anthropic_client():
     return _anthropic_client
 
 
+def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -> dict:
+    """Run a JSON-returning LLM call via Anthropic claude-sonnet.
+
+    Drop-in replacement for llm_json_raw() that uses the Anthropic client
+    already configured via ANTHROPIC_API_KEY — avoiding the OpenRouter dependency
+    for the legal analysis pipeline.
+
+    Returns a parsed dict. Raises ValueError if the model returns non-JSON.
+    Raises RuntimeError if ANTHROPIC_API_KEY is not set.
+    """
+    import re as _re
+    import json as _json
+
+    client = _get_anthropic_client()
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=8192,
+        temperature=float(temperature),
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    content = message.content[0].text if message.content else ""
+
+    # Try direct parse first
+    try:
+        return _json.loads(content.strip())
+    except Exception:
+        pass
+
+    # Strip markdown fences
+    cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(),
+                      flags=_re.IGNORECASE | _re.MULTILINE).strip()
+    try:
+        return _json.loads(cleaned)
+    except Exception:
+        pass
+
+    # Extract first JSON object
+    m = _re.search(r"(\{.*\})", cleaned, flags=_re.DOTALL)
+    if m:
+        try:
+            return _json.loads(m.group(1))
+        except Exception:
+            pass
+
+    raise ValueError(f"Anthropic model returned non-JSON. First 300 chars: {content[:300]}")
+
+
 @app.route("/api/ai-explain", methods=["POST"])
 @require_auth
 def ai_explain():
@@ -3769,7 +3817,7 @@ Reference exact clause numbers. Return only JSON, no other text."""
 
         def _run_and_store():
             try:
-                result = llm_json_raw(
+                result = _llm_json_anthropic(
                     system=COMBINED_SYSTEM,
                     prompt=f"Analyse this auction legal pack:\n\n{truncated}",
                     temperature=0.1,
@@ -3985,7 +4033,7 @@ def analyse_deal(deal_id: str):
 
     # Run LLM
     try:
-        result = llm_json_raw(
+        result = _llm_json_anthropic(
             system=FULL_ANALYSIS_SYSTEM,
             prompt="Analyse these auction documents and return the full analysis JSON:\n\n" + truncated,
             temperature=0.1,
@@ -4678,7 +4726,7 @@ def get_auction_brief(deal_id: str):
     }
 
     try:
-        brief = llm_json_raw(
+        brief = _llm_json_anthropic(
             system=AUCTION_BRIEF_SYSTEM,
             prompt=f"Generate auction brief from this deal data:\n\n{json.dumps(context, indent=2)}",
             temperature=0.2,
@@ -4942,7 +4990,7 @@ Be specific — reference exact clause numbers and page numbers. Return only the
                 _res = {}
                 def _run_analysis():
                     try:
-                        _res["data"] = llm_json_raw(
+                        _res["data"] = _llm_json_anthropic(
                             system=COMBINED_SYSTEM,
                             prompt=f"Analyse this auction legal pack and return the complete JSON summary:\n\n{truncated}",
                             temperature=0.1,
