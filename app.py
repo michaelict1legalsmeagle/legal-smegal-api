@@ -3183,7 +3183,7 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     client = _get_anthropic_client()
     message = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=16000,
+        max_tokens=20000,
         temperature=float(temperature),
         system=system,
         messages=[{"role": "user", "content": prompt}],
@@ -3226,15 +3226,44 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     except Exception:
         pass
 
-    # Extract first JSON object — handles leading/trailing prose
-    m = _re.search(r"(\{.*\})", cleaned, flags=_re.DOTALL)
-    if m:
+    # Bracket-counter extraction — find first { to its matching closing }
+    # More robust than greedy r"(\{.*\})" which breaks on trailing prose
+    # after a valid JSON block or on multiple top-level objects.
+    def _extract_json_object(text):
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(text[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return None  # unmatched brackets — truncated response
+
+    candidate = _extract_json_object(cleaned)
+    if candidate:
         try:
-            result = _json.loads(m.group(1))
-            print(f"[LLM] Parsed OK (regex extract). flags={len(result.get('flags') or [])}", flush=True)
+            result = _json.loads(candidate)
+            print(f"[LLM] Parsed OK (bracket-counter). flags={len(result.get('flags') or [])}", flush=True)
             return result
-        except Exception:
-            pass
+        except Exception as parse_err:
+            print(f"[LLM] Bracket-counter extracted {len(candidate)} chars but json.loads failed: {parse_err}", flush=True)
 
     # All parse attempts failed
     print(f"[LLM] ALL PARSE ATTEMPTS FAILED. stop_reason={stop_reason} tokens_out={usage_out}", flush=True)
@@ -3791,6 +3820,8 @@ def summarise_deal(deal_id: str):
     except Exception as e:
         return jsonify({"error": f"Could not fetch documents: {e}"}), 500
 
+    print(f"DEBUG: Found {len(documents)} documents for deal {deal_id}", flush=True)
+
     if not documents:
         return jsonify({"error": "No documents found for this deal"}), 400
 
@@ -3928,6 +3959,11 @@ A blank flags array is a SYSTEM FAILURE. Minimum 3 flags required even for a cle
                 # analysis ran. This is a safety net — the prompt changes above should prevent this.
                 if len(result["flags"]) == 0 and len(documents) > 0:
                     docs_with_text = sum(1 for d in documents if (d.get("extracted_text") or "").strip())
+                    print(
+                        f"DEBUG: Found {len(documents)} documents for deal {_deal_id} "
+                        f"({docs_with_text} with text). LLM returned 0 flags — injecting system note.",
+                        flush=True
+                    )
                     result["flags"] = [{
                         "severity": "note",
                         "title": "Analysis complete — no specific flags raised",
@@ -3945,10 +3981,6 @@ A blank flags array is a SYSTEM FAILURE. Minimum 3 flags required even for a cle
                         "source_page":     None,
                         "legal_risk_weight": 1,
                     }]
-                    app.logger.warning(
-                        f"[summarise] Zero flags returned for deal {_deal_id} "
-                        f"with {len(documents)} documents — injected system note"
-                    )
 
                 # ALWAYS recompute flag_counts from the actual flags array.
                 # The LLM sometimes returns mismatched counts vs the array contents,
