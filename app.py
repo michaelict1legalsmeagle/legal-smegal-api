@@ -3748,11 +3748,16 @@ def summarise_deal(deal_id: str):
     except Exception as e:
         return jsonify({"error": "Deal not found"}), 404
 
-    # Return cached result immediately if already analysed
-    # Fix: check deal_score is set, not flags (empty flags list [] is falsy but valid)
+    # Return cached result immediately if already analysed AND flags are populated.
+    # IMPORTANT: if cached flags=[] (broken previous run), we must re-run the analysis.
+    # An empty flags array with a deal_score means the previous run was truncated.
     existing = deal.data.get("summary_json")
-    if existing and existing.get("deal_score") is not None:
+    if (existing
+            and existing.get("deal_score") is not None
+            and isinstance(existing.get("flags"), list)
+            and len(existing.get("flags", [])) > 0):
         return jsonify({"ok": True, "status": "complete", **existing}), 200
+    # If we reach here: either no summary yet, OR summary exists but flags=[] (re-run needed)
 
     # Check usage allowance
     try:
@@ -3824,6 +3829,22 @@ def summarise_deal(deal_id: str):
             _total += len(_chunk)
         truncated = ''.join(_parts)
 
+        # ── Database context verification — log what we're actually sending ──
+        docs_with_text = sum(1 for d in documents if (d.get('extracted_text') or '').strip())
+        app.logger.info(
+            f"[summarise] deal={deal_id} docs_total={len(documents)} "
+            f"docs_with_text={docs_with_text} "
+            f"truncated_chars={len(truncated)} "
+            f"doc_types={[d.get('doc_type','?') for d in documents]}"
+        )
+        # Print to stdout so it's visible in Render logs regardless of log level
+        print(
+            f"[summarise] PROMPT SIZE: {len(truncated)} chars | "
+            f"{docs_with_text}/{len(documents)} docs have text | "
+            f"first_200: {truncated[:200]!r}",
+            flush=True
+        )
+
         # ── Guard: refuse to call LLM with empty text ──
         # If every document has extraction_status='empty' (scanned PDFs), truncated="" here.
         # A blank prompt to the LLM produces garbage or an API error. Surface it clearly.
@@ -3874,7 +3895,15 @@ FLAG EXTRACTION RULES — YOU MUST FOLLOW ALL OF THEM:
 4. Minimum flags: generate at least 1 flag per document that contains a clause. Aim for 10-20 flags total.
 5. Scoring: Start at 100. Deduct critical=-12, high=-6, missing=-4, note=-1.
 6. Keep evidence quotes SHORT (max 30 words) — critical for fitting all flags within token budget.
-7. The flags array MUST be complete before flag_counts. Do not close the JSON until all flags are written."""
+7. The flags array MUST be complete before flag_counts. Do not close the JSON until all flags are written.
+
+FEW-SHOT EXAMPLE — this is exactly what one flag object must look like:
+{"severity": "critical", "title": "Missing Local Authority Search", "summation": "No local search in pack — planning restrictions and enforcement notices unknown.", "evidence": "Document not present in legal pack", "implication": "Unknown planning restrictions could prevent intended use", "action": "Order local search before bidding — allow 5-10 working days", "source_document": "Not present", "source_clause": null, "source_page": null, "legal_risk_weight": 9}
+
+Another example (informational note):
+{"severity": "note", "title": "Freehold Title Verified", "summation": "Property held as absolute freehold with no charges registered.", "evidence": "Absolute freehold title confirmed in register entry A", "implication": "No ground rent or service charge obligations", "action": "Verify no covenants restrict intended use", "source_document": "title_register.pdf", "source_clause": "A: Property Register", "source_page": 1, "legal_risk_weight": 1}
+
+A blank flags array is a SYSTEM FAILURE. Minimum 3 flags required even for a clean pack."""
 
 
         # Run LLM in background thread — return immediately, frontend polls for result
