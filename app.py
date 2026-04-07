@@ -3193,24 +3193,25 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     usage_in    = getattr(getattr(message, "usage", None), "input_tokens",  0)
     usage_out   = getattr(getattr(message, "usage", None), "output_tokens", 0)
 
-    # Log key diagnostics — visible in Render logs
-    app.logger.info(
-        f"[LLM] stop_reason={stop_reason} tokens_in={usage_in} tokens_out={usage_out} "
-        f"content_len={len(content)}"
-    )
+    # ── ALWAYS print to stdout — visible in Render logs regardless of log level ──
+    print(f"[LLM] stop_reason={stop_reason} tokens_in={usage_in} tokens_out={usage_out} content_len={len(content)}", flush=True)
 
-    # CRITICAL: if stop_reason='max_tokens' the response was cut mid-stream.
-    # Log the tail of the content so we can see exactly where it was truncated.
     if stop_reason == "max_tokens":
-        app.logger.warning(
-            f"[LLM] TRUNCATED at max_tokens={16000}. "
-            f"Last 400 chars: {content[-400:]!r}"
-        )
+        print(f"[LLM] WARNING: TRUNCATED at max_tokens=16000. Last 300 chars: {content[-300:]!r}", flush=True)
+
+    # Print the FULL raw LLM response before any processing.
+    # This is the ground truth — if flags are missing, this tells us why.
+    print(f"[LLM] RAW RESPONSE START >>>", flush=True)
+    print(content[:3000], flush=True)  # first 3000 chars
+    if len(content) > 3000:
+        print(f"[LLM] ... ({len(content) - 3000} more chars) ...", flush=True)
+        print(content[-500:], flush=True)  # last 500 chars
+    print(f"[LLM] RAW RESPONSE END <<<", flush=True)
 
     # Try direct parse first
     try:
         result = _json.loads(content.strip())
-        app.logger.info(f"[LLM] Parsed OK (direct). flags={len(result.get('flags') or [])}")
+        print(f"[LLM] Parsed OK (direct). flags={len(result.get('flags') or [])}", flush=True)
         return result
     except Exception:
         pass
@@ -3220,7 +3221,7 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
                       flags=_re.IGNORECASE | _re.MULTILINE).strip()
     try:
         result = _json.loads(cleaned)
-        app.logger.info(f"[LLM] Parsed OK (stripped fences). flags={len(result.get('flags') or [])}")
+        print(f"[LLM] Parsed OK (stripped fences). flags={len(result.get('flags') or [])}", flush=True)
         return result
     except Exception:
         pass
@@ -3230,18 +3231,13 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     if m:
         try:
             result = _json.loads(m.group(1))
-            app.logger.info(f"[LLM] Parsed OK (regex extract). flags={len(result.get('flags') or [])}")
+            print(f"[LLM] Parsed OK (regex extract). flags={len(result.get('flags') or [])}", flush=True)
             return result
         except Exception:
             pass
 
-    # All parse attempts failed — log the full raw response for diagnosis
-    app.logger.error(
-        f"[LLM] ALL PARSE ATTEMPTS FAILED. stop_reason={stop_reason} "
-        f"tokens_out={usage_out}\n"
-        f"RAW CONTENT (first 800): {content[:800]!r}\n"
-        f"RAW CONTENT (last 400):  {content[-400:]!r}"
-    )
+    # All parse attempts failed
+    print(f"[LLM] ALL PARSE ATTEMPTS FAILED. stop_reason={stop_reason} tokens_out={usage_out}", flush=True)
     raise ValueError(
         f"Anthropic model returned non-JSON. "
         f"stop_reason={stop_reason} tokens_out={usage_out} "
@@ -3967,6 +3963,11 @@ A blank flags array is a SYSTEM FAILURE. Minimum 3 flags required even for a cle
                 app.logger.info(
                     f"[summarise] deal={_deal_id} score={result.get('deal_score')} "
                     f"flags={len(result['flags'])} counts={result['flag_counts']}"
+                )
+                print(
+                    f"[summarise] RESULT deal={_deal_id} score={result.get('deal_score')} "
+                    f"flags={len(result['flags'])} counts={result['flag_counts']}",
+                    flush=True
                 )
                 # deal_score must be a number
                 if result.get("deal_score") is None:
