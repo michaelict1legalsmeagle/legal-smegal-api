@@ -3188,11 +3188,30 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
-    content = message.content[0].text if message.content else ""
+    content     = message.content[0].text if message.content else ""
+    stop_reason = getattr(message, "stop_reason", "unknown")
+    usage_in    = getattr(getattr(message, "usage", None), "input_tokens",  0)
+    usage_out   = getattr(getattr(message, "usage", None), "output_tokens", 0)
+
+    # Log key diagnostics — visible in Render logs
+    app.logger.info(
+        f"[LLM] stop_reason={stop_reason} tokens_in={usage_in} tokens_out={usage_out} "
+        f"content_len={len(content)}"
+    )
+
+    # CRITICAL: if stop_reason='max_tokens' the response was cut mid-stream.
+    # Log the tail of the content so we can see exactly where it was truncated.
+    if stop_reason == "max_tokens":
+        app.logger.warning(
+            f"[LLM] TRUNCATED at max_tokens={16000}. "
+            f"Last 400 chars: {content[-400:]!r}"
+        )
 
     # Try direct parse first
     try:
-        return _json.loads(content.strip())
+        result = _json.loads(content.strip())
+        app.logger.info(f"[LLM] Parsed OK (direct). flags={len(result.get('flags') or [])}")
+        return result
     except Exception:
         pass
 
@@ -3200,19 +3219,34 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(),
                       flags=_re.IGNORECASE | _re.MULTILINE).strip()
     try:
-        return _json.loads(cleaned)
+        result = _json.loads(cleaned)
+        app.logger.info(f"[LLM] Parsed OK (stripped fences). flags={len(result.get('flags') or [])}")
+        return result
     except Exception:
         pass
 
-    # Extract first JSON object
+    # Extract first JSON object — handles leading/trailing prose
     m = _re.search(r"(\{.*\})", cleaned, flags=_re.DOTALL)
     if m:
         try:
-            return _json.loads(m.group(1))
+            result = _json.loads(m.group(1))
+            app.logger.info(f"[LLM] Parsed OK (regex extract). flags={len(result.get('flags') or [])}")
+            return result
         except Exception:
             pass
 
-    raise ValueError(f"Anthropic model returned non-JSON. First 300 chars: {content[:300]}")
+    # All parse attempts failed — log the full raw response for diagnosis
+    app.logger.error(
+        f"[LLM] ALL PARSE ATTEMPTS FAILED. stop_reason={stop_reason} "
+        f"tokens_out={usage_out}\n"
+        f"RAW CONTENT (first 800): {content[:800]!r}\n"
+        f"RAW CONTENT (last 400):  {content[-400:]!r}"
+    )
+    raise ValueError(
+        f"Anthropic model returned non-JSON. "
+        f"stop_reason={stop_reason} tokens_out={usage_out} "
+        f"first_300={content[:300]!r}"
+    )
 
 
 @app.route("/api/ai-explain", methods=["POST"])
@@ -3806,22 +3840,22 @@ def summarise_deal(deal_id: str):
                 "docs_with_text": docs_with_text,
             }), 400
 
-        COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
+        COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be aggressive and thorough — an investor's money is at stake.
 
-Return ONLY valid JSON. No prose, no markdown fences. Use exactly this structure:
+Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (flags MUST come first):
 {
   "flags": [
     {
       "severity": "critical|high|missing|note",
-      "title": "concise flag title — max 10 words",
+      "title": "specific risk title — max 10 words",
       "summation": "one sentence: what this means for the investor",
       "evidence": "verbatim quote from document — max 30 words",
       "implication": "financial or legal impact — max 20 words",
       "action": "what investor must do — max 15 words",
       "source_document": "document filename",
-      "source_clause": "clause reference or null",
+      "source_clause": "clause number or null",
       "source_page": null,
-      "legal_risk_weight": 5
+      "legal_risk_weight": 7
     }
   ],
   "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
@@ -3833,14 +3867,15 @@ Return ONLY valid JSON. No prose, no markdown fences. Use exactly this structure
   "documents_processed": 0
 }
 
-CRITICAL RULES:
-- flags array MUST come first in the JSON object
-- Generate ALL flags — do not truncate the array
-- Score: 80-100=clean, 60-79=manageable, 40-59=significant issues, 0-39=severe
-- Deduct: critical=-12, high=-6, missing=-4 from 100
-- Flag every non-standard clause, financial exposure, missing doc, covenant, title issue
-- Keep evidence quotes short (max 30 words) to fit all flags within token limit
-- Return only the JSON object, nothing else"""
+FLAG EXTRACTION RULES — YOU MUST FOLLOW ALL OF THEM:
+1. NEVER return an empty flags array. Every legal pack has risks. If a pack seems clean, flag what is MISSING.
+2. Flag EVERY one of these if present: restrictive covenants, chancel repair, mining/subsidence, flood risk, Japanese knotweed, Article 4 directions, HMO licensing, short lease (<85 years), ground rent escalation, service charge >£2500/yr, absent landlord, possessory title, missing searches, auction clauses (non-refundable deposit, 28-day completion, buyers premium), tenancy issues (sitting tenant, AST expiry, rent arrears), planning enforcement notices.
+3. Flag MISSING documents: if Special Conditions, Title Register, Local Search, Environmental Search, EPC are absent — each is a MISSING flag.
+4. Minimum flags: generate at least 1 flag per document that contains a clause. Aim for 10-20 flags total.
+5. Scoring: Start at 100. Deduct critical=-12, high=-6, missing=-4, note=-1.
+6. Keep evidence quotes SHORT (max 30 words) — critical for fitting all flags within token budget.
+7. The flags array MUST be complete before flag_counts. Do not close the JSON until all flags are written."""
+
 
         # Run LLM in background thread — return immediately, frontend polls for result
         import threading as _t
@@ -3861,6 +3896,35 @@ CRITICAL RULES:
                 # flags must be a list (never null/missing — workbench reads data.flags || [])
                 if not isinstance(result.get("flags"), list):
                     result["flags"] = []
+
+                # ── Minimum-flag guarantee ──
+                # If the LLM processed real documents but returned zero flags, something went wrong.
+                # Inject a system note so the workbench is never blank and the user knows
+                # analysis ran. This is a safety net — the prompt changes above should prevent this.
+                if len(result["flags"]) == 0 and len(documents) > 0:
+                    docs_with_text = sum(1 for d in documents if (d.get("extracted_text") or "").strip())
+                    result["flags"] = [{
+                        "severity": "note",
+                        "title": "Analysis complete — no specific flags raised",
+                        "summation": (
+                            f"The LLM analysed {len(documents)} documents "
+                            f"({docs_with_text} with extracted text) and identified no specific risk flags. "
+                            "This may indicate a clean pack, or that text extraction was limited. "
+                            "Always have a solicitor review before bidding."
+                        ),
+                        "evidence":    "System generated — no clause evidence",
+                        "implication": "No automated flags does not guarantee a clean legal pack",
+                        "action":      "Commission independent solicitor review",
+                        "source_document": "System",
+                        "source_clause":   None,
+                        "source_page":     None,
+                        "legal_risk_weight": 1,
+                    }]
+                    app.logger.warning(
+                        f"[summarise] Zero flags returned for deal {_deal_id} "
+                        f"with {len(documents)} documents — injected system note"
+                    )
+
                 # ALWAYS recompute flag_counts from the actual flags array.
                 # The LLM sometimes returns mismatched counts vs the array contents,
                 # especially if the response was near the token limit.
@@ -3870,6 +3934,11 @@ CRITICAL RULES:
                     "missing":  sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "missing"),
                     "note":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "note"),
                 }
+
+                app.logger.info(
+                    f"[summarise] deal={_deal_id} score={result.get('deal_score')} "
+                    f"flags={len(result['flags'])} counts={result['flag_counts']}"
+                )
                 # deal_score must be a number
                 if result.get("deal_score") is None:
                     result["deal_score"] = 50  # safe fallback — signals analysis ran
@@ -4990,22 +5059,22 @@ def summarise_stream(deal_id: str):
                 # ── Single LLM call — extract + classify + score in one pass ──
                 yield ev("progress", msg="Reading clauses and identifying risks…", step=4, total=4)
 
-                COMBINED_SYSTEM = """You are a UK auction property legal analyst. Analyse the provided auction legal pack documents and return a complete JSON summary.
+                COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be aggressive and thorough — an investor's money is at stake.
 
-Return ONLY valid JSON. No prose, no markdown fences. Use exactly this structure:
+Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (flags MUST come first):
 {
   "flags": [
     {
       "severity": "critical|high|missing|note",
-      "title": "concise flag title — max 10 words",
+      "title": "specific risk title — max 10 words",
       "summation": "one sentence: what this means for the investor",
       "evidence": "verbatim quote from document — max 30 words",
       "implication": "financial or legal impact — max 20 words",
       "action": "what investor must do — max 15 words",
       "source_document": "document filename",
-      "source_clause": "clause reference or null",
+      "source_clause": "clause number or null",
       "source_page": null,
-      "legal_risk_weight": 5
+      "legal_risk_weight": 7
     }
   ],
   "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
@@ -5017,14 +5086,15 @@ Return ONLY valid JSON. No prose, no markdown fences. Use exactly this structure
   "documents_processed": 0
 }
 
-CRITICAL RULES:
-- flags array MUST come first in the JSON object
-- Generate ALL flags — do not truncate the array
-- Score: 80-100=clean, 60-79=manageable, 40-59=significant issues, 0-39=severe
-- Deduct: critical=-12, high=-6, missing=-4 from 100
-- Flag every non-standard clause, financial exposure, missing doc, covenant, title issue
-- Keep evidence quotes short (max 30 words) to fit all flags within token limit
-- Return only the JSON object, nothing else"""
+FLAG EXTRACTION RULES — YOU MUST FOLLOW ALL OF THEM:
+1. NEVER return an empty flags array. Every legal pack has risks. If a pack seems clean, flag what is MISSING.
+2. Flag EVERY one of these if present: restrictive covenants, chancel repair, mining/subsidence, flood risk, Japanese knotweed, Article 4 directions, HMO licensing, short lease (<85 years), ground rent escalation, service charge >£2500/yr, absent landlord, possessory title, missing searches, auction clauses (non-refundable deposit, 28-day completion, buyers premium), tenancy issues (sitting tenant, AST expiry, rent arrears), planning enforcement notices.
+3. Flag MISSING documents: if Special Conditions, Title Register, Local Search, Environmental Search, EPC are absent — each is a MISSING flag.
+4. Minimum flags: generate at least 1 flag per document that contains a clause. Aim for 10-20 flags total.
+5. Scoring: Start at 100. Deduct critical=-12, high=-6, missing=-4, note=-1.
+6. Keep evidence quotes SHORT (max 30 words) — critical for fitting all flags within token budget.
+7. The flags array MUST be complete before flag_counts. Do not close the JSON until all flags are written."""
+
 
                 _res = {}
                 def _run_analysis():
