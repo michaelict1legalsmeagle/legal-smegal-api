@@ -27,16 +27,32 @@ except Exception:
 try:
     from services.llm_openrouter import llm_json, _openrouter_chat, _extract_json, _normalize_messages  # type: ignore
 
-    def llm_json_raw(*, system=None, prompt=None, temperature=0.1):
-        """Like llm_json() but without the score/summary contract validation.
-        Returns the parsed JSON directly — used for our custom analysis prompts."""
+  def llm_json_raw(*, system=None, prompt=None, temperature=0.1):
+    """Like llm_json() but without the score/summary contract validation.
+    Returns the parsed JSON directly — used for our custom analysis prompts."""
+    try:
         msg_list = _normalize_messages(system=system, prompt=prompt, messages=None)
         content = _openrouter_chat(msg_list, temperature=float(temperature))
         parsed = _extract_json(content)
+
         if parsed is None:
-            raise ValueError(f"Model returned non-JSON: {content[:200]}")
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                return {
+                    "ok": False,
+                    "error": "invalid_json",
+                    "raw": content[:500]
+                }
+
         return parsed
 
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": "llm_failure",
+            "message": str(e)
+        }
 except Exception:
     # Do not crash the whole API if the optional LLM helper is missing/mispackaged.
     def llm_json(*args, **kwargs):  # type: ignore
