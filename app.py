@@ -3200,7 +3200,7 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     client = _get_anthropic_client()
     message = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=8192,
+        max_tokens=20000,
         temperature=float(temperature),
         system=system,
         messages=[{"role": "user", "content": prompt}],
@@ -3470,6 +3470,30 @@ def create_deal():
     except Exception as e:
         app.logger.exception("create_deal failed")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/profile", methods=["GET"])
+@require_auth
+def get_profile():
+    """Return the current user plan and usage for tier gating."""
+    if not supabase:
+        return jsonify({"plan": "free", "summaries_used": 0, "analyses_used": 0}), 200
+    try:
+        result = supabase.table("profiles") \
+            .select("plan, summaries_used, analyses_used, usage_reset_date") \
+            .eq("id", request.user_id) \
+            .single() \
+            .execute()
+        profile = result.data or {}
+        return jsonify({
+            "plan":             profile.get("plan", "free"),
+            "summaries_used":   profile.get("summaries_used", 0),
+            "analyses_used":    profile.get("analyses_used", 0),
+            "usage_reset_date": profile.get("usage_reset_date"),
+        }), 200
+    except Exception as e:
+        app.logger.warning(f"get_profile failed: {e}")
+        return jsonify({"plan": "free", "summaries_used": 0, "analyses_used": 0}), 200
 
 
 @app.route("/api/deals", methods=["GET"])
@@ -3745,10 +3769,12 @@ def get_usage():
         plan = p.get("plan", "starter")
 
         PLAN_LIMITS = {
-            "free":         {"summaries": 1,  "analyses": 0},
+            "free":         {"summaries": 0,  "analyses": 0},
+            "report":       {"summaries": 1,  "analyses": 0},
             "starter":      {"summaries": 3,  "analyses": 999},
             "professional": {"summaries": 10, "analyses": 999},
-            "enterprise":   {"summaries": 30, "analyses": 999},
+            "portfolio":    {"summaries": 999, "analyses": 999},
+            "enterprise":   {"summaries": 999, "analyses": 999},
         }
         limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["starter"])
 
