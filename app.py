@@ -2284,6 +2284,52 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
         )
 
         if not elements or (counts["stations"] + counts["tram_stops"] + counts["bus_stops"]) == 0:
+            # Try wider radius (2500m) before giving up — Birmingham/West Midlands OSM coverage can be sparse
+            wider_selectors = f"""
+nwr["railway"="station"](around:2500,{lat},{lng});
+nwr["railway"="tram_stop"](around:2500,{lat},{lng});
+nwr["public_transport"](around:2500,{lat},{lng});
+nwr["highway"="bus_stop"](around:2500,{lat},{lng});
+""".strip()
+            try:
+                wider_payload = overpass_query(lat, lng, wider_selectors)
+                wider_elements = wider_payload.get("elements", []) if isinstance(wider_payload, dict) else []
+                wider_counts: Dict[str, int] = {"stations": 0, "tram_stops": 0, "bus_stops": 0}
+                wider_named_bus: List[str] = []
+                wider_named_stations: List[str] = []
+                for we in wider_elements:
+                    wtags = (we or {}).get("tags") or {}
+                    if not isinstance(wtags, dict):
+                        continue
+                    wname = wtags.get("name")
+                    wnm = wname.strip() if isinstance(wname, str) and wname.strip() else ""
+                    if wtags.get("railway") == "station":
+                        wider_counts["stations"] += 1
+                        if wnm: wider_named_stations.append(wnm)
+                    is_wbus = (
+                        wtags.get("highway") == "bus_stop" or
+                        (wtags.get("public_transport") in ("stop_position", "platform") and
+                         wtags.get("railway") not in ("station", "tram_stop")) or
+                        wtags.get("highway") == "bus_stop"
+                    )
+                    if is_wbus:
+                        wider_counts["bus_stops"] += 1
+                        if wnm: wider_named_bus.append(wnm)
+                total_wider = wider_counts["stations"] + wider_counts["bus_stops"]
+                if total_wider > 0:
+                    wbullets = []
+                    wbullets.append(f"• Rail: {wider_counts['stations']} station(s) within ~2500m" + (f" (e.g., {', '.join(wider_named_stations[:3])})" if wider_named_stations else ""))
+                    wbullets.append(f"• Bus: {wider_counts['bus_stops']} stop(s) within ~2500m" + (f" (e.g., {', '.join(wider_named_bus[:5])})" if wider_named_bus else ""))
+                    wsummary = "Transport (OSM within ~2.5km):\n" + "\n".join(wbullets)
+                    wout = metric_ok(wsummary, wbullets, base_sources, retrieved, 0.75)
+                    wout["metrics"] = {
+                        "radiusMeters": 2500,
+                        "counts": wider_counts,
+                        "sample": {"stations": wider_named_stations[:3], "tram": [], "bus": wider_named_bus[:8]},
+                    }
+                    return wout
+            except Exception:
+                pass
             return metric_ok("No transport features returned from OSM for this area.", [], base_sources, retrieved, 0.0)
 
         summary = "Transport (OSM within ~1.2km):\n" + "\n".join(bullets)
