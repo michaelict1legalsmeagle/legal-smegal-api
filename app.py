@@ -3965,6 +3965,26 @@ Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (fl
   "viability_statement": "2-3 sentences: investor verdict",
   "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot", "type": "BTL/HMO/Commercial/etc", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
   "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": "working", "buyers_premium_pct": null, "vacant_possession": null},
+  "special_conditions": {
+    "buyers_premium_pct": null,
+    "buyers_premium_gbp": null,
+    "admin_fee_gbp": null,
+    "vat_elected": false,
+    "seller_legal_costs_gbp": null,
+    "search_fee_reimbursement": false,
+    "completion_days": null,
+    "deposit_pct": null,
+    "non_refundable_deposit": false,
+    "conditional_sale": false,
+    "overage_clause": false,
+    "addendum_present": false,
+    "addendum_date": null,
+    "addendum_notes": null,
+    "unusual_clauses": [],
+    "true_cost_additions_notes": null,
+    "special_conditions_present": false,
+    "special_conditions_missing": false
+  },
   "pack_completeness": {"completeness_pct": 0, "present_count": 0, "total": 13},
   "documents_processed": 0
 }
@@ -3984,7 +4004,19 @@ FEW-SHOT EXAMPLE — this is exactly what one flag object must look like:
 Another example (informational note):
 {"severity": "note", "title": "Freehold Title Verified", "summation": "Property held as absolute freehold with no charges registered.", "evidence": "Absolute freehold title confirmed in register entry A", "implication": "No ground rent or service charge obligations", "action": "Verify no covenants restrict intended use", "source_document": "title_register.pdf", "source_clause": "A: Property Register", "source_page": 1, "legal_risk_weight": 1}
 
-A blank flags array is a SYSTEM FAILURE. Minimum 3 flags required even for a clean pack."""
+A blank flags array is a SYSTEM FAILURE. Minimum 3 flags required even for a clean pack.
+
+SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
+1. buyers_premium_pct/gbp: extract any buyer's premium or administration fee stated in special conditions
+2. vat_elected: true if the property is elected for VAT (makes purchase price +20%)
+3. seller_legal_costs_gbp: any amount buyer must pay toward seller's legal costs
+4. completion_days: extract actual completion period (28 = standard, <28 = non-standard red flag)
+5. non_refundable_deposit: true if deposit described as non-refundable beyond exchange
+6. addendum_present: true if any addendum, amendment notice, or day-of-sale notice is in the pack
+7. addendum_date: date of addendum if present
+8. unusual_clauses: list any clauses that are non-standard or investor-unfavourable
+9. special_conditions_missing: true if no Special Conditions of Sale document is present in pack
+10. true_cost_additions_notes: plain English summary of all costs above hammer price"""
 
 
         # Run LLM in background thread — return immediately, frontend polls for result
@@ -4064,6 +4096,8 @@ A blank flags array is a SYSTEM FAILURE. Minimum 3 flags required even for a cle
                 # completion_terms must be a dict
                 if not isinstance(result.get("completion_terms"), dict):
                     result["completion_terms"] = {}
+                if not isinstance(result.get("special_conditions"), dict):
+                    result["special_conditions"] = {}
                 # pack_completeness must be a dict
                 if not isinstance(result.get("pack_completeness"), dict):
                     result["pack_completeness"] = {"completeness_pct": 0, "present_count": 0, "total": 13}
