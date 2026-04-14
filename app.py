@@ -4630,7 +4630,7 @@ def get_dashboard():
         result = supabase.table("deals") \
             .select("id, deal_name, title, address, postcode, status, deal_score, "
                     "guide_price, auction_date, deal_type, created_at, updated_at, "
-                    "summary_json, financials_json, analysis_json") \
+                    "summary_json, financials_json, analysis_json, area_json") \
             .eq("user_id", request.user_id) \
             .neq("status", "archived") \
             .order("created_at", desc=True) \
