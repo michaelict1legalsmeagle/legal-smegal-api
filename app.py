@@ -2239,7 +2239,18 @@ nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
                 if nm:
                     named_tram.append(nm)
 
-            if tags.get("highway") == "bus_stop":
+            # OSM bus stop tagging varies by region:
+            # highway=bus_stop (traditional), public_transport=stop_position or platform (modern schema)
+            # West Midlands / Birmingham primarily uses public_transport schema
+            is_bus = (
+                tags.get("highway") == "bus_stop" or
+                (tags.get("public_transport") in ("stop_position", "platform") and
+                 tags.get("bus") in ("yes", "designated")) or
+                (tags.get("public_transport") in ("stop_position", "platform") and
+                 tags.get("railway") not in ("station", "tram_stop")) or
+                tags.get("highway") == "bus_stop"
+            )
+            if is_bus:
                 counts["bus_stops"] += 1
                 if nm:
                     named_bus.append(nm)
