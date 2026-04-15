@@ -2207,10 +2207,9 @@ def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, 
     selectors = f"""
 nwr["railway"="station"](around:{radius},{lat},{lng});
 nwr["railway"="tram_stop"](around:{radius},{lat},{lng});
-nwr["public_transport"](around:{radius},{lat},{lng});
 nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
-nwr["bus"="yes"](around:{radius},{lat},{lng});
-nwr["route"="bus"](around:{radius},{lat},{lng});
+nwr["public_transport"="stop_position"](around:{radius},{lat},{lng});
+nwr["public_transport"="platform"](around:{radius},{lat},{lng});
 """.strip()
 
     try:
@@ -2586,6 +2585,38 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
         extra_metrics={"postcode": pc, "district": district},
     )
 
+
+
+
+def get_gp_data(postcode: str) -> Dict[str, Any]:
+    """NHS Service Search API — nearest GP practices to a postcode. Free, no key required."""
+    retrieved = now_iso()
+    sources = [{"label": "NHS Service Search", "url": "https://www.nhs.uk/service-search/"}]
+    pc = normalize_postcode(postcode)
+    if not pc:
+        return metric_unavailable("GP data not available: no postcode.", sources, retrieved)
+    try:
+        url = f"https://api.nhs.uk/service-search/search?api-version=2&search={pc.replace(' ', '+')}&filter=OrganisationTypeId eq 'GPS'&top=5&orderby=geo.distance(Geocode, geography%27POINT({0} {1})%27)"
+        # Use simpler endpoint that doesn't require coordinates
+        url = f"https://api.nhs.uk/service-search/search-postcodes-and-places?api-version=1&search={pc.replace(' ','%20')}"
+        status, payload = _http_get_json(url, timeout=10)
+        if status == 200 and isinstance(payload, dict):
+            results = payload.get("value") or payload.get("results") or []
+            if results:
+                gps = [r for r in results if (r.get("OrganisationTypeId") or "") == "GPS"][:5]
+                if gps:
+                    out = metric_ok(
+                        f"{len(gps)} GP practice(s) found near {pc}.",
+                        gps,
+                        sources,
+                        retrieved,
+                        0.8,
+                    )
+                    out["metrics"] = {"count": len(gps), "postcode": pc}
+                    return out
+    except Exception as e:
+        app.logger.warning(f"GP data fetch failed: {e}")
+    return metric_unavailable(f"GP data not available for {pc}.", sources, retrieved)
 
 def get_broadband_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
@@ -2966,6 +2997,7 @@ def market_insights():
             "amenities": get_amenities_data(lat, lng),
             "crime": get_crime_data(lat, lng),
             "broadband": get_broadband_data(postcode),
+            "gp": get_gp_data(postcode),
             "census": {
                 "ts003": get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, nomis_geo),
                 "ts044": get_nomis_table("Accommodation type (TS044)", NOMIS_TS044_DIM, NOMIS_TS044_CATS, nomis_geo),
@@ -4935,6 +4967,7 @@ def save_area(deal_id: str):
                 "amenities":    get_amenities_data(lat, lng),
                 "schools":      get_schools_data(_postcode),
                 "broadband":    get_broadband_data(_postcode),
+                "gp":           get_gp_data(_postcode),
                 "trends":       build_trends_from_uk_hpi(_postcode, area_code, 24),
                 "fetched_at":   now_iso(),
                 "fetch_status": "complete",
