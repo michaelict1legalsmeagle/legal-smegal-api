@@ -2209,6 +2209,8 @@ nwr["railway"="station"](around:{radius},{lat},{lng});
 nwr["railway"="tram_stop"](around:{radius},{lat},{lng});
 nwr["public_transport"](around:{radius},{lat},{lng});
 nwr["highway"="bus_stop"](around:{radius},{lat},{lng});
+nwr["bus"="yes"](around:{radius},{lat},{lng});
+nwr["route"="bus"](around:{radius},{lat},{lng});
 """.strip()
 
     try:
