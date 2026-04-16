@@ -1,451 +1,413 @@
 """
-ceiling_engine.py — LegalSmegal Bid Ceiling Engine v1
-======================================================
-Turns legal risk flags + financial targets + market data into a
-defendable bid ceiling RANGE for UK residential BTL/HMO auction property.
+ceiling_engine.py — LegalSmegal Bid Ceiling Engine v1.1
+========================================================
+Produces INVESTMENT VALUE ceiling range for UK residential BTL/HMO auction.
 
-IMPORTANT: This is decision-support tooling only.
-All outputs are analytical inferences — not financial advice.
+CRITICAL DISTINCTION
+--------------------
+Investment Value ≠ Market Value.
+
+Market Value (RICS): price achievable in an arm's length open-market transaction.
+Investment Value (RICS): value to a specific investor for their individual objectives.
+
+This engine answers: "What is the maximum price at which this property still meets
+my investment objectives, given the legal risks identified?"
+
+IMPORTANT: Decision-support tooling only. Not financial advice.
 LegalSmegal Technologies Ltd is not FCA-regulated.
-Always engage a qualified solicitor and independent financial adviser
-before bidding at auction.
 
 Architecture
 ------------
-Base Valuation  = strategy-appropriate market anchor
-Risk Discount   = Σ weighted flag impacts (calibrated, explainable)
-Ceiling Range   = Base × (1 − Total Discount) ± 5%
-Confidence      = function of discount magnitude + data quality
+BASE VALUATION ROUTING (explicit, strategy-driven — see decision table below):
+  BTL / BRRR / SA  → min(yield_ceiling, comps_value)
+  HMO conversion   → min(yield_ceiling, max(comps_value, residual_gdv))
+  Flip             → comps_value only (no yield anchor)
 
-v1: Deterministic and fully explainable.
-v2 hooks: LLM suggested_discount_pct, outcome feedback retraining.
+RISK DISCOUNT:
+  Each flag → base_discount × strategy_multiplier × high_impact_boost
+  Total capped at MAX_TOTAL_DISCOUNT (38%)
+
+CEILING RANGE:
+  gross_mid = base × (1 − total_discount)
+  gross_range = gross_mid ± 5%
+  net_range = gross_range − acquisition_costs (SDLT + premium + legal + bridging)
+
+CONFIDENCE:
+  f(discount_magnitude, data_quality, high_impact_flag_count)
+
+v2 hooks (marked in code):
+  - Calibration table → Supabase (update monthly from outcome data)
+  - LLM provides suggested_discount_pct per flag
+  - Outcome feedback: bid, hammer, actual_costs → retrain calibration
 """
 
 from __future__ import annotations
-import math
+import re as _re
 import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CALIBRATION TABLE
-# Edit these values as outcome data accumulates.
-# v2: move to DB table with admin UI for A/B testing.
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Base discount per severity (as fraction of base valuation, per flag)
-# Capped later so multiple critical flags don't produce absurd totals.
+# =============================================================================
+# CALIBRATION TABLE v1 — HEURISTIC STARTING VALUES
+# =============================================================================
+# These are NOT empirically calibrated. They are practitioner benchmarks.
+# DO NOT tune by intuition alone.
+#
+# v2 migration:
+#   CREATE TABLE ceiling_calibration(severity TEXT, base_discount FLOAT,
+#     updated_at TIMESTAMPTZ, outcome_count INT);
+#   Load at startup; update monthly from user outcome feedback.
+# =============================================================================
+
 DISCOUNT_CALIBRATION: dict[str, float] = {
-    "critical": 0.09,   # £9k on a £100k property per critical flag
+    "critical": 0.09,
     "high":     0.05,
     "missing":  0.04,
     "note":     0.015,
 }
 
-# Hard cap on total discount — prevents >40% reduction on any deal
 MAX_TOTAL_DISCOUNT = 0.38
+HIGH_IMPACT_CONFIDENCE_PENALTY = 0.04
+BAND_PCT = 0.05  # ±5% ceiling band
 
-# Missing document package penalty (applied when ≥ N missing doc flags)
-MISSING_DOC_PENALTY = {
-    0: 0.00,
-    1: 0.01,
+
+# =============================================================================
+# MISSING DOCUMENT PACKAGE PENALTY (escalating)
+# =============================================================================
+
+MISSING_DOC_PENALTY: dict[int, float] = {
+    0: 0.000,
+    1: 0.010,
     2: 0.025,
-    3: 0.04,   # 3+ missing docs: elevated pack quality concern
-    5: 0.06,
+    3: 0.040,
+    5: 0.060,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+# =============================================================================
 # STRATEGY MULTIPLIERS
-# Scale base discount per risk category depending on investment strategy.
-# BTL   → lettability, MEES, lease risk weighted up
-# HMO   → planning, licensing, covenants weighted up
-# Flip  → title defects, mortgageability weighted up
-# BRRR  → title + mortgageability (must refinance)
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# Scale base discount per risk category per strategy.
+# > 1.0 = this risk matters MORE for this strategy.
+# < 1.0 = matters less but never zero.
+#
+# BASE VALUATION ROUTING DECISION TABLE:
+#  Strategy | Formula                              | Rationale
+#  ---------|--------------------------------------|------------------------
+#  BTL      | min(yield_ceiling, comps)            | Never pay > rental maths
+#  BRRR     | min(yield_ceiling, comps)            | Must refinance = same
+#  SA       | min(yield_ceiling, comps)            | SA yields operator-dependent
+#  HMO      | min(yield, max(comps, residual_gdv)) | Conversion adds value
+#  Flip     | comps only                           | GDV-based, no yield anchor
+# =============================================================================
 
 STRATEGY_MULTIPLIERS: dict[str, dict[str, float]] = {
     "BTL": {
-        "lease":        1.40,   # short lease = mortgage restriction = lower tenant pool
-        "mees":         1.50,   # F/G EPC = cannot let legally
-        "title":        1.00,
-        "planning":     0.90,
-        "covenant":     1.10,
-        "financial":    1.20,   # service charge, ground rent escalation
-        "structural":   1.00,
-        "occupancy":    1.30,   # sitting tenant = immediate void/income risk
-        "default":      1.00,
+        "lease": 1.40, "mees": 1.50, "title": 1.00, "planning": 0.80,
+        "covenant": 1.10, "financial": 1.20, "structural": 1.00,
+        "occupancy": 1.30, "default": 1.00,
     },
     "HMO": {
-        "lease":        1.00,
-        "mees":         0.80,   # energy upgrade = capex cost, factored into refurb
-        "title":        1.00,
-        "planning":     1.80,   # Article 4, C4→SG permission critical for HMO
-        "covenant":     1.60,   # restrictive covenants can kill HMO use entirely
-        "financial":    1.10,
-        "structural":   1.20,   # more rooms = more structural exposure
-        "occupancy":    1.00,
-        "default":      1.00,
+        "lease": 0.90, "mees": 0.70, "title": 1.00, "planning": 1.80,
+        "covenant": 1.70, "financial": 1.00, "structural": 1.20,
+        "occupancy": 0.90, "default": 1.00,
     },
     "Flip": {
-        "lease":        0.80,   # flips often cash-buyer, lease less critical short-term
-        "mees":         0.50,   # upgrade cost = known capex, not ongoing risk
-        "title":        1.60,   # title defects = unmortgageable on resale
-        "planning":     1.30,
-        "covenant":     1.20,
-        "financial":    0.90,
-        "structural":   1.40,   # structural risk = refurb overrun
-        "occupancy":    0.70,
-        "default":      1.00,
+        "lease": 0.70, "mees": 0.50, "title": 1.70, "planning": 1.30,
+        "covenant": 1.10, "financial": 0.80, "structural": 1.50,
+        "occupancy": 0.60, "default": 1.00,
     },
     "BRRR": {
-        "lease":        1.20,
-        "mees":         0.70,
-        "title":        1.50,   # must refinance — title must be clean for lender
-        "planning":     1.30,
-        "covenant":     1.30,
-        "financial":    1.00,
-        "structural":   1.30,
-        "occupancy":    0.80,
-        "default":      1.00,
+        "lease": 1.20, "mees": 0.70, "title": 1.60, "planning": 1.20,
+        "covenant": 1.20, "financial": 1.00, "structural": 1.30,
+        "occupancy": 0.80, "default": 1.00,
     },
     "Serviced Accommodation": {
-        "lease":        1.20,
-        "mees":         0.80,
-        "title":        1.00,
-        "planning":     2.00,   # Change of use / short-let licensing critical
-        "covenant":     1.80,   # HOA/leasehold covenants may prohibit SA
-        "financial":    1.20,
-        "structural":   1.00,
-        "occupancy":    1.10,
-        "default":      1.00,
+        "lease": 1.20, "mees": 0.70, "title": 1.00, "planning": 2.00,
+        "covenant": 1.90, "financial": 1.10, "structural": 0.90,
+        "occupancy": 1.00, "default": 1.00,
     },
 }
 
-# Default strategy if unrecognised string passed
 DEFAULT_STRATEGY = "BTL"
 
-# ─────────────────────────────────────────────────────────────────────────────
+STRATEGY_ALIASES = {
+    "btl": "BTL", "hmo": "HMO", "flip": "Flip", "brrr": "BRRR",
+    "sa": "Serviced Accommodation", "serviced": "Serviced Accommodation",
+    "serviced accommodation": "Serviced Accommodation", "development": "HMO",
+}
+
+
+# =============================================================================
+# HIGH-IMPACT FLAGS
+# =============================================================================
+# Deal-terminating or unusually high-magnitude conditions that warrant
+# additional discount beyond the standard calibration table.
+# (keywords, extra_discount, label, strategies_affected_or_None)
+# =============================================================================
+
+HIGH_IMPACT_FLAGS: list[tuple[list[str], float, str, Optional[list[str]]]] = [
+    (["short lease", r"lease.{0,20}less than 80", r"lease.{0,20}under 80",
+      r"lease.{0,10}7\d year", r"lease.{0,10}6\d year", "enfranchisement"],
+     0.08, "short_lease", None),
+    (["regulated tenancy", "security of tenure", "rent act", "protected tenant",
+      "sitting tenant", "long residential occupier"],
+     0.07, "security_of_tenure", None),
+    (["possessory title", "possessory freehold", "possessory leasehold"],
+     0.07, "possessory_title", None),
+    (["article 4", "article 4 direction", r"sui.{0,5}generis", "full planning.*hmo"],
+     0.10, "article4_hmo", ["HMO"]),
+    ([r"covenant.{0,30}occupation", r"covenant.{0,30}multiple", "no hmo",
+      "single dwelling", "houses in multiple"],
+     0.10, "covenant_blocks_hmo", ["HMO", "Serviced Accommodation"]),
+    (["flood zone 3", "high flood risk"],
+     0.05, "flood_zone_3", None),
+    (["chancel repair", "chancel liability"],
+     0.03, "chancel_repair", None),
+    (["japanese knotweed", "knotweed", "invasive plant"],
+     0.06, "knotweed", None),
+    ([r"mortgage charge.{0,30}(bank|lloyds|natwest|hsbc|barclays|nationwide|halifax)",
+      "registered charge.*not discharged", "undischarged charge"],
+     0.04, "undischarged_charge", None),
+    (["possessory", "unregistered title", "title not registered"],
+     0.05, "unregistered_title", None),
+]
+
+
+def _detect_high_impact(flag: dict, strategy: str) -> tuple[float, list[str]]:
+    """Return (extra_discount, matched_labels) for high-impact patterns."""
+    text = " ".join(filter(None, [
+        flag.get("title", ""),
+        flag.get("summation", ""),
+        flag.get("implication", ""),
+        flag.get("action", ""),
+    ])).lower()
+
+    extra = 0.0
+    labels = []
+    for keywords, discount, label, strategies in HIGH_IMPACT_FLAGS:
+        if strategies and strategy not in strategies:
+            continue
+        for kw in keywords:
+            try:
+                if _re.search(kw, text):
+                    extra += discount
+                    labels.append(label)
+                    break
+            except _re.error:
+                if kw in text:
+                    extra += discount
+                    labels.append(label)
+                    break
+    return round(extra, 4), labels
+
+
+# =============================================================================
 # RISK CATEGORY MAPPING
-# Maps flag titles/keywords → risk category for strategy weighting.
-# v2: LLM classifier should return risk_category directly in flag dict.
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
-    "lease": [
-        "lease", "leasehold", "ground rent", "service charge", "lessee",
-        "lessor", "enfranchisement", "extension", "forfeiture", "commonhold",
-    ],
-    "mees": [
-        "epc", "energy performance", "mees", "minimum energy", "band f",
-        "band g", "rating f", "rating g", "energy efficiency",
-    ],
-    "title": [
-        "title", "possessory", "absolute title", "charges register",
-        "mortgage charge", "registered charge", "restriction", "caution",
-        "inhibition", "title guarantee", "limited title",
-    ],
-    "planning": [
-        "planning", "permission", "consent", "building regulation",
-        "article 4", "hmo licence", "change of use", "enforcement notice",
-        "permitted development", "c4", "sui generis", "class e",
-    ],
-    "covenant": [
-        "covenant", "restriction on use", "restrictive", "positive covenant",
-        "freehold covenant", "deed of covenant",
-    ],
-    "financial": [
-        "buyer's premium", "buyers premium", "administration fee",
-        "vat", "non-refundable", "deposit", "service charge arrears",
-        "ground rent arrears", "section 20",
-    ],
-    "structural": [
-        "structural", "subsidence", "japanese knotweed", "knotweed",
-        "drainage", "damp", "asbestos", "roof", "foundation",
-        "mining", "chancel", "coal mining", "ground stability",
-    ],
-    "occupancy": [
-        "sitting tenant", "occupier", "vacant possession", "tenancy",
-        "ast", "assured shorthold", "regulated tenancy", "squatter",
-        "unlawful occupant",
-    ],
+    "lease":     ["lease", "leasehold", "ground rent", "service charge", "lessee",
+                  "enfranchisement", "extension", "forfeiture"],
+    "mees":      ["epc", "energy performance", "mees", "minimum energy",
+                  "band f", "band g", "rating f", "rating g"],
+    "title":     ["title", "possessory", "charges register", "mortgage charge",
+                  "registered charge", "restriction", "title guarantee", "unregistered"],
+    "planning":  ["planning", "permission", "consent", "building regulation",
+                  "article 4", "hmo licence", "change of use", "enforcement",
+                  "permitted development", "sui generis"],
+    "covenant":  ["covenant", "restriction on use", "restrictive",
+                  "positive covenant", "no hmo", "single dwelling"],
+    "financial": ["buyer's premium", "buyers premium", "administration fee",
+                  "vat", "non-refundable", "deposit", "service charge arrears",
+                  "ground rent arrears", "section 20"],
+    "structural": ["structural", "subsidence", "knotweed", "drainage", "damp",
+                   "asbestos", "mining", "chancel", "flood", "foundation"],
+    "occupancy": ["sitting tenant", "occupier", "vacant possession", "tenancy",
+                  "regulated tenancy", "squatter", "security of tenure"],
 }
 
 
 def _classify_flag(flag: dict) -> str:
-    """
-    Determine risk category for a flag using keyword matching.
-    Falls back to 'default' if no match found.
-    v2: replace with flag.get('risk_category') from LLM classifier.
-    """
-    # v2 hook: if LLM provides risk_category, use it directly
+    """Classify flag into risk category. v2: use LLM-provided risk_category."""
     if flag.get("risk_category"):
-        return flag["risk_category"].lower()
-
-    text = " ".join([
-        (flag.get("title") or ""),
-        (flag.get("summation") or ""),
-        (flag.get("implication") or ""),
-    ]).lower()
-
-    for category, keywords in CATEGORY_KEYWORDS.items():
+        return str(flag["risk_category"]).lower()
+    text = " ".join(filter(None, [
+        flag.get("title", ""), flag.get("summation", ""), flag.get("implication", "")
+    ])).lower()
+    for cat, keywords in CATEGORY_KEYWORDS.items():
         if any(kw in text for kw in keywords):
-            return category
-
+            return cat
     return "default"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TYPICAL RESOLUTION COSTS
-# Used to generate downside scenario strings.
-# Based on UK practitioner benchmarks (2024/25 data).
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# RESOLUTION COSTS — downside scenario generation
+# (min_cost, max_cost, description) — UK 2024/25 benchmarks
+# =============================================================================
 
 RESOLUTION_COSTS: dict[str, tuple[int, int, str]] = {
-    # (min_cost, max_cost, description)
-    "lease":     (15_000, 45_000, "lease extension"),
-    "mees":      (3_000,  18_000, "EPC upgrade works"),
-    "title":     (500,    5_000,  "title indemnity insurance"),
-    "planning":  (2_000,  15_000, "planning regularisation / indemnity"),
-    "covenant":  (1_000,  8_000,  "covenant indemnity insurance"),
-    "financial": (2_000,  25_000, "arrears / premium settlement"),
-    "structural": (5_000, 40_000, "structural remediation"),
-    "occupancy": (3_000,  15_000, "vacant possession / legal proceedings"),
+    "lease":      (15_000, 45_000, "lease extension"),
+    "mees":       (3_000,  18_000, "EPC upgrade works"),
+    "title":      (500,    8_000,  "title indemnity insurance"),
+    "planning":   (2_000,  20_000, "planning regularisation / indemnity"),
+    "covenant":   (1_000,  10_000, "covenant indemnity insurance"),
+    "financial":  (2_000,  30_000, "arrears / premium / VAT settlement"),
+    "structural": (5_000,  50_000, "structural remediation"),
+    "occupancy":  (3_000,  20_000, "vacant possession / legal proceedings"),
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ACQUISITION COSTS (BTL/HMO residential, England & Wales)
-# These are DEDUCTED from the ceiling — they are guaranteed spend before
-# the investor owns the property.
-# ─────────────────────────────────────────────────────────────────────────────
 
-SDLT_ADDITIONAL_DWELLING_BANDS = [
-    # (threshold, rate) — additional dwelling surcharge (2025/26)
-    (250_000, 0.05),
-    (925_000, 0.10),
-    (1_500_000, 0.12),
-    (float("inf"), 0.14),
-]
-SDLT_ADDITIONAL_DWELLING_BASE = 0.05  # 5% on all up to £250k for additional dwellings
+# =============================================================================
+# ACQUISITION COSTS — deducted from ceiling (certain costs, not risks)
+# =============================================================================
 
-BUYERS_PREMIUM_DEFAULT = 2_340   # Bond Wolfe standard (£1,950+VAT)
-LEGAL_FEES_DEFAULT      = 2_000  # conveyancing fees estimate
-BRIDGING_ESTIMATE       = 2_500  # 1 month bridging at ~2% on £150k
+BUYERS_PREMIUM_DEFAULT = 2_340
+LEGAL_FEES_DEFAULT      = 2_000
+BRIDGING_ESTIMATE       = 2_500
 
 
-def _calculate_sdlt(price: float) -> int:
-    """
-    Calculate SDLT for additional dwelling purchase (England).
-    Flat 5% applies to the whole purchase price up to £250k
-    for additional dwellings since 2024 Budget changes.
-    """
-    if price <= 0:
-        return 0
-    if price <= 250_000:
-        return round(price * 0.05)
-    elif price <= 925_000:
-        return round(250_000 * 0.05 + (price - 250_000) * 0.10)
-    elif price <= 1_500_000:
+def _sdlt(price: float) -> int:
+    """SDLT additional dwelling, England, post-Oct 2024 Budget."""
+    if price <= 0:       return 0
+    if price <= 250_000: return round(price * 0.05)
+    if price <= 925_000: return round(250_000 * 0.05 + (price - 250_000) * 0.10)
+    if price <= 1_500_000:
         return round(250_000 * 0.05 + 675_000 * 0.10 + (price - 925_000) * 0.12)
-    else:
-        return round(250_000 * 0.05 + 675_000 * 0.10 + 575_000 * 0.12 + (price - 1_500_000) * 0.14)
+    return round(250_000 * 0.05 + 675_000 * 0.10 + 575_000 * 0.12
+                 + (price - 1_500_000) * 0.14)
 
 
-def _calculate_acquisition_costs(ceiling_mid: float, financial_inputs: dict) -> dict:
-    """
-    Calculate total acquisition costs at the estimated ceiling midpoint.
-    Returns breakdown dict and total.
-    """
-    buyers_premium = financial_inputs.get("buyers_premium", BUYERS_PREMIUM_DEFAULT)
-    legal_fees     = financial_inputs.get("legal_fees", LEGAL_FEES_DEFAULT)
-    bridging       = financial_inputs.get("bridging_estimate", BRIDGING_ESTIMATE)
-    sdlt           = _calculate_sdlt(ceiling_mid)
-
-    total = buyers_premium + legal_fees + bridging + sdlt
-
-    return {
-        "sdlt":           sdlt,
-        "buyers_premium": buyers_premium,
-        "legal_fees":     legal_fees,
-        "bridging":       bridging,
-        "total":          total,
-    }
+def _acq_costs(mid: float, fins: dict) -> dict:
+    bp   = int(float(fins.get("buyers_premium", BUYERS_PREMIUM_DEFAULT)))
+    lf   = int(float(fins.get("legal_fees",     LEGAL_FEES_DEFAULT)))
+    br   = int(float(fins.get("bridging_estimate", BRIDGING_ESTIMATE)))
+    sdlt = _sdlt(mid)
+    return {"sdlt": sdlt, "buyers_premium": bp, "legal_fees": lf,
+            "bridging": br, "total": sdlt + bp + lf + br}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BASE VALUATION CALCULATION
-# Strategy-appropriate — avoids the max() error in the original spec.
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# BASE VALUATION — strategy-explicit routing
+# =============================================================================
 
-def _calculate_yield_ceiling(financial_inputs: dict, strategy: str) -> Optional[float]:
-    """
-    Reverse-engineer maximum price from target yield and estimated rent.
-    Formula: Annual Rent / Target Gross Yield = Max Price
-    """
-    monthly_rent = (
-        financial_inputs.get("monthly_rent")
-        or financial_inputs.get("estimated_monthly_rent")
-    )
-    target_yield = (
-        financial_inputs.get("target_gross_yield")
-        or financial_inputs.get("target_yield")
-    )
-
-    # Strategy-specific yield defaults if not provided
-    if not target_yield:
-        yield_defaults = {
-            "BTL": 0.07,
-            "HMO": 0.09,
-            "Flip": None,      # Flip doesn't use yield ceiling
-            "BRRR": 0.075,
-            "Serviced Accommodation": 0.10,
-        }
-        target_yield = yield_defaults.get(strategy, 0.07)
-
-    if not monthly_rent or not target_yield or target_yield <= 0:
+def _yield_ceiling(fins: dict, strategy: str) -> Optional[float]:
+    rent = fins.get("monthly_rent") or fins.get("estimated_monthly_rent")
+    yld  = fins.get("target_gross_yield") or fins.get("target_yield")
+    if not yld:
+        yld = {"BTL": 0.07, "HMO": 0.09, "BRRR": 0.075,
+               "Serviced Accommodation": 0.10, "Flip": None}.get(strategy)
+    if not rent or not yld or float(yld) <= 0:
         return None
-
-    annual_rent = float(monthly_rent) * 12
-    return round(annual_rent / float(target_yield))
+    return round(float(rent) * 12 / float(yld))
 
 
-def _calculate_base_valuation(
-    financial_inputs: dict,
-    strategy: str,
-    base_valuation_override: Optional[float] = None,
-) -> tuple[float, str]:
+def _base_valuation(fins: dict, strategy: str,
+                    override: Optional[float]) -> tuple[float, str]:
     """
-    Determine strategy-appropriate base valuation.
-    Returns (value, method_used).
-
-    For BTL/BRRR:  min(yield_ceiling, comps_value) — never pay more than either
-    For HMO:       min(yield_ceiling, max(comps_value, residual_gdv))
-    For Flip:      comps_value (GDV thinking — no yield anchor)
-    If only one source: use that source with lower confidence.
+    Strategy routing (matches decision table in module docstring):
+      Flip        → comps only
+      HMO         → min(yield, max(comps, residual))
+      BTL/BRRR/SA → min(yield, comps)
+    Returns (value, method_label).
     """
-    if base_valuation_override and base_valuation_override > 5_000:
-        return (float(base_valuation_override), "provided")
+    if override and float(override) > 5_000:
+        return (float(override), "external_valuation")
 
-    comps_value = financial_inputs.get("comps_avg_value") or financial_inputs.get("avg_sold_price")
-    yield_ceil  = _calculate_yield_ceiling(financial_inputs, strategy)
-    residual    = financial_inputs.get("residual_gdv")
+    comps    = fins.get("comps_avg_value") or fins.get("avg_sold_price")
+    comps    = float(comps) if comps and float(comps) > 5_000 else None
+    yc       = _yield_ceiling(fins, strategy)
+    residual = fins.get("residual_gdv")
+    residual = float(residual) if residual and float(residual) > 5_000 else None
 
-    comps_value = float(comps_value) if comps_value and float(comps_value) > 5_000 else None
-    residual    = float(residual)    if residual    and float(residual)    > 5_000 else None
+    if strategy == "Flip":
+        if comps:   return (comps, "comps")
+        if yc:      return (yc,    "yield_fallback")
+        return (0.0, "none")
 
-    if strategy in ("Flip",):
-        # Flip: use comps (GDV) as anchor
-        if comps_value:
-            return (comps_value, "comps")
-        if yield_ceil:
-            return (yield_ceil, "yield")
+    if strategy == "HMO":
+        if yc and comps and residual:
+            return (min(yc, max(comps, residual)), "min(yield,max(comps,residual))")
+        if yc and comps:    return (min(yc, comps),    "min(yield,comps)")
+        if yc and residual: return (min(yc, residual), "min(yield,residual)")
+        if yc:   return (yc,    "yield")
+        if comps: return (comps, "comps")
+        return (0.0, "none")
 
-    elif strategy in ("HMO", "Serviced Accommodation"):
-        candidates = [c for c in [yield_ceil, comps_value] if c]
-        if residual:
-            candidates.append(residual)
-        if candidates:
-            # Use minimum of yield and comps; include residual as uplift potential
-            base = min(c for c in [yield_ceil, comps_value] if c) if (yield_ceil and comps_value) \
-                   else (yield_ceil or comps_value)
-            method = "yield+comps+residual" if (yield_ceil and comps_value and residual) \
-                     else "yield+comps" if (yield_ceil and comps_value) \
-                     else "yield" if yield_ceil else "comps"
-            return (base, method)
-
-    else:
-        # BTL, BRRR: min(yield, comps) — never overpay on either dimension
-        if yield_ceil and comps_value:
-            base = min(yield_ceil, comps_value)
-            return (base, "min(yield,comps)")
-        if yield_ceil:
-            return (yield_ceil, "yield")
-        if comps_value:
-            return (comps_value, "comps")
-
-    # No data — cannot produce ceiling
+    # BTL / BRRR / SA
+    if yc and comps: return (min(yc, comps), "min(yield,comps)")
+    if yc:           return (yc,    "yield")
+    if comps:        return (comps,  "comps")
     return (0.0, "none")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DOWNSIDE SCENARIOS
-# Deterministic — based on flag categories present.
-# Never LLM-generated for production reliability.
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# DOWNSIDE SCENARIOS — deterministic
+# =============================================================================
 
-def _generate_downside_scenarios(
-    flags: list[dict],
-    base_valuation: float,
-    flag_categories: list[str],
-) -> list[str]:
-    """
-    Generate 2–3 realistic what-if downside scenarios based on flags present.
-    Uses RESOLUTION_COSTS table for cost estimates.
-    Scenarios are conservative but realistic — not worst-case theatrical.
-    """
-    scenarios = []
-    seen_categories: set[str] = set()
-
-    for cat in flag_categories:
-        if cat in seen_categories or cat not in RESOLUTION_COSTS:
-            continue
-        seen_categories.add(cat)
-
-        lo, hi, label = RESOLUTION_COSTS[cat]
-        impact_lo = round(lo / base_valuation * 100, 1) if base_valuation else 0
-        impact_hi = round(hi / base_valuation * 100, 1) if base_valuation else 0
-
-        if cat == "lease":
-            scenarios.append(
-                f"If lease extension costs £{lo:,}–£{hi:,} → effective ceiling "
-                f"drops ~{impact_lo}–{impact_hi}% before bidding"
-            )
-        elif cat == "mees":
-            scenarios.append(
-                f"If EPC upgrade to Band E/D costs £{lo:,}–£{hi:,} → "
-                f"add to acquisition budget before bidding"
-            )
-        elif cat == "title":
-            scenarios.append(
-                f"Title indemnity insurance typically £{lo:,}–£{hi:,} — "
-                f"confirm lender will accept before bidding"
-            )
-        elif cat == "planning":
-            scenarios.append(
-                f"If planning regularisation costs £{lo:,}–£{hi:,} → "
-                f"reduces net return by ~{impact_lo}–{impact_hi}%"
-            )
-        elif cat == "structural":
-            scenarios.append(
-                f"Structural remediation range £{lo:,}–£{hi:,} — "
-                f"commission survey before bidding, not after"
-            )
-        elif cat == "occupancy":
-            scenarios.append(
-                f"Vacant possession proceedings £{lo:,}–£{hi:,} + potential "
-                f"6–12 month delay to first rental income"
-            )
-        else:
-            scenarios.append(
-                f"{label.title()} costs estimated £{lo:,}–£{hi:,} — "
-                f"verify and deduct from ceiling before bidding"
-            )
-
-        if len(scenarios) >= 3:
-            break
-
-    if not scenarios:
-        scenarios.append(
-            "No specific resolution costs identified — standard auction risk "
-            "(28-day completion, non-refundable deposit) applies"
-        )
-
-    return scenarios
+PRIORITY_SCENARIO_MAP: dict[str, tuple[str, str]] = {
+    "short_lease":        ("lease",      "Lease extension"),
+    "security_of_tenure": ("occupancy",  "Vacant possession proceedings"),
+    "possessory_title":   ("title",      "Title indemnity / re-registration"),
+    "article4_hmo":       ("planning",   "Full planning application for HMO"),
+    "covenant_blocks_hmo":("covenant",   "Covenant modification / insurance"),
+    "knotweed":           ("structural", "Japanese knotweed remediation"),
+    "flood_zone_3":       ("structural", "Flood insurance uplift"),
+}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+def _scenarios(cats: list[str], hi_labels: list[str], base: float) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for lbl in hi_labels:
+        if len(out) >= 3: break
+        if lbl not in PRIORITY_SCENARIO_MAP: continue
+        cat, desc = PRIORITY_SCENARIO_MAP[lbl]
+        if cat in seen or cat not in RESOLUTION_COSTS: continue
+        seen.add(cat)
+        lo, hi, _ = RESOLUTION_COSTS[cat]
+        pct_lo = round(lo / base * 100, 1) if base else 0
+        pct_hi = round(hi / base * 100, 1) if base else 0
+        out.append(f"{desc}: £{lo:,}–£{hi:,} (~{pct_lo}–{pct_hi}% of base) "
+                   f"— deduct and verify before bidding")
+
+    for cat in cats:
+        if len(out) >= 3: break
+        if cat in seen or cat not in RESOLUTION_COSTS: continue
+        seen.add(cat)
+        lo, hi, lbl = RESOLUTION_COSTS[cat]
+        pct = round(lo / base * 100, 1) if base else 0
+        out.append(f"If {lbl} costs £{lo:,}–£{hi:,} "
+                   f"→ ceiling reduces ~{pct}%+ before bidding")
+
+    if not out:
+        out.append("Standard auction risks apply: 28-day completion, "
+                   "non-refundable deposit.")
+    return out
+
+
+# =============================================================================
+# INVESTMENT VALUE NOTE
+# =============================================================================
+
+def _iv_note(strategy: str, fins: dict) -> str:
+    yld  = fins.get("target_gross_yield") or fins.get("target_yield")
+    rent = fins.get("monthly_rent") or fins.get("estimated_monthly_rent")
+    yld_s  = f"{float(yld)*100:.1f}%" if yld else "your target"
+    rent_s = f"£{int(float(rent)):,}/mo" if rent else "estimated rent"
+    return (
+        f"Investment value for {strategy} at {yld_s} gross yield / {rent_s}. "
+        f"Not market value. A different investor may bid higher or lower. "
+        f"Decision-support only — not financial advice."
+    )
+
+
+# =============================================================================
 # MAIN FUNCTION
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def calculate_ceiling(
     legal_flags: list[dict],
@@ -454,174 +416,127 @@ def calculate_ceiling(
     strategy: str = "BTL",
 ) -> dict:
     """
-    Calculate a bid ceiling range for a UK residential auction property.
+    Calculate bid ceiling range (INVESTMENT VALUE) for UK residential
+    BTL/HMO auction property.
 
-    Parameters
-    ----------
-    legal_flags : list[dict]
-        Flags from Stage 2 LLM classifier. Each flag must have:
-        - severity: "critical" | "high" | "missing" | "note"
-        - title: str
-        Optional: risk_category (v2), suggested_discount_pct (v2)
-    financial_inputs : dict
-        Financial model inputs. Keys used:
-        - monthly_rent / estimated_monthly_rent
-        - target_gross_yield / target_yield
-        - comps_avg_value / avg_sold_price
-        - residual_gdv (HMO/dev only)
-        - buyers_premium (default 2340)
-        - legal_fees (default 2000)
-        - bridging_estimate (default 2500)
-    base_valuation : float, optional
-        If provided, overrides internal base calculation.
-        Use for when a RICS valuation or AVM figure is available.
-    strategy : str
-        "BTL" | "HMO" | "Flip" | "BRRR" | "Serviced Accommodation"
-
-    Returns
-    -------
-    dict with keys: ceiling_range, confidence, base_valuation,
-                    risk_discount_pct, drivers, downside_scenarios,
-                    strategy_used, acquisition_costs
+    See module docstring for full architecture and output contract.
     """
-
-    # ── Safety: normalise inputs ──────────────────────────────────────────
-    if not isinstance(legal_flags, list):
-        legal_flags = []
-    if not isinstance(financial_inputs, dict):
-        financial_inputs = {}
-    strategy = strategy.strip() if strategy else DEFAULT_STRATEGY
+    # Normalise
+    legal_flags      = legal_flags if isinstance(legal_flags, list) else []
+    financial_inputs = financial_inputs if isinstance(financial_inputs, dict) else {}
+    strategy = STRATEGY_ALIASES.get((strategy or DEFAULT_STRATEGY).lower().strip(),
+                                     strategy or DEFAULT_STRATEGY)
     if strategy not in STRATEGY_MULTIPLIERS:
-        logger.warning(f"[ceiling] Unknown strategy '{strategy}', defaulting to BTL")
+        logger.warning(f"[ceiling] Unknown strategy '{strategy}' → BTL")
         strategy = DEFAULT_STRATEGY
+    mults = STRATEGY_MULTIPLIERS[strategy]
 
-    multipliers = STRATEGY_MULTIPLIERS[strategy]
+    # Step 1 — base
+    base, base_method = _base_valuation(financial_inputs, strategy, base_valuation)
 
-    # ── Step 1: Base valuation ─────────────────────────────────────────────
-    base, base_method = _calculate_base_valuation(financial_inputs, strategy, base_valuation)
-
+    no_data = {
+        "ceiling_range": {"low": None, "high": None},
+        "gross_ceiling_range": {"low": None, "high": None},
+        "confidence": 0.0, "base_valuation": None, "base_method": "none",
+        "risk_discount_pct": None, "missing_doc_penalty_pct": None,
+        "drivers": [], "high_impact_flags": [],
+        "downside_scenarios": [
+            "Insufficient data — provide estimated monthly rent or comparable "
+            "sales value to calculate ceiling"
+        ],
+        "strategy_used": strategy, "acquisition_costs": None,
+        "investment_value_note": _iv_note(strategy, financial_inputs),
+        "error": "no_base_valuation",
+    }
     if base <= 0:
-        # Cannot produce a ceiling without any valuation anchor
-        return {
-            "ceiling_range":      {"low": None, "high": None},
-            "confidence":         0.0,
-            "base_valuation":     None,
-            "base_method":        "none",
-            "risk_discount_pct":  None,
-            "drivers":            [],
-            "downside_scenarios": ["Insufficient data to calculate ceiling — provide estimated rent or comparable sales value"],
-            "strategy_used":      strategy,
-            "acquisition_costs":  None,
-            "error":              "no_base_valuation",
-        }
+        return no_data
 
-    # ── Step 2: Flag impact calculation ───────────────────────────────────
+    # Step 2 — per-flag discounts
     drivers: list[dict] = []
-    flag_categories: list[str] = []
-    total_discount = 0.0
-    missing_doc_count = 0
+    flag_cats: list[str] = []
+    hi_labels_all: list[str] = []
+    total_disc = 0.0
+    missing_count = 0
 
     for flag in legal_flags:
-        severity = (flag.get("severity") or "note").lower().strip()
-        if severity not in DISCOUNT_CALIBRATION:
-            severity = "note"
+        sev = (flag.get("severity") or "note").lower().strip()
+        if sev not in DISCOUNT_CALIBRATION:
+            sev = "note"
 
-        category = _classify_flag(flag)
-        flag_categories.append(category)
+        cat  = _classify_flag(flag)
+        flag_cats.append(cat)
 
-        # v2 hook: allow LLM to suggest a specific discount fraction
-        # suggested = flag.get("suggested_discount_pct")
-        # base_impact = (suggested / 100) if suggested else DISCOUNT_CALIBRATION[severity]
+        base_d = DISCOUNT_CALIBRATION[sev]
+        # v2: base_d = flag.get("suggested_discount_pct", base_d*100) / 100
+        strat_m = mults.get(cat, mults.get("default", 1.0))
+        eff     = round(base_d * strat_m, 4)
 
-        base_impact = DISCOUNT_CALIBRATION[severity]
-        strategy_mult = multipliers.get(category, multipliers.get("default", 1.0))
-        effective_impact = round(base_impact * strategy_mult, 4)
+        hi_extra, hi_lbls = _detect_high_impact(flag, strategy)
+        eff += hi_extra
+        hi_labels_all.extend(hi_lbls)
 
-        if severity == "missing":
-            missing_doc_count += 1
+        if sev == "missing":
+            missing_count += 1
 
+        total_disc += eff
         drivers.append({
-            "flag":         flag.get("title", "Unspecified flag"),
-            "severity":     severity,
-            "category":     category,
-            "impact_pct":   round(effective_impact * 100, 2),
+            "flag":             flag.get("title", "Unspecified flag"),
+            "severity":         sev,
+            "category":         cat,
+            "impact_pct":       round(eff * 100, 2),
+            "high_impact":      bool(hi_lbls),
+            "high_impact_labels": hi_lbls,
         })
-        total_discount += effective_impact
 
-    # Missing document package penalty (escalating)
-    missing_penalty = 0.0
-    for threshold in sorted(MISSING_DOC_PENALTY.keys(), reverse=True):
-        if missing_doc_count >= threshold:
-            missing_penalty = MISSING_DOC_PENALTY[threshold]
+    # Missing doc penalty
+    miss_pen = 0.0
+    for threshold in sorted(MISSING_DOC_PENALTY, reverse=True):
+        if missing_count >= threshold:
+            miss_pen = MISSING_DOC_PENALTY[threshold]
             break
-    total_discount += missing_penalty
+    total_disc += miss_pen
+    total_disc  = min(total_disc, MAX_TOTAL_DISCOUNT)
 
-    # Hard cap — no deal should be discounted into absurdity
-    total_discount = min(total_discount, MAX_TOTAL_DISCOUNT)
+    # Step 3 — range
+    gross_mid  = base * (1.0 - total_disc)
+    gross_low  = round(gross_mid * (1 - BAND_PCT) / 1_000) * 1_000
+    gross_high = round(gross_mid * (1 + BAND_PCT) / 1_000) * 1_000
 
-    # ── Step 3: Ceiling range ─────────────────────────────────────────────
-    ceiling_mid  = base * (1.0 - total_discount)
-    band_pct     = 0.05   # ±5% band
-    ceiling_low  = round(ceiling_mid * (1.0 - band_pct) / 1000) * 1000
-    ceiling_high = round(ceiling_mid * (1.0 + band_pct) / 1000) * 1000
+    # Step 4 — acquisition costs
+    acq      = _acq_costs(gross_mid, financial_inputs)
+    net_low  = max(0, gross_low  - acq["total"])
+    net_high = max(0, gross_high - acq["total"])
 
-    # ── Step 4: Confidence score ──────────────────────────────────────────
-    # Higher discount = higher uncertainty = lower confidence
-    # Base confidence 0.65, rises as risk decreases
-    data_quality_penalty = 0.0
-    if base_method == "none":
-        data_quality_penalty = 0.30
-    elif base_method in ("yield", "comps"):
-        data_quality_penalty = 0.08   # single anchor = less certain
-    elif base_method == "provided":
-        data_quality_penalty = 0.02   # external valuation = higher confidence
+    # Step 5 — confidence
+    hi_count = len(set(hi_labels_all))
+    data_pen = {"none": 0.30, "yield": 0.08, "comps": 0.08,
+                "yield_fallback": 0.15, "external_valuation": 0.02}.get(base_method, 0.05)
+    conf = round(max(0.20, min(0.95,
+        0.65 + (1.0 - min(total_disc, 0.40)) * 0.35
+        - data_pen - hi_count * HIGH_IMPACT_CONFIDENCE_PENALTY
+    )), 2)
 
-    raw_confidence = (
-        0.65
-        + (1.0 - min(total_discount, 0.40)) * 0.35
-        - data_quality_penalty
-    )
-    confidence = round(max(0.20, min(0.95, raw_confidence)), 2)
+    # Step 6 — scenarios
+    seen_c: set[str] = set()
+    uniq_cats   = [c for c in flag_cats if not (c in seen_c or seen_c.add(c))]
+    uniq_hi     = list(dict.fromkeys(hi_labels_all))
+    scenarios   = _scenarios(uniq_cats, uniq_hi, base)
 
-    # ── Step 5: Acquisition costs ─────────────────────────────────────────
-    acq_costs = _calculate_acquisition_costs(ceiling_mid, financial_inputs)
-
-    # Subtract from ceiling range — investor's true max bid is ceiling minus costs
-    net_low  = max(0, ceiling_low  - acq_costs["total"])
-    net_high = max(0, ceiling_high - acq_costs["total"])
-
-    # ── Step 6: Downside scenarios ────────────────────────────────────────
-    # Use unique categories (preserve order, first occurrence)
-    seen: set[str] = set()
-    unique_cats = [c for c in flag_categories if not (c in seen or seen.add(c))]
-    downside_scenarios = _generate_downside_scenarios(
-        legal_flags, base, unique_cats
-    )
-
-    # ── Sort drivers by impact ────────────────────────────────────────────
     drivers.sort(key=lambda d: d["impact_pct"], reverse=True)
 
-    # ── Build output ──────────────────────────────────────────────────────
     return {
-        # Primary output — always a range, never a single number
-        "ceiling_range": {
-            "low":  int(net_low),
-            "high": int(net_high),
-        },
-        # Gross ceiling before acquisition costs (for display/debug)
-        "gross_ceiling_range": {
-            "low":  int(ceiling_low),
-            "high": int(ceiling_high),
-        },
-        "confidence":         confidence,
-        "base_valuation":     int(base),
-        "base_method":        base_method,
-        "risk_discount_pct":  round(total_discount * 100, 1),
-        "missing_doc_penalty_pct": round(missing_penalty * 100, 1),
-        "drivers":            drivers,
-        "downside_scenarios": downside_scenarios,
-        "strategy_used":      strategy,
-        "acquisition_costs":  acq_costs,
-        # v2 hook: outcome feedback for calibration retraining
-        # "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
+        "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
+        "gross_ceiling_range":     {"low": int(gross_low), "high": int(gross_high)},
+        "confidence":              conf,
+        "base_valuation":          int(base),
+        "base_method":             base_method,
+        "risk_discount_pct":       round(total_disc * 100, 1),
+        "missing_doc_penalty_pct": round(miss_pen * 100, 1),
+        "drivers":                 drivers,
+        "high_impact_flags":       uniq_hi,
+        "downside_scenarios":      scenarios,
+        "strategy_used":           strategy,
+        "acquisition_costs":       acq,
+        "investment_value_note":   _iv_note(strategy, financial_inputs),
+        # v2: "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
     }
