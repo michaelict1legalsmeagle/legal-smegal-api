@@ -20,7 +20,14 @@ except ImportError:
     pdfplumber = None
 
 # --- Solicitor Q&A (bounded clarification) ---
-from services.ceiling_engine import calculate_ceiling as _calc_ceiling
+try:
+    from services.ceiling_engine import calculate_ceiling as _calc_ceiling
+    _ceiling_engine_available = True
+except ImportError:
+    _calc_ceiling = None
+    _ceiling_engine_available = False
+    import logging as _log
+    _log.getLogger(__name__).warning("[ceiling] ceiling_engine not available — ceiling skipped")
 try:
     from services.solicitor_qa_engine import clarify_flag  # type: ignore
 except Exception:
@@ -4223,9 +4230,9 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                 }
 
                 # ── CEILING ENGINE ────────────────────────────────────────────────────
-                # Inject after Stage 2 classification — flags and deal data are fully
-                # populated at this point.
-                try:
+                # Only runs if ceiling_engine.py is available in services/
+                if _ceiling_engine_available and _calc_ceiling:
+                 try:
                     _deal_row = supabase.table("deals").select(
                         "financials_json,area_json,guide_price,deal_type"
                     ).eq("id", _deal_id).single().execute()
@@ -4271,7 +4278,7 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                         f"range={result['ceiling'].get('ceiling_range')} "
                         f"confidence={result['ceiling'].get('confidence')}"
                     )
-                except Exception as _ce:
+                 except Exception as _ce:
                     app.logger.warning(f"[ceiling] Ceiling calculation failed for {_deal_id}: {_ce}")
                     result["ceiling"] = None
                 # ─────────────────────────────────────────────────────────────────────
