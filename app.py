@@ -2618,6 +2618,68 @@ def get_gp_data(postcode: str) -> Dict[str, Any]:
         app.logger.warning(f"GP data fetch failed: {e}")
     return metric_unavailable(f"GP data not available for {pc}.", sources, retrieved)
 
+
+def get_flood_risk(lat: Optional[float], lng: Optional[float], postcode: str = "") -> Dict[str, Any]:
+    """
+    Environment Agency Flood Map for Planning API — free, no key required.
+    Returns flood risk zone (1=low, 2=medium, 3=high) for given coordinates.
+    Zone 1: <0.1% annual probability. Zone 2: 0.1-1%. Zone 3: >1%.
+    """
+    retrieved = now_iso()
+    sources = [{"label": "Environment Agency Flood Map", "url": "https://environment.data.gov.uk/flood-monitoring/"}]
+
+    if lat is None or lng is None:
+        return metric_unavailable("Flood risk data not available: coordinates not resolved.", sources, retrieved)
+
+    try:
+        # EA Flood Zone endpoint — returns flood zone polygons containing the point
+        url = f"https://environment.data.gov.uk/flood-monitoring/id/floodAreas?lat={lat}&long={lng}&dist=0.5"
+        status, payload = _http_get_json(url, timeout=10)
+
+        if status == 200 and isinstance(payload, dict):
+            items = payload.get("items") or []
+            if isinstance(items, list) and len(items) > 0:
+                # Find highest risk zone
+                zones = []
+                for item in items:
+                    label = str(item.get("label","") or item.get("notation","") or "")
+                    if "3" in label or "high" in label.lower():
+                        zones.append(3)
+                    elif "2" in label or "medium" in label.lower():
+                        zones.append(2)
+                    elif "1" in label or "low" in label.lower():
+                        zones.append(1)
+                max_zone = max(zones) if zones else 1
+                zone_desc = {
+                    1: "Zone 1 — annual flood probability below 0.1%. Minimal insurance impact.",
+                    2: "Zone 2 — annual flood probability 0.1%–1%. Standard flood insurance recommended.",
+                    3: "Zone 3 — annual flood probability above 1%. Significant insurance cost implications. May affect mortgage availability."
+                }.get(max_zone, "Zone 1")
+                out = metric_ok(
+                    zone_desc,
+                    [{"zone": max_zone, "areas": len(items)}],
+                    sources, retrieved, 0.9
+                )
+                out["metrics"] = {"zone": max_zone, "flood_areas": len(items)}
+                return out
+            else:
+                # No flood areas — Zone 1 (minimal risk)
+                out = metric_ok(
+                    "Zone 1 — no flood risk areas recorded at this location. Annual probability below 0.1%.",
+                    [{"zone": 1, "areas": 0}],
+                    sources, retrieved, 0.85
+                )
+                out["metrics"] = {"zone": 1, "flood_areas": 0}
+                return out
+    except Exception as e:
+        app.logger.warning(f"Flood risk fetch failed for {lat},{lng}: {e}")
+
+    return metric_unavailable(
+        f"Flood risk data temporarily unavailable. Verify via Environment Agency Flood Map before bidding.",
+        sources, retrieved
+    )
+
+
 def get_broadband_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
@@ -2998,6 +3060,7 @@ def market_insights():
             "crime": get_crime_data(lat, lng),
             "broadband": get_broadband_data(postcode),
             "gp": get_gp_data(postcode),
+            "flood": get_flood_risk(lat, lng, postcode),
             "census": {
                 "ts003": get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, nomis_geo),
                 "ts044": get_nomis_table("Accommodation type (TS044)", NOMIS_TS044_DIM, NOMIS_TS044_CATS, nomis_geo),
@@ -4968,6 +5031,7 @@ def save_area(deal_id: str):
                 "schools":      get_schools_data(_postcode),
                 "broadband":    get_broadband_data(_postcode),
                 "gp":           get_gp_data(_postcode),
+                "flood":        get_flood_risk(lat, lng, _postcode),
                 "trends":       build_trends_from_uk_hpi(_postcode, area_code, 24),
                 "fetched_at":   now_iso(),
                 "fetch_status": "complete",
