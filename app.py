@@ -20,6 +20,7 @@ except ImportError:
     pdfplumber = None
 
 # --- Solicitor Q&A (bounded clarification) ---
+from services.ceiling_engine import calculate_ceiling as _calc_ceiling
 try:
     from services.solicitor_qa_engine import clarify_flag  # type: ignore
 except Exception:
@@ -4221,6 +4222,60 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                     "note":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower() == "note"),
                 }
 
+                # ── CEILING ENGINE ────────────────────────────────────────────────────
+                # Inject after Stage 2 classification — flags and deal data are fully
+                # populated at this point.
+                try:
+                    _deal_row = supabase.table("deals").select(
+                        "financials_json,area_json,guide_price,deal_type"
+                    ).eq("id", _deal_id).single().execute()
+                    _deal_data = _deal_row.data or {}
+
+                    _fins = (_deal_data.get("financials_json") or {})
+                    _fins_inputs = _fins.get("inputs") or _fins or {}
+
+                    # Inject comps avg from area_json if available
+                    _area = _deal_data.get("area_json") or {}
+                    _housing = _area.get("housing") or {}
+                    _comps = _housing.get("soldComps") or _housing.get("value") or []
+                    _comp_prices = [c.get("price") for c in _comps if c.get("price")]
+                    if _comp_prices and not _fins_inputs.get("comps_avg_value"):
+                        _fins_inputs["comps_avg_value"] = round(
+                            sum(_comp_prices) / len(_comp_prices)
+                        )
+
+                    _strategy = (
+                        _fins_inputs.get("strategy")
+                        or _deal_data.get("deal_type")
+                        or result.get("property", {}).get("type")
+                        or "BTL"
+                    )
+                    # Normalise strategy string
+                    _strategy_map = {
+                        "hmo": "HMO", "btl": "BTL", "flip": "Flip",
+                        "brrr": "BRRR", "sa": "Serviced Accommodation",
+                        "serviced": "Serviced Accommodation",
+                    }
+                    _strategy = _strategy_map.get(
+                        str(_strategy).lower(), str(_strategy)
+                    )
+
+                    result["ceiling"] = _calc_ceiling(
+                        legal_flags=result["flags"],
+                        financial_inputs=_fins_inputs,
+                        base_valuation=None,
+                        strategy=_strategy,
+                    )
+                    app.logger.info(
+                        f"[ceiling] deal={_deal_id} strategy={_strategy} "
+                        f"range={result['ceiling'].get('ceiling_range')} "
+                        f"confidence={result['ceiling'].get('confidence')}"
+                    )
+                except Exception as _ce:
+                    app.logger.warning(f"[ceiling] Ceiling calculation failed for {_deal_id}: {_ce}")
+                    result["ceiling"] = None
+                # ─────────────────────────────────────────────────────────────────────
+
                 app.logger.info(
                     f"[summarise] deal={_deal_id} score={result.get('deal_score')} "
                     f"flags={len(result['flags'])} counts={result['flag_counts']}"
@@ -4933,6 +4988,88 @@ def get_dashboard():
 
 
 # ── AREA INTELLIGENCE ─────────────────────────────────────────
+
+
+
+# ── CEILING ENGINE — live endpoint for Flag Workbench ────────────────────────
+@app.route("/api/ceiling", methods=["POST", "OPTIONS"])
+@require_auth
+def ceiling_endpoint():
+    """
+    POST /api/ceiling
+    Accept legal flags + financial inputs, return a bid ceiling range.
+    Used by the Flag Workbench for live ceiling recalculation as flags
+    are resolved.
+
+    Body (JSON):
+      {
+        "legal_flags":       [...],       # array of flag dicts
+        "financial_inputs":  {...},       # rent, yield, comps etc
+        "base_valuation":    165000,      # optional RICS/AVM figure
+        "strategy":          "BTL",       # BTL | HMO | Flip | BRRR | SA
+        "deal_id":           "uuid"       # optional — to pull fins from DB
+      }
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    try:
+        body = request.get_json(silent=True) or {}
+
+        legal_flags      = body.get("legal_flags", [])
+        financial_inputs = body.get("financial_inputs", {})
+        base_val         = body.get("base_valuation")
+        strategy         = body.get("strategy", "BTL")
+        deal_id          = body.get("deal_id")
+
+        # If deal_id provided, enrich financial_inputs from DB
+        if deal_id and supabase:
+            try:
+                row = supabase.table("deals").select(
+                    "financials_json,area_json,deal_type,guide_price"
+                ).eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+
+                if row.data:
+                    d = row.data
+                    fins = (d.get("financials_json") or {})
+                    fins_inp = fins.get("inputs") or fins or {}
+
+                    # Merge DB inputs — body overrides DB
+                    merged = {**fins_inp, **financial_inputs}
+
+                    # Pull comps avg from area_json
+                    area = d.get("area_json") or {}
+                    housing = area.get("housing") or {}
+                    comps = housing.get("soldComps") or housing.get("value") or []
+                    comp_prices = [c.get("price") for c in comps if c.get("price")]
+                    if comp_prices and not merged.get("comps_avg_value"):
+                        merged["comps_avg_value"] = round(
+                            sum(comp_prices) / len(comp_prices)
+                        )
+
+                    financial_inputs = merged
+
+                    if not strategy or strategy == "BTL":
+                        strategy = d.get("deal_type") or strategy or "BTL"
+
+            except Exception as _de:
+                app.logger.warning(f"[ceiling] DB enrich failed for {deal_id}: {_de}")
+
+        if not isinstance(legal_flags, list):
+            return jsonify({"error": "legal_flags must be an array"}), 400
+
+        result = calculate_ceiling(
+            legal_flags=legal_flags,
+            financial_inputs=financial_inputs,
+            base_valuation=float(base_val) if base_val else None,
+            strategy=str(strategy),
+        )
+
+        return jsonify({"ok": True, "ceiling": result}), 200
+
+    except Exception as e:
+        app.logger.exception("[ceiling] /api/ceiling failed")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/deals/<deal_id>/area", methods=["GET"])
 @require_auth
