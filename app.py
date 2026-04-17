@@ -5071,7 +5071,10 @@ def ceiling_endpoint():
         if not isinstance(legal_flags, list):
             return jsonify({"error": "legal_flags must be an array"}), 400
 
-        result = calculate_ceiling(
+        if not _ceiling_engine_available or not _calc_ceiling:
+            return jsonify({"error": "ceiling_engine not available on this deployment"}), 503
+
+        result = _calc_ceiling(
             legal_flags=legal_flags,
             financial_inputs=financial_inputs,
             base_valuation=float(base_val) if base_val else None,
