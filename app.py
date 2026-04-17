@@ -3321,10 +3321,16 @@ def get_user_id_from_request() -> Optional[str]:
 
 
 def require_auth(f):
-    """Decorator — returns 401 if no valid JWT."""
+    """Decorator — returns 401 if no valid JWT.
+    OPTIONS preflight requests are always passed through so flask-cors
+    can attach the correct Access-Control-* headers without an auth gate."""
     from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
+        # CORS preflight — never carries an Authorization header by spec.
+        # Let flask-cors handle it; do NOT auth-gate it.
+        if request.method == "OPTIONS":
+            return f(*args, **kwargs)
         user_id = get_user_id_from_request()
         if not user_id:
             return jsonify({"error": "Unauthorised — valid JWT required"}), 401
