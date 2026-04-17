@@ -483,12 +483,42 @@ def calculate_ceiling(
     if base <= 0:
         return no_data
 
-    # Step 2 — per-flag discounts
+    # ─────────────────────────────────────────────────────────────────────────
+    # LOCKED FORMULA IMPLEMENTATION
+    # Market Value  = base (comps-anchored, adjusted)              [Formula 1]
+    # Total Risk%   = Legal + Condition + Liquidity + Finance      [Formula 2]
+    # Investment IV = Market Value × (1 − Total Risk%)             [Formula 2]
+    # Spread        = BaseSpread + RiskUncertaintyFactor           [Formula 3]
+    # Lower         = IV × (1 − Spread)                           [Formula 3]
+    # Upper         = IV × (1 + Spread)                           [Formula 3]
+    # Midpoint      = (Lower + Upper) / 2                         [Formula 4]
+    # Money Saved   = Market Value − Midpoint                     [Formula 5]
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Formula 1: Market Value (already derived above as `base`) ────────────
+    market_value = base  # comps-anchored, adjusted per _base_valuation routing
+
+    # ── Formula 2: Total Risk% = Legal + Condition + Liquidity + Finance ─────
+    # Map engine risk categories to the four formula components:
+    #   Legal      → title, covenant, planning, lease, occupancy
+    #   Condition  → structural, mees
+    #   Liquidity  → occupancy, missing docs
+    #   Finance    → financial
+    LEGAL_CATS      = {"title", "covenant", "planning", "lease"}
+    CONDITION_CATS  = {"structural", "mees"}
+    LIQUIDITY_CATS  = {"occupancy"}
+    FINANCE_CATS    = {"financial"}
+
     drivers: list[dict] = []
     flag_cats: list[str] = []
     hi_labels_all: list[str] = []
-    total_disc = 0.0
     missing_count = 0
+
+    # Accumulate by formula component
+    legal_disc     = 0.0
+    condition_disc = 0.0
+    liquidity_disc = 0.0
+    finance_disc   = 0.0
 
     for flag in legal_flags:
         sev = (flag.get("severity") or "note").lower().strip()
@@ -498,8 +528,7 @@ def calculate_ceiling(
         cat  = _classify_flag(flag)
         flag_cats.append(cat)
 
-        base_d = DISCOUNT_CALIBRATION[sev]
-        # v2: base_d = flag.get("suggested_discount_pct", base_d*100) / 100
+        base_d  = DISCOUNT_CALIBRATION[sev]
         strat_m = mults.get(cat, mults.get("default", 1.0))
         eff     = round(base_d * strat_m, 4)
 
@@ -510,37 +539,70 @@ def calculate_ceiling(
         if sev == "missing":
             missing_count += 1
 
-        total_disc += eff
+        # Route to formula component
+        if cat in LEGAL_CATS:
+            legal_disc += eff
+        elif cat in CONDITION_CATS:
+            condition_disc += eff
+        elif cat in LIQUIDITY_CATS:
+            liquidity_disc += eff
+        elif cat in FINANCE_CATS:
+            finance_disc += eff
+        else:
+            legal_disc += eff  # default → legal bucket
+
         drivers.append({
-            "flag":             flag.get("title", "Unspecified flag"),
-            "severity":         sev,
-            "category":         cat,
-            "impact_pct":       round(eff * 100, 2),
-            "high_impact":      bool(hi_lbls),
+            "flag":               flag.get("title", "Unspecified flag"),
+            "severity":           sev,
+            "category":           cat,
+            "impact_pct":         round(eff * 100, 2),
+            "high_impact":        bool(hi_lbls),
             "high_impact_labels": hi_lbls,
         })
 
-    # Missing doc penalty
+    # Missing doc penalty → liquidity component
     miss_pen = 0.0
     for threshold in sorted(MISSING_DOC_PENALTY, reverse=True):
         if missing_count >= threshold:
             miss_pen = MISSING_DOC_PENALTY[threshold]
             break
-    total_disc += miss_pen
-    total_disc  = min(total_disc, MAX_TOTAL_DISCOUNT)
+    liquidity_disc += miss_pen
 
-    # Step 3 — range
-    gross_mid  = base * (1.0 - total_disc)
-    gross_low  = round(gross_mid * (1 - BAND_PCT) / 1_000) * 1_000
-    gross_high = round(gross_mid * (1 + BAND_PCT) / 1_000) * 1_000
+    # Total Risk% — raw (for transparency) and capped
+    total_risk_raw = legal_disc + condition_disc + liquidity_disc + finance_disc
+    total_disc     = min(total_risk_raw, MAX_TOTAL_DISCOUNT)
 
-    # Step 4 — acquisition costs
+    # ── Formula 2: Investment Value = Market Value × (1 − Total Risk%) ───────
+    investment_value = market_value * (1.0 - total_disc)
+
+    # ── Formula 3: Spread = BaseSpread + RiskUncertaintyFactor ───────────────
+    # BaseSpread: irreducible floor (auction day uncertainty)
+    # RiskUncertaintyFactor: grows with unresolved flag count and discount magnitude
+    BASE_SPREAD = 0.03  # 3% floor — irreducible auction day uncertainty
+    hi_count    = len(set(hi_labels_all))
+    # RiskUncertaintyFactor: scaled by discount magnitude and high-impact flags
+    risk_uncertainty_factor = round(
+        min(0.12, total_disc * 0.20 + hi_count * 0.01), 4
+    )
+    spread = BASE_SPREAD + risk_uncertainty_factor
+
+    # Lower = IV × (1 − Spread),  Upper = IV × (1 + Spread)
+    gross_low  = round(investment_value * (1 - spread) / 1_000) * 1_000
+    gross_high = round(investment_value * (1 + spread) / 1_000) * 1_000
+
+    # ── Formula 4: Midpoint = (Lower + Upper) / 2 ────────────────────────────
+    gross_mid = (gross_low + gross_high) / 2
+
+    # Acquisition costs deducted from net range
     acq      = _acq_costs(gross_mid, financial_inputs)
     net_low  = max(0, gross_low  - acq["total"])
     net_high = max(0, gross_high - acq["total"])
+    midpoint = (net_low + net_high) / 2
 
-    # Step 5 — confidence
-    hi_count = len(set(hi_labels_all))
+    # ── Formula 5: Money Saved = Market Value − Midpoint ─────────────────────
+    money_saved = max(0, int(market_value) - int(midpoint))
+
+    # Confidence
     data_pen = {"none": 0.30, "yield": 0.08, "comps": 0.08,
                 "yield_fallback": 0.15, "external_valuation": 0.02}.get(base_method, 0.05)
     conf = round(max(0.20, min(0.95,
@@ -548,19 +610,37 @@ def calculate_ceiling(
         - data_pen - hi_count * HIGH_IMPACT_CONFIDENCE_PENALTY
     )), 2)
 
-    # Step 6 — scenarios
+    # Scenarios
     seen_c: set[str] = set()
     uniq_cats   = [c for c in flag_cats if not (c in seen_c or seen_c.add(c))]
     uniq_hi     = list(dict.fromkeys(hi_labels_all))
-    scenarios   = _scenarios(uniq_cats, uniq_hi, base)
+    scenarios   = _scenarios(uniq_cats, uniq_hi, market_value)
 
     drivers.sort(key=lambda d: d["impact_pct"], reverse=True)
 
     return {
+        # Primary output
         "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
         "gross_ceiling_range":     {"low": int(gross_low), "high": int(gross_high)},
+        "midpoint":                int(midpoint),
+        "money_saved":             money_saved,
+        # Formula components (for transparency)
+        "market_value":            int(market_value),
+        "investment_value":        int(investment_value),
+        "spread_pct":              round(spread * 100, 1),
+        "base_spread_pct":         round(BASE_SPREAD * 100, 1),
+        "risk_uncertainty_pct":    round(risk_uncertainty_factor * 100, 1),
+        "total_risk_pct":          round(total_disc * 100, 1),
+        "raw_total_risk_pct":      round(total_risk_raw * 100, 1),
+        "risk_components": {
+            "legal":     round(legal_disc * 100, 1),
+            "condition": round(condition_disc * 100, 1),
+            "liquidity": round(liquidity_disc + miss_pen * 100, 1),
+            "finance":   round(finance_disc * 100, 1),
+        },
+        # Existing fields preserved
         "confidence":              conf,
-        "base_valuation":          int(base),
+        "base_valuation":          int(market_value),
         "base_method":             base_method,
         "risk_discount_pct":       round(total_disc * 100, 1),
         "missing_doc_penalty_pct": round(miss_pen * 100, 1),
@@ -570,5 +650,4 @@ def calculate_ceiling(
         "strategy_used":           strategy,
         "acquisition_costs":       acq,
         "investment_value_note":   _iv_note(strategy, financial_inputs),
-        # v2: "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
     }
