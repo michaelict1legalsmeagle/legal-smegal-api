@@ -18,9 +18,9 @@ LegalSmegal Technologies Ltd is not FCA-regulated.
 
 Architecture
 ------------
-BASE VALUATION ROUTING (explicit, strategy-driven — see decision table below):
-  BTL / BRRR / SA  → min(yield_ceiling, comps_value)
-  HMO conversion   → min(yield_ceiling, max(comps_value, residual_gdv))
+BASE VALUATION ROUTING (comps primary — see decision table below):
+  BTL / BRRR / SA  → comps_value primary; yield is cross-check only, not a cap
+  HMO conversion   → max(comps_value, residual_gdv); yield cross-check only
   Flip             → comps_value only (no yield anchor)
 
 RISK DISCOUNT:
@@ -96,10 +96,10 @@ MISSING_DOC_PENALTY: dict[int, float] = {
 # BASE VALUATION ROUTING DECISION TABLE:
 #  Strategy | Formula                              | Rationale
 #  ---------|--------------------------------------|------------------------
-#  BTL      | min(yield_ceiling, comps)            | Never pay > rental maths
-#  BRRR     | min(yield_ceiling, comps)            | Must refinance = same
-#  SA       | min(yield_ceiling, comps)            | SA yields operator-dependent
-#  HMO      | min(yield, max(comps, residual_gdv)) | Conversion adds value
+#  BTL      | comps primary, yield cross-check     | Comps = Land Registry reality
+#  BRRR     | comps primary, yield cross-check     | Must refinance = comps matter
+#  SA       | comps primary, yield cross-check     | SA yields operator-dependent
+#  HMO      | max(comps, residual), yield check    | Conversion adds value
 #  Flip     | comps only                           | GDV-based, no yield anchor
 # =============================================================================
 
@@ -307,10 +307,21 @@ def _yield_ceiling(fins: dict, strategy: str) -> Optional[float]:
 def _base_valuation(fins: dict, strategy: str,
                     override: Optional[float]) -> tuple[float, str]:
     """
-    Strategy routing (matches decision table in module docstring):
-      Flip        → comps only
-      HMO         → min(yield, max(comps, residual))
-      BTL/BRRR/SA → min(yield, comps)
+    Strategy routing — COMPS PRIMARY (updated per product brief):
+
+    Comps (Land Registry sold prices) are the non-negotiable primary anchor.
+    Yield ceiling is a cross-check only — it warns if the rental maths don't
+    support the comps value, but it does NOT cap or replace comps.
+
+    Routing:
+      External override → override value (user knows the area)
+      Flip              → comps only (no yield anchor)
+      HMO               → comps primary, residual as uplift check
+      BTL / BRRR / SA   → comps primary, yield as secondary cross-check only
+
+    Yield ceiling below comps does NOT reduce the base. It is surfaced as a
+    warning in the confidence score and investment_value_note instead.
+
     Returns (value, method_label).
     """
     if override and float(override) > 5_000:
@@ -323,23 +334,24 @@ def _base_valuation(fins: dict, strategy: str,
     residual = float(residual) if residual and float(residual) > 5_000 else None
 
     if strategy == "Flip":
-        if comps:   return (comps, "comps")
-        if yc:      return (yc,    "yield_fallback")
+        # Flip: always comps-led, yield meaningless
+        if comps: return (comps, "comps")
+        if yc:    return (yc,    "yield_fallback")
         return (0.0, "none")
 
     if strategy == "HMO":
-        if yc and comps and residual:
-            return (min(yc, max(comps, residual)), "min(yield,max(comps,residual))")
-        if yc and comps:    return (min(yc, comps),    "min(yield,comps)")
-        if yc and residual: return (min(yc, residual), "min(yield,residual)")
-        if yc:   return (yc,    "yield")
-        if comps: return (comps, "comps")
+        # HMO: comps or residual (whichever higher), yield as cross-check
+        if comps and residual: return (max(comps, residual), "comps_or_residual")
+        if comps:              return (comps, "comps")
+        if residual:           return (residual, "residual")
+        if yc:                 return (yc, "yield_fallback")
         return (0.0, "none")
 
-    # BTL / BRRR / SA
-    if yc and comps: return (min(yc, comps), "min(yield,comps)")
-    if yc:           return (yc,    "yield")
-    if comps:        return (comps,  "comps")
+    # BTL / BRRR / SA — COMPS PRIMARY
+    # If comps available, use them. Yield ceiling is a cross-check surfaced
+    # in confidence/notes only — it does NOT reduce the base valuation.
+    if comps: return (comps, "comps")
+    if yc:    return (yc,    "yield")       # fallback when no comps
     return (0.0, "none")
 
 
@@ -398,11 +410,31 @@ def _iv_note(strategy: str, fins: dict) -> str:
     rent = fins.get("monthly_rent") or fins.get("estimated_monthly_rent")
     yld_s  = f"{float(yld)*100:.1f}%" if yld else "your target"
     rent_s = f"£{int(float(rent)):,}/mo" if rent else "estimated rent"
-    return (
+
+    note = (
         f"Investment value for {strategy} at {yld_s} gross yield / {rent_s}. "
-        f"Not market value. A different investor may bid higher or lower. "
-        f"Decision-support only — not financial advice."
+        f"Base anchored to Land Registry comparable sales. "
+        f"Not market value — decision-support only, not financial advice."
     )
+
+    # Cross-check warning: if yield ceiling is materially below comps,
+    # flag it as a yield warning rather than silently capping the base.
+    comps = fins.get("comps_avg_value") or fins.get("avg_sold_price")
+    if comps and rent and yld:
+        try:
+            yc = float(rent) * 12 / float(yld)
+            comps_f = float(comps)
+            if yc < comps_f * 0.75:
+                gap_pct = round((1 - yc / comps_f) * 100)
+                note += (
+                    f" ⚠ Yield cross-check: at {yld_s} gross, rental maths support "
+                    f"~£{int(yc):,} — {gap_pct}% below comps. "
+                    f"Verify rent assumptions or adjust yield target."
+                )
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+    return note
 
 
 # =============================================================================
