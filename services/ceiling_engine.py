@@ -25,7 +25,7 @@ BASE VALUATION ROUTING (comps primary — see decision table below):
 
 RISK DISCOUNT:
   Each flag → base_discount × strategy_multiplier × high_impact_boost
-  Total capped at MAX_TOTAL_DISCOUNT (38%)
+  Total capped at 38% (standard) or 45% (15+ flags — heavy pack)
 
 CEILING RANGE:
   gross_mid = base × (1 − total_discount)
@@ -68,7 +68,8 @@ DISCOUNT_CALIBRATION: dict[str, float] = {
     "note":     0.015,
 }
 
-MAX_TOTAL_DISCOUNT = 0.38
+MAX_TOTAL_DISCOUNT      = 0.38  # standard cap
+MAX_TOTAL_DISCOUNT_HEAVY = 0.45  # heavy pack cap (15+ unresolved flags)
 HIGH_IMPACT_CONFIDENCE_PENALTY = 0.04
 BAND_PCT = 0.05  # ±5% ceiling band
 
@@ -570,7 +571,10 @@ def calculate_ceiling(
 
     # Total Risk% — raw (for transparency) and capped
     total_risk_raw = legal_disc + condition_disc + liquidity_disc + finance_disc
-    total_disc     = min(total_risk_raw, MAX_TOTAL_DISCOUNT)
+    # Dynamic cap — heavy packs (15+ flags) get 45% ceiling, standard 38%
+    flag_count = len(legal_flags)
+    active_cap = MAX_TOTAL_DISCOUNT_HEAVY if flag_count >= 15 else MAX_TOTAL_DISCOUNT
+    total_disc = min(total_risk_raw, active_cap)
 
     # ── Formula 2: Investment Value = Market Value × (1 − Total Risk%) ───────
     investment_value = market_value * (1.0 - total_disc)
@@ -632,6 +636,8 @@ def calculate_ceiling(
         "risk_uncertainty_pct":    round(risk_uncertainty_factor * 100, 1),
         "total_risk_pct":          round(total_disc * 100, 1),
         "raw_total_risk_pct":      round(total_risk_raw * 100, 1),
+        "cap_active":              total_risk_raw > active_cap,
+        "active_cap_pct":          round(active_cap * 100, 1),
         "risk_components": {
             "legal":     round(legal_disc * 100, 1),
             "condition": round(condition_disc * 100, 1),
