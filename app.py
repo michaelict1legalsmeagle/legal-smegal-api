@@ -5062,7 +5062,7 @@ def ceiling_endpoint():
                             except (TypeError, ValueError):
                                 pass
 
-                    # Pull comps avg from area_json
+                    # Pull comps avg from area_json — multiple fallback paths
                     area = d.get("area_json") or {}
                     housing = area.get("housing") or {}
                     comps = housing.get("soldComps") or housing.get("value") or []
@@ -5071,6 +5071,23 @@ def ceiling_endpoint():
                         merged["comps_avg_value"] = round(
                             sum(comp_prices) / len(comp_prices)
                         )
+                    # Fallback 1: median_price from housing metrics
+                    if not merged.get("comps_avg_value"):
+                        median_p = (housing.get("metrics") or {}).get("median_price")
+                        if median_p and float(median_p) > 5000:
+                            merged["comps_avg_value"] = int(float(median_p))
+                    # Fallback 2: summary_json avg_sold_price field
+                    if not merged.get("comps_avg_value"):
+                        _sj = d.get("summary_json") or {}
+                        _sp = (_sj.get("property") or {}).get("avg_sold_price") or                               (_sj.get("area") or {}).get("avg_sold_price")
+                        if _sp and float(_sp) > 5000:
+                            merged["comps_avg_value"] = int(float(_sp))
+                    # Fallback 3: guide price × 1.15 as last resort (clearly labelled)
+                    if not merged.get("comps_avg_value") and d.get("guide_price"):
+                        _gp = float(d.get("guide_price") or 0)
+                        if _gp > 5000:
+                            merged["comps_avg_value"] = round(_gp * 1.15)
+                            merged["comps_source"] = "guide_price_proxy" 
 
                     financial_inputs = merged
 
