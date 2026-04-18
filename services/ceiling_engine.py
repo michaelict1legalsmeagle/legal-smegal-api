@@ -284,6 +284,103 @@ D_MAX_KEYWORDS: list[tuple[list[str], str]] = [
 
 import re as _re
 
+
+# =============================================================================
+# FLAG BEHAVIOUR CONTROL — v2.1
+# =============================================================================
+# Priority order inside calculate_ceiling():
+#   Step 1 — STOP check  (before any valuation)
+#   Step 2 — Run existing model unchanged
+#   Step 3 — CAP check   (after valuation, before range output)
+#   Step 4 — Normal range output
+#
+# "stop"   -> return manual_review_required, ceiling null
+# "cap"    -> value = min(value, base * CAP_CEILING_PCT)
+# "normal" -> standard D_asset contribution (default)
+# =============================================================================
+
+CAP_CEILING_PCT = 0.45
+
+STOP_KEYWORDS: list[list[str]] = [
+    ["no legal access", "no access to property", "landlocked",
+     "no right of way confirmed"],
+    ["regulated tenancy", "rent act 1977", "protected tenant",
+     "sitting tenant.*security of tenure",
+     "long residential occupier.*cannot.*vacant"],
+    ["active.*underpinning", "underpinning.*in progress",
+     "structural movement.*active", "active.*structural movement"],
+    ["possessory.*no indemnity", "title.*defective.*no insurance",
+     "unregistered.*no deeds"],
+]
+
+CAP_KEYWORDS: list[list[str]] = [
+    ["lease.*under 60", "lease.*less than 60",
+     r"lease.{0,10}[1-5]\d year"],
+    ["above.*shop", "above.*commercial", "above.*retail"],
+    ["non.standard construction", "non-standard construction",
+     "bisf", "airey", "cornish unit", "reema", "woolaway"],
+]
+
+
+def _resolve_flag_behaviour(flag: dict) -> str:
+    """
+    Return 'stop' | 'cap' | 'normal' for a single flag.
+    Priority: explicit flag.behaviour field -> keyword match -> 'normal'.
+    """
+    explicit = (flag.get("behaviour") or "").lower()
+    if explicit in ("stop", "cap", "normal"):
+        return explicit
+
+    text = " ".join(filter(None, [
+        flag.get("title", ""),
+        flag.get("summation", ""),
+        flag.get("implication", ""),
+    ])).lower()
+
+    for kw_group in STOP_KEYWORDS:
+        for kw in kw_group:
+            try:
+                if _re.search(kw, text):
+                    return "stop"
+            except _re.error:
+                if kw in text:
+                    return "stop"
+
+    for kw_group in CAP_KEYWORDS:
+        for kw in kw_group:
+            try:
+                if _re.search(kw, text):
+                    return "cap"
+            except _re.error:
+                if kw in text:
+                    return "cap"
+
+    return "normal"
+
+
+def _check_flag_behaviours(flags: list[dict]) -> tuple[str, list[str]]:
+    """
+    Scan all flags. Return (worst_behaviour, triggered_reasons).
+    Precedence: stop > cap > normal.
+    """
+    stop_reasons: list[str] = []
+    cap_reasons:  list[str] = []
+
+    for f in flags:
+        beh   = _resolve_flag_behaviour(f)
+        title = f.get("title") or "Unknown flag"
+        if beh == "stop":
+            stop_reasons.append(title)
+        elif beh == "cap":
+            cap_reasons.append(title)
+
+    if stop_reasons:
+        return ("stop", stop_reasons)
+    if cap_reasons:
+        return ("cap", cap_reasons)
+    return ("normal", [])
+
+
 def _identify_defect_category(flag: dict) -> str:
     """Keyword-match flag to D_max category."""
     text = " ".join(filter(None, [
@@ -491,6 +588,23 @@ def calculate_ceiling(
     legal_flags      = legal_flags      if isinstance(legal_flags, list)      else []
     financial_inputs = financial_inputs if isinstance(financial_inputs, dict)  else {}
 
+    # ── Step 1: STOP check — must run FIRST, before any valuation ────────────
+    worst_behaviour, behaviour_reasons = _check_flag_behaviours(legal_flags)
+
+    if worst_behaviour == "stop":
+        return {
+            "status":       "manual_review_required",
+            "ceiling":      None,
+            "ceiling_range":{"low": None, "high": None},
+            "cap_applied":  False,
+            "reason":       behaviour_reasons[0] if behaviour_reasons else "Hard-stop flag identified",
+            "stop_flags":   behaviour_reasons,
+            "investment_value_note": (
+                "This property contains one or more risks that cannot be reliably priced by this engine. "
+                "A ceiling cannot be calculated. Independent surveyor review is required before bidding."
+            ),
+        }
+
     # ── Scope check ──────────────────────────────────────────────────────────
     if not _check_scope(financial_inputs, legal_flags):
         return {
@@ -573,7 +687,21 @@ def calculate_ceiling(
     ))
 
     investment_value = round(market_value * (1 - d_total))
-    width            = _dynamic_width(resolved_pct, critical_unresolved)
+
+    # ── Step 3: CAP logic — applied after normal calculation ─────────────────
+    cap_applied  = False
+    cap_reasons_out: list[str] = []
+    if worst_behaviour == "cap":
+        cap_ceiling = round(market_value * CAP_CEILING_PCT)
+        if investment_value > cap_ceiling:
+            investment_value = cap_ceiling
+            cap_applied      = True
+            cap_reasons_out  = behaviour_reasons
+
+    width = _dynamic_width(resolved_pct, critical_unresolved)
+    # Widen range when cap is active — more uncertainty
+    if cap_applied:
+        width = min(width + 0.03, 0.12)
 
     range_low  = round(investment_value * (1 - width) / 500) * 500
     range_high = round(investment_value * (1 + width) / 500) * 500
@@ -589,6 +717,11 @@ def calculate_ceiling(
 
     # ── Part 6: JSON Output ──────────────────────────────────────────────────
     return {
+        # Status
+        "status":                     "ok",
+        "cap_applied":                cap_applied,
+        "cap_reasons":                cap_reasons_out,
+
         # Primary output
         "ceiling_range":              {"low": int(range_low), "high": int(range_high)},
         "investment_value_midpoint":  investment_value,
