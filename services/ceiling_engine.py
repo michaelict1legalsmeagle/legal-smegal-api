@@ -588,11 +588,6 @@ def calculate_ceiling(
     base_valuation: Optional[float] = None,
     strategy: str = "BTL",
 ) -> dict:
-
-    print("RUNNING NEW CEILING ENGINE v2 WATERFALL")  # ← ADD THIS LINE
-
-    # Normalise
-    legal_flags = ...
     """
     Calculate bid ceiling range (INVESTMENT VALUE) for UK residential
     BTL/HMO auction property.
@@ -635,6 +630,7 @@ def calculate_ceiling(
     hi_labels_all: list[str] = []
     total_disc = 0.0
     missing_count = 0
+    processed_flags: list[dict] = []
 
     for flag in legal_flags:
         sev = (flag.get("severity") or "note").lower().strip()
@@ -657,6 +653,10 @@ def calculate_ceiling(
             missing_count += 1
 
         total_disc += eff
+        processed_flags.append({
+            **flag,
+            "disc": eff
+        })
         drivers.append({
             "flag":             flag.get("title", "Unspecified flag"),
             "severity":         sev,
@@ -707,20 +707,12 @@ def calculate_ceiling(
         if (f.get("severity") or "").lower() == "critical"
     )
 
-   # ... EVERYTHING ABOVE UNCHANGED ...
-
     _decomp = _true_waterfall(
         base         = base,
         d_structural = _structural_discount(_crit_count),
-        legal_flags  = legal_flags,
+        legal_flags  = processed_flags,
         strategy     = strategy,
     )
-
-    # 🔴 ONLY CHANGE: ensure primary_driver is never null
-    _primary_driver = _decomp.get("primary_driver") or {
-        "label": "No dominant driver",
-        "impact_gbp": 0
-    }
 
     return {
         "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
@@ -736,14 +728,15 @@ def calculate_ceiling(
         "strategy_used":           strategy,
         "acquisition_costs":       acq,
         "investment_value_note":   _iv_note(strategy, financial_inputs),
-
-        # True waterfall decomposition — unchanged
+        # True waterfall decomposition — fully reconciling
+        # D_structural: auction liquidity premium (always present)
+        # Driven by critical flag count as liquidity proxy
         "decomposition":   _decomp,
-
-        # ✅ Top-level promotion — REQUIRED FOR FRONTEND
+        # Top-level promotion — frontend contract alignment
         "base_value":      _decomp["base_value"],
         "final_value":     _decomp["final_value"],
         "waterfall":       _decomp["waterfall"],
-        "primary_driver":  _primary_driver,   # ← ONLY FIX APPLIED
+        "primary_driver":  _decomp["primary_driver"],
         "reconciles":      _decomp["reconciles"],
+        # v2: "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
     }
