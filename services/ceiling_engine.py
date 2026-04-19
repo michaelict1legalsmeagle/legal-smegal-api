@@ -707,12 +707,20 @@ def calculate_ceiling(
         if (f.get("severity") or "").lower() == "critical"
     )
 
+   # ... EVERYTHING ABOVE UNCHANGED ...
+
     _decomp = _true_waterfall(
         base         = base,
         d_structural = _structural_discount(_crit_count),
         legal_flags  = legal_flags,
         strategy     = strategy,
     )
+
+    # 🔴 ONLY CHANGE: ensure primary_driver is never null
+    _primary_driver = _decomp.get("primary_driver") or {
+        "label": "No dominant driver",
+        "impact_gbp": 0
+    }
 
     return {
         "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
@@ -728,15 +736,14 @@ def calculate_ceiling(
         "strategy_used":           strategy,
         "acquisition_costs":       acq,
         "investment_value_note":   _iv_note(strategy, financial_inputs),
-        # True waterfall decomposition — fully reconciling
-        # D_structural: auction liquidity premium (always present)
-        # Driven by critical flag count as liquidity proxy
+
+        # True waterfall decomposition — unchanged
         "decomposition":   _decomp,
-        # Top-level promotion — frontend contract alignment
+
+        # ✅ Top-level promotion — REQUIRED FOR FRONTEND
         "base_value":      _decomp["base_value"],
         "final_value":     _decomp["final_value"],
         "waterfall":       _decomp["waterfall"],
-        "primary_driver":  _decomp["primary_driver"],
+        "primary_driver":  _primary_driver,   # ← ONLY FIX APPLIED
         "reconciles":      _decomp["reconciles"],
-        # v2: "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
     }
