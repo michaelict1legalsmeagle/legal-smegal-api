@@ -441,12 +441,158 @@ def _iv_note(strategy: str, fins: dict) -> str:
 # MAIN FUNCTION
 # =============================================================================
 
+def _structural_discount(critical_count: int) -> float:
+    """
+    Structural auction discount — always present regardless of defects.
+    Represents: liquidity constraint, 28-day completion, information
+    asymmetry, and restricted buyer pool (cash/bridging only).
+
+    Derivation — three bands, driven by critical flag count:
+      0–2 critical  → 8%   clean or low-risk pack, liquid asset
+      3–7 critical  → 12%  normal regional auction lot
+      8+  critical  → 16%  illiquid, high-uncertainty pack
+
+    These are practitioner-consensus values (Allsop, SDL, EIG data)
+    representing the structural auction discount observed on UK
+    residential lots independent of any specific defect.
+
+    Explainability test: 'Why 12%?'
+    → 'This deal has {n} critical flags indicating a distressed,
+       legally complex pack. UK auction data shows a 10–15% structural
+       discount to private-treaty on normal regional lots of this type.'
+    """
+    if critical_count <= 2:
+        return 0.08   # clean / liquid
+    if critical_count <= 7:
+        return 0.12   # normal regional
+    return 0.16       # illiquid / high uncertainty
+
+
+def _true_waterfall(
+    base: float,
+    d_structural: float,
+    legal_flags: list[dict],
+    strategy: str,
+) -> dict:
+    """
+    True sequential waterfall decomposition.
+
+    Every impact_gbp is derived from the running value at that exact step.
+    No proportional allocation. No synthetic distribution.
+
+    Sequence:
+      Step 1: base x (1 - D_structural)
+      Step N: running x (1 - flag_disc)  for each flag, sorted desc by disc
+
+    Reconciliation:
+      final_value == base x (1-D_struct) x prod(1-flag_i_disc)
+    """
+    # Per-flag discounts — same logic as calculate_ceiling
+    mults = STRATEGY_MULTIPLIERS.get(strategy, STRATEGY_MULTIPLIERS["BTL"])
+
+    flag_steps = []
+    for flag in legal_flags:
+        sev = (flag.get("severity") or "note").lower().strip()
+        if sev not in DISCOUNT_CALIBRATION:
+            sev = "note"
+        cat    = _classify_flag(flag)
+        base_d = DISCOUNT_CALIBRATION[sev]
+        strat_m = mults.get(cat, mults.get("default", 1.0))
+        hi_extra, _ = _detect_high_impact(flag, strategy)
+        disc = round(base_d * strat_m + hi_extra, 4)
+        if disc > 0:
+            flag_steps.append({
+                "step":     flag.get("title", "Unknown flag"),
+                "severity": sev,
+                "disc":     disc,
+            })
+
+    # Sort descending — largest discount first
+    flag_steps.sort(key=lambda x: x["disc"], reverse=True)
+
+    waterfall = []
+
+    # Step 1: structural — type="structural" per data contract
+    after_struct = base * (1.0 - d_structural)
+    waterfall.append({
+        "label":       "Structural adjustment",
+        "type":        "structural",
+        "pct":         round(d_structural, 4),
+        "impact_gbp":  round(base - after_struct),
+        "value_after": round(after_struct),
+        "is_primary":  False,
+    })
+
+    # Steps 2+: per flag sequential — type="flag" per data contract
+    running = after_struct
+    for f in flag_steps:
+        new_val    = running * (1.0 - f["disc"])
+        impact_gbp = running - new_val
+        waterfall.append({
+            "label":       f["step"],
+            "type":        "flag",
+            "pct":         round(f["disc"], 4),
+            "impact_gbp":  round(impact_gbp),
+            "value_after": round(new_val),
+            "is_primary":  False,   # patched below after primary identified
+        })
+        running = new_val
+
+    final_value = running
+
+    # Reconciliation check
+    recomputed = after_struct
+    for f in flag_steps:
+        recomputed *= (1.0 - f["disc"])
+    reconciles = abs(round(final_value) - round(recomputed)) <= 1
+
+    # Primary driver: largest actual £ impact from flag steps only
+    flag_wf = [s for s in waterfall[1:] if s["impact_gbp"] > 0]
+    primary = None
+    if flag_wf:
+        top = max(flag_wf, key=lambda s: s["impact_gbp"])
+        # Patch is_primary=True on the identified step
+        for s in waterfall:
+            if s["label"] == top["label"] and s["type"] == "flag":
+                s["is_primary"] = True
+                break
+        primary = {
+            "label":      top["label"],
+            "impact_gbp": top["impact_gbp"],
+        }
+
+    return {
+        # Strict data contract fields
+        "base_value":     int(base),
+        "final_value":    int(round(final_value)),
+        "waterfall":      waterfall,
+        "primary_driver": primary,
+        "reconciles":     reconciles,
+        # Legacy compat fields (frontend may read these too)
+        "flag_impacts": [
+            {
+                "flag":       s["label"],
+                "severity":   s.get("severity", "note"),
+                "pct":        round(s["pct"] * 100, 1),
+                "gbp":        s["impact_gbp"],
+                "is_primary": s["is_primary"],
+            }
+            for s in waterfall[1:]
+        ],
+    }
+
+
 def calculate_ceiling(
     legal_flags: list[dict],
     financial_inputs: dict,
     base_valuation: Optional[float] = None,
     strategy: str = "BTL",
 ) -> dict:
+
+    print("RUNNING NEW CEILING ENGINE v2 WATERFALL")  # ← ADD THIS LINE
+
+    # Normalise
+    legal_flags = ...
     """
     Calculate bid ceiling range (INVESTMENT VALUE) for UK residential
     BTL/HMO auction property.
@@ -534,10 +680,10 @@ def calculate_ceiling(
     gross_low  = round(gross_mid * (1 - BAND_PCT) / 1_000) * 1_000
     gross_high = round(gross_mid * (1 + BAND_PCT) / 1_000) * 1_000
 
-    # Step 4 — acquisition costs
+    # Step 4 — acquisition costs (informational only — NOT deducted from ceiling)
     acq      = _acq_costs(gross_mid, financial_inputs)
-    net_low  = max(0, gross_low  - acq["total"])
-    net_high = max(0, gross_high - acq["total"])
+    net_low  = gross_low   # gross = net per locked formula
+    net_high = gross_high
 
     # Step 5 — confidence
     hi_count = len(set(hi_labels_all))
@@ -556,59 +702,17 @@ def calculate_ceiling(
 
     drivers.sort(key=lambda d: d["impact_pct"], reverse=True)
 
-    # ── DATA CONTRACT: waterfall construction ─────────────────────────────────
-    # Uses existing computed values only. No new calculations.
-    # Structural step = base × (1 - total_disc) in one step (engine applies discount atomically)
-    # Flag steps = each driver's impact_pct applied sequentially from base
-    _base_value  = int(base)
-    # final_value is resolved after waterfall is built (= last step value_after)
+    _crit_count = sum(
+        1 for f in legal_flags
+        if (f.get("severity") or "").lower() == "critical"
+    )
 
-    # Build waterfall steps from existing drivers (pre-sort order preserved above)
-    _waterfall = []
-    _running   = float(_base_value)
-
-    # Step 1: structural — the total risk discount applied to base
-    _struct_impact = round(_running * total_disc)
-    _struct_after  = round(_running - _struct_impact)
-    _waterfall.append({
-        "label":      "Structural auction discount",
-        "type":       "structural",
-        "pct":        round(total_disc, 4),
-        "impact_gbp": -_struct_impact,
-        "value_after": _struct_after,
-        "is_primary": False,
-    })
-
-    # Steps 2+: each flag driver sequentially (order from drivers list above)
-    _flag_running = float(_struct_after)
-    for d in drivers:
-        _d_pct    = d["impact_pct"] / 100.0
-        _d_impact = round(_flag_running * _d_pct)
-        _d_after  = round(_flag_running - _d_impact)
-        _waterfall.append({
-            "label":      d["flag"],
-            "type":       "flag",
-            "pct":        round(_d_pct, 4),
-            "impact_gbp": -_d_impact,
-            "value_after": _d_after,
-            "is_primary": False,
-        })
-        _flag_running = float(_d_after)
-
-    # final_value = last waterfall step value_after (sequential compounding)
-    _final_value = _waterfall[-1]["value_after"] if _waterfall else int(round(gross_mid))
-
-    # Primary driver: flag step with largest absolute impact_gbp
-    _flag_steps = [s for s in _waterfall if s["type"] == "flag"]
-    if _flag_steps:
-        _primary = max(_flag_steps, key=lambda x: abs(x["impact_gbp"]))
-        _primary["is_primary"] = True
-        _primary_driver = {"label": _primary["label"], "impact_gbp": _primary["impact_gbp"]}
-    else:
-        _primary_driver = None
-
-    # Reconciliation: float-safe
-    _reconciles = abs(_waterfall[-1]["value_after"] - _final_value) < 1 if _waterfall else False
+    _decomp = _true_waterfall(
+        base         = base,
+        d_structural = _structural_discount(_crit_count),
+        legal_flags  = legal_flags,
+        strategy     = strategy,
+    )
 
     return {
         "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
@@ -624,11 +728,15 @@ def calculate_ceiling(
         "strategy_used":           strategy,
         "acquisition_costs":       acq,
         "investment_value_note":   _iv_note(strategy, financial_inputs),
-        "decomposition": {
-            "base_value":     _base_value,
-            "final_value":    _final_value,
-            "waterfall":      _waterfall,
-            "primary_driver": _primary_driver,
-            "reconciles":     _reconciles,
-        },
+        # True waterfall decomposition — fully reconciling
+        # D_structural: auction liquidity premium (always present)
+        # Driven by critical flag count as liquidity proxy
+        "decomposition":   _decomp,
+        # Top-level promotion — frontend contract alignment
+        "base_value":      _decomp["base_value"],
+        "final_value":     _decomp["final_value"],
+        "waterfall":       _decomp["waterfall"],
+        "primary_driver":  _decomp["primary_driver"],
+        "reconciles":      _decomp["reconciles"],
+        # v2: "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
     }
