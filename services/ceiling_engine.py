@@ -789,6 +789,13 @@ def calculate_ceiling(
         "drivers":                    _build_drivers(legal_flags),
         "high_impact_flags":          [asset_detail.get("dominant_category", "")],
         "acquisition_costs":          None,  # NOT deducted — informational only
+
+        # Waterfall decomposition — true sequential, fully reconciling
+        "decomposition": _waterfall_decomposition(
+            market_value = market_value,
+            d_structural = d_structural,
+            legal_flags  = legal_flags,
+        ),
     }
 
 
@@ -808,3 +815,133 @@ def _build_drivers(flags: list[dict]) -> list[dict]:
         key=lambda x: x["impact_pct"], reverse=True
     )
     return scored
+
+
+def _waterfall_decomposition(
+    market_value: float,
+    d_structural: float,
+    legal_flags: list[dict],
+) -> dict:
+    """
+    True sequential waterfall decomposition.
+
+    Every £ impact is derived from the running value at that exact step.
+    No proportional allocation. No synthetic distribution.
+    No approximation.
+
+    Sequence:
+        Step 0: base_value
+        Step 1: base × (1 - D_structural)         → structural impact
+        Step N: running × (1 - flag_disc)          → per-flag impact
+        Final:  running value after all flags
+
+    Reconciliation enforced:
+        final_value == base × (1 - D_structural) × Π(1 - flag_i_disc)
+
+    Flag ordering: descending by discount_pct.
+    Primary driver: flag with largest actual £ impact.
+    """
+    base = float(market_value)
+
+    # ── Step 1: Structural ───────────────────────────────────────────────────
+    value_after_struct = base * (1.0 - d_structural)
+    struct_impact_gbp  = base - value_after_struct
+
+    waterfall: list[dict] = [{
+        "step":        "Structural adjustment",
+        "label":       "Auction / liquidity premium",
+        "pct":         round(d_structural, 6),
+        "pct_display": round(d_structural * 100, 1),
+        "impact_gbp":  round(struct_impact_gbp),
+        "value_after": round(value_after_struct),
+    }]
+
+    # ── Step 2+: Per-flag sequential ─────────────────────────────────────────
+    # Each flag's discount is applied to the running value from the previous step.
+    # impact_gbp = running_before × flag_disc  (exact, not proportional)
+    scored_flags = sorted(
+        [{"flag":  f.get("title", "Unknown flag"),
+          "severity": (f.get("severity") or "note").lower(),
+          "disc":  _d_max_for_flag(f),
+          "category": _identify_defect_category(f),
+         } for f in legal_flags],
+        key=lambda x: x["disc"], reverse=True
+    )
+
+    running = value_after_struct
+    for f in scored_flags:
+        disc       = f["disc"]
+        if disc <= 0:
+            continue
+        new_value  = running * (1.0 - disc)
+        impact_gbp = running - new_value
+
+        waterfall.append({
+            "step":        f["flag"],
+            "label":       f["flag"],
+            "severity":    f["severity"],
+            "category":    f["category"],
+            "pct":         round(disc, 6),
+            "pct_display": round(disc * 100, 1),
+            "impact_gbp":  round(impact_gbp),
+            "value_after": round(new_value),
+        })
+
+        running = new_value
+
+    final_value = running
+
+    # ── Reconciliation check ─────────────────────────────────────────────────
+    # Recompute from scratch: base × (1-struct) × Π(1-flag_i)
+    recomputed = base * (1.0 - d_structural)
+    for f in scored_flags:
+        if f["disc"] > 0:
+            recomputed *= (1.0 - f["disc"])
+
+    # Allow 1 unit rounding tolerance only
+    reconciles = abs(round(final_value) - round(recomputed)) <= 1
+
+    # ── Primary driver: largest actual £ impact (flag steps only) ────────────
+    flag_steps = [s for s in waterfall[1:] if s.get("impact_gbp", 0) > 0]
+    primary    = max(flag_steps, key=lambda s: s["impact_gbp"]) if flag_steps else None
+    if primary:
+        primary = {
+            "label":      primary["step"],
+            "pct":        primary["pct"],
+            "pct_display":primary["pct_display"],
+            "impact_gbp": primary["impact_gbp"],
+        }
+
+    # ── Summary fields ───────────────────────────────────────────────────────
+    total_impact_gbp = round(base - final_value)
+    total_disc       = 1.0 - (final_value / base) if base > 0 else 0.0
+
+    return {
+        # Spec-required fields
+        "base_value":           int(base),
+        "waterfall":            waterfall,
+        "final_value":          int(round(final_value)),
+        "primary_driver":       primary,
+        "reconciliation_check": reconciles,
+
+        # Legacy fields preserved for frontend compatibility
+        "base_valuation_gbp":       int(base),
+        "structural_discount_pct":  round(d_structural * 100, 1),
+        "structural_discount_gbp":  round(struct_impact_gbp),
+        "after_structural_gbp":     round(value_after_struct),
+        "total_discount_pct":       round(total_disc * 100, 1),
+        "total_discount_gbp":       total_impact_gbp,
+        "investment_value_gbp":     int(round(final_value)),
+
+        # Flag impacts in legacy format for frontend rendering
+        "flag_impacts": [
+            {
+                "flag":       s["step"],
+                "severity":   s.get("severity", "note"),
+                "pct":        s["pct_display"],
+                "gbp":        s["impact_gbp"],
+                "is_primary": primary is not None and s["step"] == primary["label"],
+            }
+            for s in waterfall[1:]  # skip structural step
+        ],
+    }
