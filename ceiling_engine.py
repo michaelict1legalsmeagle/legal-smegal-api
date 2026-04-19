@@ -512,28 +512,29 @@ def _true_waterfall(
 
     waterfall = []
 
-    # Step 1: structural
+    # Step 1: structural — type="structural" per data contract
     after_struct = base * (1.0 - d_structural)
     waterfall.append({
-        "step":        "Structural adjustment",
-        "pct":         round(d_structural, 6),
-        "pct_display": round(d_structural * 100, 1),
+        "label":       "Structural adjustment",
+        "type":        "structural",
+        "pct":         round(d_structural, 4),
         "impact_gbp":  round(base - after_struct),
         "value_after": round(after_struct),
+        "is_primary":  False,
     })
 
-    # Steps 2+: per flag sequential
+    # Steps 2+: per flag sequential — type="flag" per data contract
     running = after_struct
     for f in flag_steps:
         new_val    = running * (1.0 - f["disc"])
         impact_gbp = running - new_val
         waterfall.append({
-            "step":        f["step"],
-            "severity":    f["severity"],
-            "pct":         round(f["disc"], 6),
-            "pct_display": round(f["disc"] * 100, 1),
+            "label":       f["step"],
+            "type":        "flag",
+            "pct":         round(f["disc"], 4),
             "impact_gbp":  round(impact_gbp),
             "value_after": round(new_val),
+            "is_primary":  False,   # patched below after primary identified
         })
         running = new_val
 
@@ -545,32 +546,36 @@ def _true_waterfall(
         recomputed *= (1.0 - f["disc"])
     reconciles = abs(round(final_value) - round(recomputed)) <= 1
 
-    # Primary driver: largest actual £ impact (flag steps only)
+    # Primary driver: largest actual £ impact from flag steps only
     flag_wf = [s for s in waterfall[1:] if s["impact_gbp"] > 0]
     primary = None
     if flag_wf:
         top = max(flag_wf, key=lambda s: s["impact_gbp"])
+        # Patch is_primary=True on the identified step
+        for s in waterfall:
+            if s["label"] == top["label"] and s["type"] == "flag":
+                s["is_primary"] = True
+                break
         primary = {
-            "label":       top["step"],
-            "pct":         top["pct"],
-            "pct_display": top["pct_display"],
-            "impact_gbp":  top["impact_gbp"],
+            "label":      top["label"],
+            "impact_gbp": top["impact_gbp"],
         }
 
     return {
-        "base_value":           int(base),
-        "waterfall":            waterfall,
-        "final_value":          int(round(final_value)),
-        "primary_driver":       primary,
-        "reconciliation_check": reconciles,
-        # Legacy fields
+        # Strict data contract fields
+        "base_value":     int(base),
+        "final_value":    int(round(final_value)),
+        "waterfall":      waterfall,
+        "primary_driver": primary,
+        "reconciles":     reconciles,
+        # Legacy compat fields (frontend may read these too)
         "flag_impacts": [
             {
-                "flag":       s["step"],
+                "flag":       s["label"],
                 "severity":   s.get("severity", "note"),
-                "pct":        s["pct_display"],
+                "pct":        round(s["pct"] * 100, 1),
                 "gbp":        s["impact_gbp"],
-                "is_primary": primary is not None and s["step"] == primary["label"],
+                "is_primary": s["is_primary"],
             }
             for s in waterfall[1:]
         ],
@@ -697,6 +702,13 @@ def calculate_ceiling(
         if (f.get("severity") or "").lower() == "critical"
     )
 
+    _decomp = _true_waterfall(
+        base         = base,
+        d_structural = _structural_discount(_crit_count),
+        legal_flags  = legal_flags,
+        strategy     = strategy,
+    )
+
     return {
         "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
         "gross_ceiling_range":     {"low": int(gross_low), "high": int(gross_high)},
@@ -714,11 +726,12 @@ def calculate_ceiling(
         # True waterfall decomposition — fully reconciling
         # D_structural: auction liquidity premium (always present)
         # Driven by critical flag count as liquidity proxy
-        "decomposition": _true_waterfall(
-            base         = base,
-            d_structural = _structural_discount(_crit_count),
-            legal_flags  = legal_flags,
-            strategy     = strategy,
-        ),
+        "decomposition":   _decomp,
+        # Top-level promotion — frontend contract alignment
+        "base_value":      _decomp["base_value"],
+        "final_value":     _decomp["final_value"],
+        "waterfall":       _decomp["waterfall"],
+        "primary_driver":  _decomp["primary_driver"],
+        "reconciles":      _decomp["reconciles"],
         # v2: "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
     }
