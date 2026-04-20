@@ -671,68 +671,77 @@ def calculate_ceiling(
             "high_impact_labels": hi_lbls,
         })
 
-        # Step 3 — range
-        gross_mid  = base * (1.0 - total_disc)
-        gross_low  = round(gross_mid * (1 - BAND_PCT) / 1_000) * 1_000
-        gross_high = round(gross_mid * (1 + BAND_PCT) / 1_000) * 1_000
+    # Missing doc penalty
+    miss_pen = 0.0
+    for threshold in sorted(MISSING_DOC_PENALTY, reverse=True):
+        if missing_count >= threshold:
+            miss_pen = MISSING_DOC_PENALTY[threshold]
+            break
+    total_disc += miss_pen
+    total_disc  = min(total_disc, MAX_TOTAL_DISCOUNT)
 
-        # Step 4 — acquisition costs (informational only — NOT deducted from ceiling)
-        acq      = _acq_costs(gross_mid, financial_inputs)
-        net_low  = gross_low   # gross = net per locked formula
-        net_high = gross_high
+    # Step 3 — range
+    gross_mid  = base * (1.0 - total_disc)
+    gross_low  = round(gross_mid * (1 - BAND_PCT) / 1_000) * 1_000
+    gross_high = round(gross_mid * (1 + BAND_PCT) / 1_000) * 1_000
 
-        # Step 5 — confidence
-        hi_count = len(set(hi_labels_all))
-        data_pen = {"none": 0.30, "yield": 0.08, "comps": 0.08,
-                    "yield_fallback": 0.15, "external_valuation": 0.02}.get(base_method, 0.05)
-        conf = round(max(0.20, min(0.95,
-            0.65 + (1.0 - min(total_disc, 0.40)) * 0.35
-            - data_pen - hi_count * HIGH_IMPACT_CONFIDENCE_PENALTY
-        )), 2)
+    # Step 4 — acquisition costs (informational only — NOT deducted from ceiling)
+    acq      = _acq_costs(gross_mid, financial_inputs)
+    net_low  = gross_low   # gross = net per locked formula
+    net_high = gross_high
 
-        # Step 6 — scenarios
-        seen_c: set[str] = set()
-        uniq_cats   = [c for c in flag_cats if not (c in seen_c or seen_c.add(c))]
-        uniq_hi     = list(dict.fromkeys(hi_labels_all))
-        scenarios   = _scenarios(uniq_cats, uniq_hi, base)
+    # Step 5 — confidence
+    hi_count = len(set(hi_labels_all))
+    data_pen = {"none": 0.30, "yield": 0.08, "comps": 0.08,
+                "yield_fallback": 0.15, "external_valuation": 0.02}.get(base_method, 0.05)
+    conf = round(max(0.20, min(0.95,
+        0.65 + (1.0 - min(total_disc, 0.40)) * 0.35
+        - data_pen - hi_count * HIGH_IMPACT_CONFIDENCE_PENALTY
+    )), 2)
 
-        drivers.sort(key=lambda d: d["impact_pct"], reverse=True)
+    # Step 6 — scenarios
+    seen_c: set[str] = set()
+    uniq_cats   = [c for c in flag_cats if not (c in seen_c or seen_c.add(c))]
+    uniq_hi     = list(dict.fromkeys(hi_labels_all))
+    scenarios   = _scenarios(uniq_cats, uniq_hi, base)
 
-        _crit_count = sum(
-            1 for f in legal_flags
-            if (f.get("severity") or "").lower() == "critical"
-        )
+    drivers.sort(key=lambda d: d["impact_pct"], reverse=True)
 
-        _decomp = _true_waterfall(
-            base         = base,
-            d_structural = _structural_discount(_crit_count),
-            legal_flags  = processed_flags,
-            strategy     = strategy,
-        )
+    _crit_count = sum(
+        1 for f in legal_flags
+        if (f.get("severity") or "").lower() == "critical"
+    )
 
-        return {
-            "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
-            "gross_ceiling_range":     {"low": int(gross_low), "high": int(gross_high)},
-            "confidence":              conf,
-            "base_valuation":          int(base),
-            "base_method":             base_method,
-            "risk_discount_pct":       round(total_disc * 100, 1),
-            "missing_doc_penalty_pct": round(miss_pen * 100, 1),
-            "drivers":                 drivers,
-            "high_impact_flags":       uniq_hi,
-            "downside_scenarios":      scenarios,
-            "strategy_used":           strategy,
-            "acquisition_costs":       acq,
-            "investment_value_note":   _iv_note(strategy, financial_inputs),
-            # True waterfall decomposition — fully reconciling
-            # D_structural: auction liquidity premium (always present)
-            # Driven by critical flag count as liquidity proxy
-            "decomposition":   _decomp,
-            # Top-level promotion — frontend contract alignment
-            "base_value":      _decomp["base_value"],
-            "final_value":     _decomp["final_value"],
-            "waterfall":       _decomp["waterfall"],
-            "primary_driver":  _decomp["primary_driver"],
-            "reconciles":      _decomp["reconciles"],
-            # v2: "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
-        }
+    _decomp = _true_waterfall(
+        base         = base,
+        d_structural = _structural_discount(_crit_count),
+        legal_flags  = processed_flags,
+        strategy     = strategy,
+    )
+
+    return {
+        "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
+        "gross_ceiling_range":     {"low": int(gross_low), "high": int(gross_high)},
+        "confidence":              conf,
+        "base_valuation":          int(base),
+        "base_method":             base_method,
+        "risk_discount_pct":       round(total_disc * 100, 1),
+        "missing_doc_penalty_pct": round(miss_pen * 100, 1),
+        "drivers":                 drivers,
+        "high_impact_flags":       uniq_hi,
+        "downside_scenarios":      scenarios,
+        "strategy_used":           strategy,
+        "acquisition_costs":       acq,
+        "investment_value_note":   _iv_note(strategy, financial_inputs),
+        # True waterfall decomposition — fully reconciling
+        # D_structural: auction liquidity premium (always present)
+        # Driven by critical flag count as liquidity proxy
+        "decomposition":   _decomp,
+        # Top-level promotion — frontend contract alignment
+        "base_value":      _decomp["base_value"],
+        "final_value":     _decomp["final_value"],
+        "waterfall":       _decomp["waterfall"],
+        "primary_driver":  _decomp["primary_driver"],
+        "reconciles":      _decomp["reconciles"],
+        # v2: "outcome_feedback": {"bid": None, "hammer": None, "actual_costs": None}
+    }
