@@ -624,56 +624,52 @@ def calculate_ceiling(
     if base <= 0:
         return no_data
 
-    # Step 2 — per-flag discounts
-    drivers: list[dict] = []
-    flag_cats: list[str] = []
-    hi_labels_all: list[str] = []
-    total_disc = 0.0
-    missing_count = 0
-    processed_flags: list[dict] = []
+   # Step 2 — per-flag discounts
+drivers: list[dict] = []
+flag_cats: list[str] = []
+hi_labels_all: list[str] = []
+total_disc = 0.0
+missing_count = 0
+processed_flags: list[dict] = []
 
-    for flag in legal_flags:
-        sev = (flag.get("severity") or "note").lower().strip()
-        if sev not in DISCOUNT_CALIBRATION:
-            sev = "note"
+for flag in legal_flags:
+    sev = (flag.get("severity") or "note").lower().strip()
+    if sev not in DISCOUNT_CALIBRATION:
+        sev = "note"
 
-        cat  = _classify_flag(flag)
-        flag_cats.append(cat)
+    cat  = _classify_flag(flag)
+    flag_cats.append(cat)
 
+    # ✅ FIX APPLIED HERE
+    override = flag.get("override_discount_pct")
+    if override is not None:
+        base_d = float(override) / 100
+    else:
         base_d = DISCOUNT_CALIBRATION[sev]
-        # v2: base_d = flag.get("suggested_discount_pct", base_d*100) / 100
-        strat_m = mults.get(cat, mults.get("default", 1.0))
-        eff     = round(base_d * strat_m, 4)
 
-        hi_extra, hi_lbls = _detect_high_impact(flag, strategy)
-        eff += hi_extra
-        hi_labels_all.extend(hi_lbls)
+    strat_m = mults.get(cat, mults.get("default", 1.0))
+    eff     = round(base_d * strat_m, 4)
 
-        if sev == "missing":
-            missing_count += 1
+    hi_extra, hi_lbls = _detect_high_impact(flag, strategy)
+    eff += hi_extra
+    hi_labels_all.extend(hi_lbls)
 
-        total_disc += eff
-        processed_flags.append({
-            **flag,
-            "disc": eff
-        })
-        drivers.append({
-            "flag":             flag.get("title", "Unspecified flag"),
-            "severity":         sev,
-            "category":         cat,
-            "impact_pct":       round(eff * 100, 2),
-            "high_impact":      bool(hi_lbls),
-            "high_impact_labels": hi_lbls,
-        })
+    if sev == "missing":
+        missing_count += 1
 
-    # Missing doc penalty
-    miss_pen = 0.0
-    for threshold in sorted(MISSING_DOC_PENALTY, reverse=True):
-        if missing_count >= threshold:
-            miss_pen = MISSING_DOC_PENALTY[threshold]
-            break
-    total_disc += miss_pen
-    total_disc  = min(total_disc, MAX_TOTAL_DISCOUNT)
+    total_disc += eff
+    processed_flags.append({
+        **flag,
+        "disc": eff
+    })
+    drivers.append({
+        "flag":             flag.get("title", "Unspecified flag"),
+        "severity":         sev,
+        "category":         cat,
+        "impact_pct":       round(eff * 100, 2),
+        "high_impact":      bool(hi_lbls),
+        "high_impact_labels": hi_lbls,
+    })
 
     # Step 3 — range
     gross_mid  = base * (1.0 - total_disc)
