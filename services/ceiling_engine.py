@@ -625,12 +625,12 @@ def calculate_ceiling(
         return no_data
 
    # Step 2 — per-flag discounts
-drivers: list[dict] = []
-flag_cats: list[str] = []
-hi_labels_all: list[str] = []
-total_disc = 0.0
-missing_count = 0
-processed_flags: list[dict] = []
+    drivers: list[dict] = []
+    flag_cats: list[str] = []
+    hi_labels_all: list[str] = []
+    total_disc = 0.0
+    missing_count = 0
+    processed_flags: list[dict] = []
 
 for flag in legal_flags:
     sev = (flag.get("severity") or "note").lower().strip()
