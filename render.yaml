@@ -1,4 +1,18 @@
 services:
+  # Monthly Land Registry data refresh — runs 21st of each month at 6am UTC
+  - type: cron
+    name: legal-smegal-data-refresh
+    env: python
+    schedule: "0 6 21 * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python refresh_data.py
+    plan: free
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
   # Backend API (Python)
   - type: web
     name: legal-smegal-api
