@@ -158,11 +158,12 @@ def refresh_hpi():
 # ── LAND REGISTRY PRICE PAID ─────────────────────────────────────────────────
 # Published: 20th of each month (previous month's transactions)
 # Full dataset: https://www.gov.uk/government/statistical-data-sets/price-paid-data-downloads
-# Rolling 12-month coverage: load current year (part1 + part2) + previous year (part1 + part2)
-# Land Registry yearly part files cover all England & Wales postcodes with transactions that year.
+# Rolling 12-month coverage: current year full file + previous year full file
+# Land Registry publishes yearly .txt files covering ALL England & Wales postcodes.
+# pp-2025.txt grows throughout the year; pp-2024.txt is the complete previous year.
 # Using yearly files instead of monthly delta ensures full postcode coverage.
-PP_URL_YEARLY  = "https://www.gov.uk/government/uploads/system/uploads/attachment_data/file/pp-{year}-part{part}.csv"
-PP_TABLE       = "price_paid_raw_2025"
+LR_S3_BASE    = "http://prod.publicdata.landregistry.gov.uk.s3-website-eu-west-1.amazonaws.com"
+PP_TABLE      = "price_paid_raw_2025"
 
 PP_COLUMNS = [
     "transaction_id", "price", "date_of_transfer", "postcode",
@@ -172,7 +173,7 @@ PP_COLUMNS = [
 ]
 
 def _ingest_pp_url(url: str) -> int:
-    """Download a single Price Paid CSV URL and upsert into Supabase. Returns row count."""
+    """Download a single Price Paid file and upsert into Supabase. Returns row count."""
     try:
         r = requests.get(url, timeout=600, stream=True)
         if r.status_code == 404:
@@ -195,16 +196,16 @@ def _ingest_pp_url(url: str) -> int:
             continue
         try:
             record = {
-                "transaction_id":  row[0].strip('{}'),
-                "price":           int(row[1]) if row[1].strip().isdigit() else None,
+                "transaction_id":   row[0].strip('{}'),
+                "price":            int(row[1]) if row[1].strip().isdigit() else None,
                 "date_of_transfer": row[2][:10] if row[2] else None,
-                "postcode":        row[3].strip().upper().replace(" ", ""),
-                "property_type":   row[4].strip(),
-                "new_build":       row[5].strip() == "Y",
-                "estate_type":     row[6].strip(),
-                "town":            row[11].strip().title() if row[11] else None,
-                "district":        row[12].strip().title() if row[12] else None,
-                "county":          row[13].strip().title() if row[13] else None,
+                "postcode":         row[3].strip().upper().replace(" ", ""),
+                "property_type":    row[4].strip(),
+                "new_build":        row[5].strip() == "Y",
+                "estate_type":      row[6].strip(),
+                "town":             row[11].strip().title() if row[11] else None,
+                "district":         row[12].strip().title() if row[12] else None,
+                "county":           row[13].strip().title() if row[13] else None,
             }
             if not record["transaction_id"] or not record["price"]:
                 continue
@@ -227,28 +228,21 @@ def _ingest_pp_url(url: str) -> int:
 
 
 def refresh_price_paid():
-    """Download rolling 12-month Price Paid data (current + previous year, both parts).
-    This ensures full England & Wales postcode coverage, not just last month's transactions.
+    """Download rolling 12-month Price Paid data: current year + previous year.
+    Uses correct Land Registry yearly file format (pp-YYYY.txt) covering all postcodes.
     """
-    log.info("Starting price paid refresh (rolling 12-month)...")
-    now  = datetime.utcnow()
+    log.info("Starting price paid refresh (rolling 12-month, yearly files)...")
+    now   = datetime.utcnow()
     total = 0
 
-    # Current year part 1 (Jan–Jun) and part 2 (Jul–Dec, published when available)
-    # Previous year part 1 and part 2 (both always available)
-    years_parts = [
-        (now.year,     1),
-        (now.year,     2),
-        (now.year - 1, 1),
-        (now.year - 1, 2),
-    ]
-
-    for year, part in years_parts:
-        url = PP_URL_YEARLY.format(year=year, part=part)
-        log.info(f"Fetching Price Paid: year={year} part={part}")
+    # Current year and previous year full files
+    # pp-YYYY.txt is the correct Land Registry yearly file format
+    for year in [now.year, now.year - 1]:
+        url = f"{LR_S3_BASE}/pp-{year}.txt"
+        log.info(f"Fetching Price Paid yearly file: {url}")
         total += _ingest_pp_url(url)
 
-    log.info(f"Price paid refresh complete: {total} rows upserted across all files")
+    log.info(f"Price paid refresh complete: {total} rows upserted")
 
 
 # ── SCHOOLS (OFSTED) ──────────────────────────────────────────────────────────
