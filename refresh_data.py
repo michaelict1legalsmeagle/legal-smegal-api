@@ -158,8 +158,10 @@ def refresh_hpi():
 # ── LAND REGISTRY PRICE PAID ─────────────────────────────────────────────────
 # Published: 20th of each month (previous month's transactions)
 # Full dataset: https://www.gov.uk/government/statistical-data-sets/price-paid-data-downloads
-# Monthly update file (current year): smaller, faster to ingest
-PP_URL_MONTHLY = "https://www.gov.uk/government/uploads/system/uploads/attachment_data/file/pp-{year}-part{part}.csv"
+# Rolling 12-month coverage: load current year (part1 + part2) + previous year (part1 + part2)
+# Land Registry yearly part files cover all England & Wales postcodes with transactions that year.
+# Using yearly files instead of monthly delta ensures full postcode coverage.
+PP_URL_YEARLY  = "https://www.gov.uk/government/uploads/system/uploads/attachment_data/file/pp-{year}-part{part}.csv"
 PP_TABLE       = "price_paid_raw_2025"
 
 PP_COLUMNS = [
@@ -169,23 +171,19 @@ PP_COLUMNS = [
     "ppd_category", "record_status",
 ]
 
-def refresh_price_paid():
-    """Download current year price paid data and upsert into Supabase."""
-    log.info("Starting price paid refresh...")
-    year = datetime.utcnow().year
-
-    # LR publishes two parts per year, merged as year progresses
-    # Use the monthly update endpoint for incremental refresh
-    monthly_url = f"https://www.gov.uk/government/uploads/system/uploads/attachment_data/file/pp-monthly-update-new-version.csv"
-
+def _ingest_pp_url(url: str) -> int:
+    """Download a single Price Paid CSV URL and upsert into Supabase. Returns row count."""
     try:
-        r = requests.get(monthly_url, timeout=180, stream=True)
+        r = requests.get(url, timeout=600, stream=True)
+        if r.status_code == 404:
+            log.info(f"Price paid file not yet published: {url} — skipping")
+            return 0
         if r.status_code != 200:
-            log.warning(f"Monthly PP update returned {r.status_code} — skipping price paid refresh")
-            return
+            log.warning(f"Price paid download returned {r.status_code} for {url} — skipping")
+            return 0
     except Exception as e:
-        log.error(f"Price paid download failed: {e}")
-        return
+        log.error(f"Price paid download failed for {url}: {e}")
+        return 0
 
     content = r.content.decode("utf-8", errors="replace")
     reader  = csv.reader(io.StringIO(content))
@@ -197,27 +195,25 @@ def refresh_price_paid():
             continue
         try:
             record = {
-                "transaction_id":    row[0].strip('{}'),
-                "price":             int(row[1]) if row[1].strip().isdigit() else None,
-                "date_of_transfer":  row[2][:10] if row[2] else None,
-                "postcode":          row[3].strip().upper().replace(" ", ""),
-                "property_type":     row[4].strip(),
-                "new_build":         row[5].strip() == "Y",
-                "estate_type":       row[6].strip(),
-                "town":              row[11].strip().title() if row[11] else None,
-                "district":          row[12].strip().title() if row[12] else None,
-                "county":            row[13].strip().title() if row[13] else None,
+                "transaction_id":  row[0].strip('{}'),
+                "price":           int(row[1]) if row[1].strip().isdigit() else None,
+                "date_of_transfer": row[2][:10] if row[2] else None,
+                "postcode":        row[3].strip().upper().replace(" ", ""),
+                "property_type":   row[4].strip(),
+                "new_build":       row[5].strip() == "Y",
+                "estate_type":     row[6].strip(),
+                "town":            row[11].strip().title() if row[11] else None,
+                "district":        row[12].strip().title() if row[12] else None,
+                "county":          row[13].strip().title() if row[13] else None,
             }
             if not record["transaction_id"] or not record["price"]:
                 continue
             batch.append(record)
-
             if len(batch) >= BATCH_SIZE:
                 supabase.table(PP_TABLE).upsert(batch, on_conflict="transaction_id").execute()
                 count += len(batch)
                 batch = []
-                log.info(f"Price paid: {count} rows upserted")
-
+                log.info(f"Price paid: {count} rows upserted from {url}")
         except Exception as e:
             log.warning(f"PP row error: {e}")
             continue
@@ -226,7 +222,33 @@ def refresh_price_paid():
         supabase.table(PP_TABLE).upsert(batch, on_conflict="transaction_id").execute()
         count += len(batch)
 
-    log.info(f"Price paid refresh complete: {count} rows upserted")
+    log.info(f"Ingested {count} rows from {url}")
+    return count
+
+
+def refresh_price_paid():
+    """Download rolling 12-month Price Paid data (current + previous year, both parts).
+    This ensures full England & Wales postcode coverage, not just last month's transactions.
+    """
+    log.info("Starting price paid refresh (rolling 12-month)...")
+    now  = datetime.utcnow()
+    total = 0
+
+    # Current year part 1 (Jan–Jun) and part 2 (Jul–Dec, published when available)
+    # Previous year part 1 and part 2 (both always available)
+    years_parts = [
+        (now.year,     1),
+        (now.year,     2),
+        (now.year - 1, 1),
+        (now.year - 1, 2),
+    ]
+
+    for year, part in years_parts:
+        url = PP_URL_YEARLY.format(year=year, part=part)
+        log.info(f"Fetching Price Paid: year={year} part={part}")
+        total += _ingest_pp_url(url)
+
+    log.info(f"Price paid refresh complete: {total} rows upserted across all files")
 
 
 # ── SCHOOLS (OFSTED) ──────────────────────────────────────────────────────────
