@@ -3698,7 +3698,48 @@ def get_deal(deal_id: str):
             .execute()
         if not result.data:
             return jsonify({"error": "Deal not found"}), 404
-        return jsonify({"ok": True, "deal": result.data}), 200
+        deal = result.data
+        # If area_json is missing, trigger a background re-fetch so comps
+        # are available on next page load without requiring the user to visit
+        # the Area Intelligence page manually.
+        if not deal.get("area_json") and deal.get("postcode"):
+            import threading
+            _did = deal_id
+            _pc  = normalize_postcode(deal["postcode"])
+            def _bg_area():
+                try:
+                    lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(_pc)
+                    lat = safe_float((lsoa_meta or {}).get("lat"))
+                    lng = safe_float((lsoa_meta or {}).get("lng"))
+                    area_code = str((lsoa_meta or {}).get("area_code") or "").strip()
+                    if lat is None or lng is None:
+                        lat, lng, _ = nspl_lookup_latlng(_pc)
+                    area_data = {
+                        "postcode":     _pc,
+                        "lsoa_gss":     lsoa_gss,
+                        "lat":          lat,
+                        "lng":          lng,
+                        "area_code":    area_code,
+                        "housing":      get_housing_data(_pc),
+                        "crime":        get_crime_data(lat, lng),
+                        "transport":    get_transport_data(lat, lng),
+                        "amenities":    get_amenities_data(lat, lng),
+                        "schools":      get_schools_data(_pc),
+                        "broadband":    get_broadband_data(_pc),
+                        "flood":        get_flood_risk(lat, lng, _pc),
+                        "trends":       build_trends_from_uk_hpi(_pc, area_code, 24),
+                        "fetched_at":   now_iso(),
+                        "fetch_status": "complete",
+                    }
+                    supabase.table("deals").update({
+                        "area_json":  area_data,
+                        "updated_at": now_iso(),
+                    }).eq("id", _did).execute()
+                    app.logger.info(f"[area] auto-fetch complete for deal {_did}")
+                except Exception as _e:
+                    app.logger.warning(f"[area] auto-fetch failed for {_did}: {_e}")
+            threading.Thread(target=_bg_area, daemon=True).start()
+        return jsonify({"ok": True, "deal": deal}), 200
     except Exception as e:
         app.logger.exception("get_deal failed")
         return jsonify({"error": str(e)}), 500
