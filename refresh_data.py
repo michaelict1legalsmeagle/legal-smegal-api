@@ -158,91 +158,114 @@ def refresh_hpi():
 # ── LAND REGISTRY PRICE PAID ─────────────────────────────────────────────────
 # Published: 20th of each month (previous month's transactions)
 # Full dataset: https://www.gov.uk/government/statistical-data-sets/price-paid-data-downloads
-# Rolling 12-month coverage: current year full file + previous year full file
-# Land Registry publishes yearly .txt files covering ALL England & Wales postcodes.
-# pp-2025.txt grows throughout the year; pp-2024.txt is the complete previous year.
-# Using yearly files instead of monthly delta ensures full postcode coverage.
-LR_S3_BASE    = "http://prod.publicdata.landregistry.gov.uk.s3-website-eu-west-1.amazonaws.com"
-PP_TABLE      = "price_paid_raw_2025"
+# Monthly Price Paid update → price_paid_geo (the table the RPC actually queries)
+# price_paid_geo has columns: transaction_unique_identifier, price, date_of_transfer,
+# postcode, postcode_nospace, property_type, old_new, duration, paon, saon, street,
+# locality, town_city, district, county, ppd_category_, record_status, lat, lng,
+# nspl_lat, nspl_lng
+# nspl_lat/nspl_lng must be populated — the RPC filters WHERE nspl_lat IS NOT NULL
+PP_GEO_TABLE  = "price_paid_geo"
+PP_GEO_URL    = "https://www.gov.uk/government/uploads/system/uploads/attachment_data/file/pp-monthly-update-new-version.csv"
 
-PP_COLUMNS = [
-    "transaction_id", "price", "date_of_transfer", "postcode",
-    "property_type", "new_build", "estate_type",
-    "saon", "paon", "street", "locality", "town", "district", "county",
-    "ppd_category", "record_status",
-]
+# nspl_lookup cache: postcode_nospace -> (lat, lng)
+_nspl_cache: dict = {}
 
-def _ingest_pp_url(url: str) -> int:
-    """Download a single Price Paid file and upsert into Supabase. Returns row count."""
+def _get_nspl_lat_lng(pcd_nospace: str) -> tuple:
+    """Look up lat/lng from nspl_lookup table. Cached in memory per run."""
+    if pcd_nospace in _nspl_cache:
+        return _nspl_cache[pcd_nospace]
     try:
-        r = requests.get(url, timeout=600, stream=True)
-        if r.status_code == 404:
-            log.info(f"Price paid file not yet published: {url} — skipping")
-            return 0
-        if r.status_code != 200:
-            log.warning(f"Price paid download returned {r.status_code} for {url} — skipping")
-            return 0
-    except Exception as e:
-        log.error(f"Price paid download failed for {url}: {e}")
-        return 0
+        res = supabase.table("nspl_lookup").select("lat,lng").eq("pcd_nospace", pcd_nospace).limit(1).execute()
+        if res.data:
+            lat = res.data[0].get("lat")
+            lng = res.data[0].get("lng")
+            _nspl_cache[pcd_nospace] = (lat, lng)
+            return lat, lng
+    except Exception:
+        pass
+    _nspl_cache[pcd_nospace] = (None, None)
+    return None, None
 
-    content = r.content.decode("utf-8", errors="replace")
-    reader  = csv.reader(io.StringIO(content))
+def refresh_price_paid():
+    """Download monthly Price Paid update and upsert into price_paid_geo with lat/lng.
+    price_paid_geo is the table queried by housing_comps_v1 RPC.
+    nspl_lat/nspl_lng are populated from nspl_lookup so the RPC radius search works.
+    """
+    log.info("Starting price_paid_geo refresh from monthly update...")
+    try:
+        r = requests.get(PP_GEO_URL, timeout=300, stream=True)
+        if r.status_code != 200:
+            log.warning(f"Monthly PP update returned {r.status_code} — skipping")
+            return
+    except Exception as e:
+        log.error(f"Price paid download failed: {e}")
+        return
+
+    content_str = r.content.decode("utf-8", errors="replace")
+    reader  = csv.reader(io.StringIO(content_str))
     batch   = []
     count   = 0
+    skipped = 0
 
     for row in reader:
         if len(row) < 15:
             continue
         try:
+            raw_pc   = row[3].strip().upper()
+            pcd_ns   = raw_pc.replace(" ", "")
+            if not pcd_ns:
+                continue
+
+            nspl_lat, nspl_lng = _get_nspl_lat_lng(pcd_ns)
+
             record = {
-                "transaction_id":   row[0].strip('{}'),
+                "transaction_unique_identifier": row[0].strip("{}"),
                 "price":            int(row[1]) if row[1].strip().isdigit() else None,
                 "date_of_transfer": row[2][:10] if row[2] else None,
-                "postcode":         row[3].strip().upper().replace(" ", ""),
+                "postcode":         raw_pc,
+                "postcode_nospace": pcd_ns,
                 "property_type":    row[4].strip(),
-                "new_build":        row[5].strip() == "Y",
-                "estate_type":      row[6].strip(),
-                "town":             row[11].strip().title() if row[11] else None,
+                "old_new":          row[5].strip(),
+                "duration":         row[6].strip(),
+                "paon":             row[7].strip() or None,
+                "saon":             row[8].strip() or None,
+                "street":           row[9].strip() or None,
+                "locality":         row[10].strip() or None,
+                "town_city":        row[11].strip().title() if row[11] else None,
                 "district":         row[12].strip().title() if row[12] else None,
                 "county":           row[13].strip().title() if row[13] else None,
+                "ppd_category_":    row[14].strip() if len(row) > 14 else None,
+                "record_status":    row[15].strip() if len(row) > 15 else None,
+                "nspl_lat":         nspl_lat,
+                "nspl_lng":         nspl_lng,
+                "lat":              nspl_lat,
+                "lng":              nspl_lng,
             }
-            if not record["transaction_id"] or not record["price"]:
+
+            if not record["transaction_unique_identifier"] or not record["price"]:
+                skipped += 1
                 continue
+
             batch.append(record)
             if len(batch) >= BATCH_SIZE:
-                supabase.table(PP_TABLE).upsert(batch, on_conflict="transaction_id").execute()
+                supabase.table(PP_GEO_TABLE).upsert(
+                    batch, on_conflict="transaction_unique_identifier"
+                ).execute()
                 count += len(batch)
                 batch = []
-                log.info(f"Price paid: {count} rows upserted from {url}")
+                log.info(f"price_paid_geo: {count} rows upserted")
+
         except Exception as e:
-            log.warning(f"PP row error: {e}")
+            log.warning(f"PP geo row error: {e}")
             continue
 
     if batch:
-        supabase.table(PP_TABLE).upsert(batch, on_conflict="transaction_id").execute()
+        supabase.table(PP_GEO_TABLE).upsert(
+            batch, on_conflict="transaction_unique_identifier"
+        ).execute()
         count += len(batch)
 
-    log.info(f"Ingested {count} rows from {url}")
-    return count
-
-
-def refresh_price_paid():
-    """Download rolling 12-month Price Paid data: current year + previous year.
-    Uses correct Land Registry yearly file format (pp-YYYY.txt) covering all postcodes.
-    """
-    log.info("Starting price paid refresh (rolling 12-month, yearly files)...")
-    now   = datetime.utcnow()
-    total = 0
-
-    # Current year and previous year full files
-    # pp-YYYY.txt is the correct Land Registry yearly file format
-    for year in [now.year, now.year - 1]:
-        url = f"{LR_S3_BASE}/pp-{year}.txt"
-        log.info(f"Fetching Price Paid yearly file: {url}")
-        total += _ingest_pp_url(url)
-
-    log.info(f"Price paid refresh complete: {total} rows upserted")
+    log.info(f"price_paid_geo refresh complete: {count} rows upserted, {skipped} skipped")
 
 
 # ── SCHOOLS (OFSTED) ──────────────────────────────────────────────────────────
