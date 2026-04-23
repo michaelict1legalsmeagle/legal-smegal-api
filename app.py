@@ -2815,7 +2815,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
         )
 
-    payload = {"postcode": pc, "radius_miles": r_miles, "limit_n": lim}
+    payload = {"in_postcode": pc, "in_radius_miles": r_miles, "in_limit": lim}
 
     try:
         res = supabase.rpc(HOUSING_RPC_NAME, payload).execute()
