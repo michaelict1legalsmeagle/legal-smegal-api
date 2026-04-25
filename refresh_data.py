@@ -138,7 +138,8 @@ def refresh_hpi():
 
 
 # ── LAND REGISTRY PRICE PAID ──────────────────────────────────────────────────
-PP_GEO_TABLE = "price_paid_geo"
+# Upsert target is the base table — price_paid_geo is a materialized view built from this
+PP_GEO_TABLE = "price_paid_raw_2025"
 
 # Confirmed live URLs as of April 2026 — LR moved to dedicated subdomain
 PP_MONTHLY_URL = "https://price-paid-data.publicdata.landregistry.gov.uk/pp-monthly-update-new-version.csv"
@@ -207,29 +208,24 @@ def _upsert_pp_rows_from_csv(content_str: str, label: str):
             pcd_ns = raw_pc.replace(" ", "")
             if not pcd_ns:
                 continue
-            nspl_lat, nspl_lng = _get_nspl_lat_lng(pcd_ns)
             record = {
                 "transaction_unique_identifier": row[0].strip("{}"),
-                "price":            int(row[1]) if row[1].strip().isdigit() else None,
-                "date_of_transfer": row[2][:10] if row[2] else None,
-                "postcode":         raw_pc,
-                "postcode_nospace": pcd_ns,
-                "property_type":    row[4].strip(),
-                "old_new":          row[5].strip(),
-                "duration":         row[6].strip(),
-                "paon":             row[7].strip() or None,
-                "saon":             row[8].strip() or None,
-                "street":           row[9].strip() or None,
-                "locality":         row[10].strip() or None,
-                "town_city":        row[11].strip().title() if row[11] else None,
-                "district":         row[12].strip().title() if row[12] else None,
-                "county":           row[13].strip().title() if row[13] else None,
-                "ppd_category_":    row[14].strip() if len(row) > 14 else None,
-                "record_status":    row[15].strip() if len(row) > 15 else None,
-                "nspl_lat":         nspl_lat,
-                "nspl_lng":         nspl_lng,
-                "lat":              nspl_lat,
-                "lng":              nspl_lng,
+                "price":             int(row[1]) if row[1].strip().isdigit() else None,
+                "date_of_transfer":  row[2][:10] if row[2] else None,
+                "postcode":          raw_pc,
+                "postcode_nospace":  pcd_ns,
+                "property_type":     row[4].strip(),
+                "old_new":           row[5].strip(),
+                "duration":          row[6].strip(),
+                "paon":              row[7].strip() or None,
+                "saon":              row[8].strip() or None,
+                "street":            row[9].strip() or None,
+                "locality":          row[10].strip() or None,
+                "town_city":         row[11].strip().title() if row[11] else None,
+                "district":          row[12].strip().title() if row[12] else None,
+                "county":            row[13].strip().title() if row[13] else None,
+                "ppd_category_type": row[14].strip() if len(row) > 14 else None,
+                "record_status":     row[15].strip() if len(row) > 15 else None,
             }
             if not record["transaction_unique_identifier"] or not record["price"]:
                 skipped += 1
