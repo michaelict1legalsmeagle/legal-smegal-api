@@ -3755,7 +3755,7 @@ def update_deal(deal_id: str):
     # Whitelist updatable fields — never allow user_id to be changed
     allowed = {
         "deal_name", "title", "postcode", "lot_number", "guide_price",
-        "deal_type", "auction_date", "status", "bid_ceiling", "hammer_price", "hammer_date", "outcome", "completion_period",
+        "deal_type", "auction_date", "status", "bid_ceiling", "hammer_price", "outcome",
         "completion_period", "completion_deadline", "completion_actions",
         "summary_json", "analysis_json", "area_json", "financials_json",
         "deal_score", "address",
@@ -5010,8 +5010,9 @@ def get_dashboard():
             "status":          d.get("status", "active"),
             "outcome":         d.get("outcome"),
             "hammer_price":    d.get("hammer_price"),
-            "hammer_date":    d.get("hammer_date"),
+            "hammer_date":     d.get("hammer_date"),
             "completion_period": d.get("completion_period") or 28,
+            "completion_actions": d.get("completion_actions") or [],
             "created_at":      d.get("created_at"),
             "gross_yield_pct": ret.get("gross_yield_pct"),
             "net_yield_pct":   ret.get("net_yield_pct"),
