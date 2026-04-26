@@ -4984,10 +4984,16 @@ def get_dashboard():
     for d in deals:
         ad = d.get("auction_date")
         if ad and isinstance(ad, str) and today_str <= ad[:10] <= cutoff:
+            prop        = ((d.get("summary_json") or {}).get("property") or
+                          (d.get("summary_json") or {}).get("prop") or {})
+            prop_addr   = prop.get("address") or ""
+            raw_name    = d.get("deal_name") or d.get("title") or ""
+            is_fallback = raw_name.startswith("Deal") and ("—" in raw_name or "-" in raw_name)
+            display     = prop_addr if (is_fallback and prop_addr) else (raw_name or prop_addr or d.get("address") or d.get("postcode") or "")
             upcoming.append({
                 "deal_id":     d["id"],
-                "deal_name":   d.get("deal_name") or d.get("title", ""),
-                "address":     d.get("address") or d.get("postcode", ""),
+                "deal_name":   display,
+                "address":     prop_addr or d.get("address") or d.get("postcode", ""),
                 "auction_date": ad[:10],
                 "deal_score":  d.get("deal_score"),
                 "guide_price": d.get("guide_price"),
