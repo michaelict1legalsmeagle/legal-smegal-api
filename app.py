@@ -5834,5 +5834,22 @@ def home():
     })
 
 
+
+@app.route("/api/auction-triangulation", methods=["GET"])
+def auction_triangulation():
+    guide = request.args.get("guide", type=float)
+    postcode = request.args.get("postcode", type=str)
+
+    result = supabase.rpc('get_auction_triangulation', {
+        'input_guide': guide,
+        'input_postcode': postcode
+    }).execute()
+
+    if hasattr(result, 'error') and result.error:
+        return jsonify({"error": result.error}), 500
+
+    return jsonify(result.data)
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5050)
