@@ -213,7 +213,6 @@ def _upsert_pp_rows_from_csv(content_str: str, label: str):
                 "price":             int(row[1]) if row[1].strip().isdigit() else None,
                 "date_of_transfer":  row[2][:10] if row[2] else None,
                 "postcode":          raw_pc,
-                "postcode_nospace":  pcd_ns,
                 "property_type":     row[4].strip(),
                 "old_new":           row[5].strip(),
                 "duration":          row[6].strip(),
