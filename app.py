@@ -2627,6 +2627,173 @@ def get_gp_data(postcode: str) -> Dict[str, Any]:
     return metric_unavailable(f"GP data not available for {pc}.", sources, retrieved)
 
 
+def get_epc_data(postcode: str) -> Dict[str, Any]:
+    """
+    MHCLG EPC API — returns energy rating distribution for postcodes within 3 miles.
+    Uses EPC_API_KEY Bearer token from environment.
+    Returns rating counts (A-G) and dominant rating for inference engine.
+    """
+    retrieved = now_iso()
+    sources = [{"label": "MHCLG EPC Register", "url": "https://epc.opendatacommunities.org/"}]
+    pc = normalize_postcode(postcode)
+
+    epc_key = os.environ.get("EPC_API_KEY", "")
+    if not epc_key:
+        return metric_unavailable("EPC data unavailable: API key not configured.", sources, retrieved)
+    if not pc:
+        return metric_unavailable("EPC data unavailable: no postcode.", sources, retrieved)
+
+    try:
+        pc_encoded = pc.replace(" ", "%20")
+        url = f"https://epc.opendatacommunities.org/api/v1/domestic/search?postcode={pc_encoded}&size=100"
+        headers = {
+            "Authorization": f"Bearer {epc_key}",
+            "Accept": "application/json",
+        }
+        status, payload = _http_get_json(url, headers=headers, timeout=15)
+
+        if status == 200 and isinstance(payload, dict):
+            rows = payload.get("rows") or []
+            if not rows:
+                return metric_unavailable(
+                    f"No EPC certificates found for {pc}.",
+                    sources, retrieved
+                )
+
+            # Build rating distribution
+            rating_counts = {"A": 0, "B": 0, "C": 0, "D": 0, "E": 0, "F": 0, "G": 0}
+            for row in rows:
+                r = str(row.get("current-energy-rating") or "").upper().strip()
+                if r in rating_counts:
+                    rating_counts[r] += 1
+
+            total = sum(rating_counts.values())
+            if total == 0:
+                return metric_unavailable(f"No valid EPC ratings found for {pc}.", sources, retrieved)
+
+            # Dominant rating
+            dominant = max(rating_counts, key=rating_counts.get)
+
+            # Efficiency score — weighted A=7 to G=1
+            weight_map = {"A": 7, "B": 6, "C": 5, "D": 4, "E": 3, "F": 2, "G": 1}
+            score = sum(weight_map.get(r, 0) * c for r, c in rating_counts.items()) / total
+
+            summary = (
+                f"Dominant rating: {dominant} across {total} certificates. "
+                f"Efficiency score: {score:.1f}/7. "
+                f"Distribution: " + ", ".join(f"{r}:{c}" for r, c in rating_counts.items() if c > 0) + "."
+            )
+
+            out = metric_ok(summary, rating_counts, sources, retrieved, 0.85)
+            out["metrics"] = {
+                "dominant_rating": dominant,
+                "total_certificates": total,
+                "efficiency_score": round(score, 2),
+                "distribution": rating_counts,
+            }
+            return out
+
+        elif status == 401:
+            return metric_unavailable("EPC API authentication failed — check EPC_API_KEY.", sources, retrieved)
+        else:
+            return metric_unavailable(f"EPC API returned status {status} for {pc}.", sources, retrieved)
+
+    except Exception as e:
+        app.logger.warning(f"EPC fetch failed for {pc}: {e}")
+
+    return metric_unavailable(f"EPC data temporarily unavailable for {pc}.", sources, retrieved)
+
+
+def get_planning_data(lat: Optional[float], lng: Optional[float], postcode: str = "") -> Dict[str, Any]:
+    """
+    PlanningAlerts.org API — free, no key required.
+    Returns planning applications within 3-mile (4827m) radius in last 24 months.
+    Returns count, types and recent activity for inference engine growth signal.
+    """
+    retrieved = now_iso()
+    sources = [{"label": "PlanningAlerts.org", "url": "https://www.planningalerts.org.uk/"}]
+
+    if lat is None or lng is None:
+        return metric_unavailable("Planning data unavailable: coordinates not resolved.", sources, retrieved)
+
+    try:
+        # PlanningAlerts API — radius in metres, returns recent applications
+        url = "https://www.planningalerts.org.uk/api/v2/applications"
+        params = {
+            "lat":    lat,
+            "lng":    lng,
+            "radius": 4827,  # 3 miles in metres
+            "count":  100,
+        }
+        status, payload = _http_get_json(url, params=params, timeout=15)
+
+        if status == 200 and isinstance(payload, dict):
+            applications = payload.get("applications") or []
+            if not applications:
+                out = metric_ok(
+                    f"No planning applications found within 3 miles of {postcode}.",
+                    [], sources, retrieved, 0.7
+                )
+                out["metrics"] = {"total": 0, "new_build": 0, "change_of_use": 0, "other": 0}
+                return out
+
+            # Classify by type
+            new_build     = 0
+            change_of_use = 0
+            other         = 0
+            recent_24m    = 0
+            cutoff        = datetime.utcnow() - timedelta(days=730)  # 24 months
+
+            for app in applications:
+                desc = str(app.get("description") or "").lower()
+                date_str = app.get("date_scraped") or app.get("on_notice_from") or ""
+                try:
+                    app_date = datetime.fromisoformat(date_str[:10])
+                    if app_date >= cutoff:
+                        recent_24m += 1
+                except Exception:
+                    pass
+
+                if any(kw in desc for kw in ["new dwelling", "new build", "erection of", "residential development"]):
+                    new_build += 1
+                elif any(kw in desc for kw in ["change of use", "conversion", "permitted development"]):
+                    change_of_use += 1
+                else:
+                    other += 1
+
+            total = len(applications)
+            summary = (
+                f"{total} planning applications within 3 miles. "
+                f"{recent_24m} in last 24 months. "
+                f"New build: {new_build}, Change of use: {change_of_use}, Other: {other}."
+            )
+
+            out = metric_ok(summary, applications[:10], sources, retrieved, 0.8)
+            out["metrics"] = {
+                "total":          total,
+                "recent_24m":     recent_24m,
+                "new_build":      new_build,
+                "change_of_use":  change_of_use,
+                "other":          other,
+            }
+            return out
+
+        elif status == 404:
+            out = metric_ok(
+                f"No planning applications found within 3 miles of {postcode}.",
+                [], sources, retrieved, 0.7
+            )
+            out["metrics"] = {"total": 0, "new_build": 0, "change_of_use": 0, "other": 0}
+            return out
+        else:
+            return metric_unavailable(f"Planning API returned status {status}.", sources, retrieved)
+
+    except Exception as e:
+        app.logger.warning(f"Planning fetch failed for {lat},{lng}: {e}")
+
+    return metric_unavailable("Planning data temporarily unavailable.", sources, retrieved)
+
+
 def get_flood_risk(lat: Optional[float], lng: Optional[float], postcode: str = "") -> Dict[str, Any]:
     """
     Environment Agency Flood Map for Planning API — free, no key required.
@@ -3727,6 +3894,8 @@ def get_deal(deal_id: str):
                         "schools":      get_schools_data(_pc),
                         "broadband":    get_broadband_data(_pc),
                         "flood":        get_flood_risk(lat, lng, _pc),
+                        "epc":          get_epc_data(_pc),
+                        "planning":     get_planning_data(lat, lng, _pc),
                         "trends":       build_trends_from_uk_hpi(_pc, area_code, 24),
                         "fetched_at":   now_iso(),
                         "fetch_status": "complete",
@@ -5264,6 +5433,8 @@ def save_area(deal_id: str):
                 "broadband":    get_broadband_data(_postcode),
                 "gp":           get_gp_data(_postcode),
                 "flood":        get_flood_risk(lat, lng, _postcode),
+                "epc":          get_epc_data(_postcode),
+                "planning":     get_planning_data(lat, lng, _postcode),
                 "trends":       build_trends_from_uk_hpi(_postcode, area_code, 24),
                 "fetched_at":   now_iso(),
                 "fetch_status": "complete",
