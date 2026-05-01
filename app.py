@@ -5739,18 +5739,24 @@ def save_area(deal_id: str):
         cached = deal.data["area_json"]
         # Don't return error-marker cache as valid data
         if cached.get("fetch_status") != "error":
-            # If cached data is missing inference, run it now and patch the cache
+            # If cached data is missing inference, patch it in a background thread
             if not cached.get("inference") and cached.get("postcode"):
-                try:
-                    inference_result = build_area_inference(cached, cached["postcode"])
-                    cached.update(inference_result)
-                    supabase.table("deals").update({
-                        "area_json":  cached,
-                        "updated_at": now_iso(),
-                    }).eq("id", deal_id).execute()
-                    app.logger.info(f"Inference patched into cached area_json for deal {deal_id}")
-                except Exception as _inf_e:
-                    app.logger.warning(f"Inference patch failed for {deal_id}: {_inf_e}")
+                _cached_ref  = cached
+                _deal_id_ref = deal_id
+                _pc_ref      = cached["postcode"]
+                def _patch_inference():
+                    try:
+                        inference_result = build_area_inference(_cached_ref, _pc_ref)
+                        _cached_ref.update(inference_result)
+                        supabase.table("deals").update({
+                            "area_json":  _cached_ref,
+                            "updated_at": now_iso(),
+                        }).eq("id", _deal_id_ref).execute()
+                        app.logger.info(f"Inference patched for deal {_deal_id_ref}")
+                    except Exception as _e:
+                        app.logger.warning(f"Inference patch failed for {_deal_id_ref}: {_e}")
+                import threading as _ti
+                _ti.Thread(target=_patch_inference, daemon=True).start()
             return jsonify({
                 "ok":       True,
                 "area":     cached,
