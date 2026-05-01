@@ -2627,6 +2627,351 @@ def get_gp_data(postcode: str) -> Dict[str, Any]:
     return metric_unavailable(f"GP data not available for {pc}.", sources, retrieved)
 
 
+def _get_lad_code_for_postcode(postcode: str) -> Optional[str]:
+    """Look up LAD code from postcode_to_lsoa table."""
+    try:
+        pc = normalize_postcode(postcode)
+        res = supabase.table("postcode_to_lsoa") \
+            .select("ladcd") \
+            .eq("pcds", pc) \
+            .limit(1).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if rows and rows[0].get("ladcd"):
+            return str(rows[0]["ladcd"]).strip()
+    except Exception:
+        pass
+    return None
+
+
+def _get_rental_trend(lad_code: str) -> Dict[str, Any]:
+    """
+    Pull rent_yoy_pct series from uk_prms_monthly for the LAD.
+    Returns direction: Increasing / Stable / Declining and 36-month series.
+    """
+    try:
+        res = supabase.table("uk_prms_monthly") \
+            .select("period,rent_index,rent_yoy_pct,rent_price_gbp") \
+            .eq("area_code", lad_code) \
+            .order("period", desc=False) \
+            .limit(48).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if not rows:
+            return {"direction": "Unknown", "series": [], "latest_yoy": None}
+
+        series = []
+        for r in rows:
+            yoy = safe_float(r.get("rent_yoy_pct"))
+            idx = safe_float(r.get("rent_index"))
+            period = str(r.get("period") or "")[:10]
+            if period:
+                series.append({
+                    "period":        period,
+                    "rent_index":    idx,
+                    "rent_yoy_pct":  yoy,
+                    "rent_price_gbp": r.get("rent_price_gbp"),
+                })
+
+        # Use last 3 readings with yoy data for direction
+        yoy_vals = [s["rent_yoy_pct"] for s in series if s["rent_yoy_pct"] is not None]
+        latest_yoy = yoy_vals[-1] if yoy_vals else None
+        avg_yoy    = sum(yoy_vals[-6:]) / len(yoy_vals[-6:]) if len(yoy_vals) >= 2 else latest_yoy
+
+        if avg_yoy is None:
+            direction = "Unknown"
+        elif avg_yoy > 1.0:
+            direction = "Increasing"
+        elif avg_yoy < -1.0:
+            direction = "Declining"
+        else:
+            direction = "Stable"
+
+        return {"direction": direction, "series": series, "latest_yoy": latest_yoy}
+    except Exception as e:
+        app.logger.warning(f"Rental trend fetch failed for {lad_code}: {e}")
+        return {"direction": "Unknown", "series": [], "latest_yoy": None}
+
+
+def _get_population_trend(lad_code: str) -> Dict[str, Any]:
+    """
+    Pull population series from ons_population for the LAD.
+    Returns direction: Growing / Stable / Declining and year series.
+    """
+    try:
+        res = supabase.table("ons_population") \
+            .select("year,population") \
+            .eq("lad_code", lad_code) \
+            .order("year", desc=False) \
+            .execute()
+        rows = res.data if hasattr(res, "data") else []
+        if not rows or len(rows) < 2:
+            return {"direction": "Unknown", "series": rows, "change_pct": None}
+
+        series = [{"year": r["year"], "population": r["population"]} for r in rows]
+
+        # Use last 5 years for trend
+        recent = series[-5:]
+        start_pop = recent[0]["population"]
+        end_pop   = recent[-1]["population"]
+        change_pct = ((end_pop - start_pop) / start_pop * 100) if start_pop else 0
+
+        if change_pct > 1.0:
+            direction = "Growing"
+        elif change_pct < -1.0:
+            direction = "Declining"
+        else:
+            direction = "Stable"
+
+        return {"direction": direction, "series": series, "change_pct": round(change_pct, 2)}
+    except Exception as e:
+        app.logger.warning(f"Population trend fetch failed for {lad_code}: {e}")
+        return {"direction": "Unknown", "series": [], "change_pct": None}
+
+
+def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, Any]:
+    """
+    7-step inference engine per spec.
+    Reads all signals from area_data + Supabase.
+    Returns structured inference: trajectory, chart_data, drivers, demand_supply, provenance.
+    Never raises — returns partial result on any failure.
+    """
+    try:
+        # ── STEP 1: FEATURE EXTRACTION ─────────────────────────────
+        area_code = str(area_data.get("area_code") or "").strip()
+
+        # Price trend — from trends.signals.priceGrowth
+        trends    = area_data.get("trends") or {}
+        signals   = (trends.get("signals") or {})
+        pg        = signals.get("priceGrowth") or {}
+        price_yoy = safe_float(pg.get("percentage", "").replace("%", "")) if isinstance(pg.get("percentage"), str) else safe_float(pg.get("percentage"))
+        price_trend_dir = pg.get("trend") or "Stable"  # Increasing / Stable / Decreasing
+        price_history   = pg.get("historicalData") or []
+
+        # Transaction volume — from housing metrics
+        housing   = area_data.get("housing") or {}
+        h_metrics = housing.get("metrics") or {}
+        tx_count  = safe_float(h_metrics.get("transaction_count") or h_metrics.get("count") or 0)
+
+        # Crime trend
+        crime     = area_data.get("crime") or {}
+        c_metrics = crime.get("metrics") or {}
+        crime_trend = str(c_metrics.get("trend") or crime.get("summary") or "").lower()
+        crime_rising = any(w in crime_trend for w in ["rising", "increasing", "up", "higher"])
+        crime_falling = any(w in crime_trend for w in ["falling", "decreasing", "down", "lower", "low"])
+
+        # Amenities
+        amenities   = area_data.get("amenities") or {}
+        a_metrics   = amenities.get("metrics") or {}
+        amenity_count = int(safe_float(a_metrics.get("total") or a_metrics.get("count") or 0) or 0)
+
+        # EPC distribution
+        epc       = area_data.get("epc") or {}
+        e_metrics = epc.get("metrics") or {}
+        epc_dominant = str(e_metrics.get("dominant_rating") or "").upper()
+        epc_score    = safe_float(e_metrics.get("efficiency_score") or 0) or 0
+
+        # Planning
+        planning    = area_data.get("planning") or {}
+        p_metrics   = planning.get("metrics") or {}
+        plan_recent = int(safe_float(p_metrics.get("recent_24m") or 0) or 0)
+        plan_total  = int(safe_float(p_metrics.get("total") or 0) or 0)
+        plan_new_build = int(safe_float(p_metrics.get("new_build") or 0) or 0)
+
+        # Rental trend from Supabase
+        lad_code = _get_lad_code_for_postcode(postcode) or area_code
+        rental   = _get_rental_trend(lad_code)
+        rental_dir = rental["direction"]   # Increasing / Stable / Declining / Unknown
+        rental_series = rental["series"]
+
+        # Population trend from Supabase
+        pop      = _get_population_trend(lad_code)
+        pop_dir  = pop["direction"]        # Growing / Stable / Declining / Unknown
+        pop_series = pop["series"]
+
+        # ── STEP 2: SIGNAL MAPPING ────────────────────────────────
+        # Demand Pressure
+        rental_up   = rental_dir == "Increasing"
+        rental_down = rental_dir == "Declining"
+        pop_up      = pop_dir == "Growing"
+        pop_down    = pop_dir == "Declining"
+
+        if rental_up and pop_up:
+            demand_signal = "Increasing"
+        elif rental_down or pop_down:
+            demand_signal = "Weakening"
+        elif rental_up or pop_up:
+            demand_signal = "Increasing"
+        else:
+            demand_signal = "Stable"
+
+        # Growth Vector
+        amenity_positive = amenity_count > 20
+        planning_active  = plan_recent >= 5
+
+        if amenity_positive and planning_active:
+            growth_signal = "Expanding"
+        elif amenity_positive or planning_active:
+            growth_signal = "Emerging"
+        else:
+            growth_signal = "Flat"
+
+        # Market Response
+        price_up   = price_trend_dir == "Increasing"
+        price_down = price_trend_dir == "Decreasing"
+        vol_up     = tx_count > 10
+
+        if price_up and vol_up:
+            market_signal = "Confirming"
+        elif price_up and not vol_up:
+            market_signal = "Fragile"
+        elif price_down:
+            market_signal = "Diverging"
+        else:
+            market_signal = "Neutral"
+
+        # Risk Drag
+        epc_poor = epc_dominant in ("E", "F", "G") or epc_score < 3.5
+        epc_good = epc_dominant in ("A", "B", "C") or epc_score >= 4.5
+
+        if crime_rising and epc_poor:
+            risk_signal = "Suppressing"
+        elif crime_falling and epc_good:
+            risk_signal = "Minimal"
+        else:
+            risk_signal = "Neutral"
+
+        # ── STEP 3: AREA TRAJECTORY ───────────────────────────────
+        # Score: demand(2) + growth(1) + market(2) - risk(2)
+        score = 0
+        score += {"Increasing": 2, "Stable": 0, "Weakening": -2}.get(demand_signal, 0)
+        score += {"Expanding": 2, "Emerging": 1, "Flat": 0}.get(growth_signal, 0)
+        score += {"Confirming": 2, "Fragile": 1, "Neutral": 0, "Diverging": -2}.get(market_signal, 0)
+        score += {"Minimal": 1, "Neutral": 0, "Suppressing": -2}.get(risk_signal, 0)
+
+        if score >= 4:
+            trajectory = "EXPANDING"
+        elif score >= 1:
+            trajectory = "STABLE"
+        elif score >= -1:
+            trajectory = "CONSTRAINED"
+        else:
+            trajectory = "DECLINING"
+
+        # ── STEP 4: CHART DATA (indexed, base=100) ────────────────
+        # Price line — from uk_hpi historicalData (already YoY %)
+        # Convert YoY % series to index (base=100 at start)
+        price_index = []
+        idx_val = 100.0
+        for pt in sorted(price_history, key=lambda x: x.get("period", "")):
+            yoy = safe_float(pt.get("price_change_pct") or pt.get("value") or 0) or 0
+            idx_val = idx_val * (1 + yoy / 100)
+            price_index.append({"period": pt.get("period"), "value": round(idx_val, 2)})
+        # Trim to last 36 months
+        price_index = price_index[-36:] if len(price_index) > 36 else price_index
+
+        # Demand line — rent_index from uk_prms_monthly (already base=100)
+        demand_index = [
+            {"period": s["period"], "value": round(float(s["rent_index"]), 2)}
+            for s in rental_series if s.get("rent_index") is not None
+        ][-36:]
+
+        # Growth line — planning applications indexed (base=100 at first period)
+        # Use amenity count as a flat signal if planning sparse
+        growth_index = []
+        if plan_total > 0:
+            growth_base = max(plan_total / 12, 1)
+            for i, s in enumerate(rental_series[-36:]):
+                growth_index.append({"period": s["period"], "value": round(100 * (1 + (plan_recent / max(plan_total, 1) - 0.5)), 2)})
+        else:
+            growth_index = [{"period": s["period"], "value": 100.0} for s in rental_series[-36:]]
+
+        chart_data = {
+            "price":   price_index,
+            "demand":  demand_index,
+            "growth":  growth_index,
+        }
+
+        # ── STEP 5: DRIVER BULLETS ────────────────────────────────
+        drivers = []
+
+        # Positive drivers
+        if rental_up:
+            yoy_str = f"{rental['latest_yoy']:.1f}%" if rental.get("latest_yoy") else ""
+            drivers.append({"sign": "+", "text": f"Rental growth {yoy_str} — above baseline, demand pressure confirmed."})
+        if price_up:
+            pct_str = f"{price_yoy:.1f}%" if price_yoy else ""
+            drivers.append({"sign": "+", "text": f"Price trend {pct_str} YoY — market confirming upward trajectory."})
+        if plan_recent >= 5:
+            drivers.append({"sign": "+", "text": f"{plan_recent} planning applications in 24 months — active development pipeline."})
+        if pop_up:
+            drivers.append({"sign": "+", "text": f"Population growing — {pop.get('change_pct', 0):.1f}% over 5 years, demand base expanding."})
+        if epc_good:
+            drivers.append({"sign": "+", "text": f"EPC profile strong — dominant rating {epc_dominant}, above-average stock quality."})
+
+        # Negative drivers
+        if rental_down:
+            drivers.append({"sign": "-", "text": "Rental decline recorded — demand pressure weakening."})
+        if price_down:
+            drivers.append({"sign": "-", "text": "Price trend negative — market diverging from demand signals."})
+        if crime_rising:
+            drivers.append({"sign": "-", "text": "Crime trend rising — risk drag on rental demand and resale."})
+        if epc_poor:
+            drivers.append({"sign": "-", "text": f"EPC profile weak — dominant rating {epc_dominant}, stock quality below benchmark."})
+        if pop_down:
+            drivers.append({"sign": "-", "text": f"Population declining — {abs(pop.get('change_pct', 0)):.1f}% contraction over 5 years."})
+
+        # Trim to 2-4 bullets — prioritise by signal strength
+        if len(drivers) > 4:
+            pos = [d for d in drivers if d["sign"] == "+"][:2]
+            neg = [d for d in drivers if d["sign"] == "-"][:2]
+            drivers = pos + neg
+        elif len(drivers) < 2:
+            drivers.append({"sign": "~", "text": "Insufficient signal data to identify dominant drivers."})
+
+        # ── STEP 6: DEMAND VS SUPPLY ───────────────────────────────
+        if demand_signal == "Increasing" and market_signal in ("Confirming", "Fragile"):
+            demand_supply = "Demand > Supply — upward pressure on pricing."
+        elif demand_signal == "Weakening" or market_signal == "Diverging":
+            demand_supply = "Supply > Demand — downward pressure on pricing."
+        else:
+            demand_supply = "Balanced — stable pricing conditions."
+
+        # ── STEP 7: FINAL OUTPUT ───────────────────────────────────
+        return {
+            "inference": {
+                "trajectory":     trajectory,
+                "score":          score,
+                "signals": {
+                    "demand":   demand_signal,
+                    "growth":   growth_signal,
+                    "market":   market_signal,
+                    "risk":     risk_signal,
+                },
+                "chart_data":     chart_data,
+                "drivers":        drivers,
+                "demand_supply":  demand_supply,
+                "provenance":     "Sources: Land Registry · ONS Population · ONS PRMS Rental · OSM · PlanningAlerts · Police · EPC",
+                "lad_code":       lad_code,
+                "computed_at":    now_iso(),
+            }
+        }
+
+    except Exception as e:
+        app.logger.exception(f"build_area_inference failed for {postcode}: {e}")
+        return {
+            "inference": {
+                "trajectory":    "UNKNOWN",
+                "score":         0,
+                "signals":       {},
+                "chart_data":    {"price": [], "demand": [], "growth": []},
+                "drivers":       [],
+                "demand_supply": "Insufficient data.",
+                "provenance":    "Sources: Land Registry · ONS · OSM · Police · EPC · PlanningAlerts",
+                "error":         str(e),
+                "computed_at":   now_iso(),
+            }
+        }
+
+
 def get_epc_data(postcode: str) -> Dict[str, Any]:
     """
     MHCLG EPC API — returns energy rating distribution for postcodes within 3 miles.
@@ -3900,6 +4245,8 @@ def get_deal(deal_id: str):
                         "fetched_at":   now_iso(),
                         "fetch_status": "complete",
                     }
+                    inference_result = build_area_inference(area_data, _pc)
+                    area_data.update(inference_result)
                     supabase.table("deals").update({
                         "area_json":  area_data,
                         "updated_at": now_iso(),
@@ -5439,6 +5786,10 @@ def save_area(deal_id: str):
                 "fetched_at":   now_iso(),
                 "fetch_status": "complete",
             }
+
+            # ── INFERENCE ENGINE ─────────────────────────────────
+            inference_result = build_area_inference(area_data, _postcode)
+            area_data.update(inference_result)
 
             supabase.table("deals").update({
                 "area_json":  area_data,
