@@ -21,6 +21,7 @@ import os
 import io
 import csv
 import sys
+import time
 import logging
 import requests
 from datetime import datetime
@@ -146,7 +147,7 @@ PP_MONTHLY_URL = "https://price-paid-data.publicdata.landregistry.gov.uk/pp-mont
 PP_ANNUAL_URL  = "https://price-paid-data.publicdata.landregistry.gov.uk/pp-{year}.csv"
 
 # All confirmed annual files
-PP_ANNUAL_YEARS = [2023,]
+PP_ANNUAL_YEARS = list(range(2018, 2027))  # 2018–2026
 
 
 def get_latest_pp_url() -> str:
@@ -213,6 +214,7 @@ def _upsert_pp_rows_from_csv(content_str: str, label: str):
                 "price":             int(row[1]) if row[1].strip().isdigit() else None,
                 "date_of_transfer":  row[2][:10] if row[2] else None,
                 "postcode":          raw_pc,
+                "postcode_nospace":  pcd_ns,
                 "property_type":     row[4].strip(),
                 "old_new":           row[5].strip(),
                 "duration":          row[6].strip(),
@@ -237,6 +239,7 @@ def _upsert_pp_rows_from_csv(content_str: str, label: str):
                 count += len(batch)
                 batch = []
                 log.info(f"price_paid_geo [{label}]: {count} rows upserted")
+                time.sleep(3)  # throttle — prevents Supabase connection pool saturation
         except Exception as e:
             log.warning(f"PP geo row error [{label}]: {e}")
             continue
