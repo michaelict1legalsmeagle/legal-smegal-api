@@ -5739,6 +5739,18 @@ def save_area(deal_id: str):
         cached = deal.data["area_json"]
         # Don't return error-marker cache as valid data
         if cached.get("fetch_status") != "error":
+            # If cached data is missing inference, run it now and patch the cache
+            if not cached.get("inference") and cached.get("postcode"):
+                try:
+                    inference_result = build_area_inference(cached, cached["postcode"])
+                    cached.update(inference_result)
+                    supabase.table("deals").update({
+                        "area_json":  cached,
+                        "updated_at": now_iso(),
+                    }).eq("id", deal_id).execute()
+                    app.logger.info(f"Inference patched into cached area_json for deal {deal_id}")
+                except Exception as _inf_e:
+                    app.logger.warning(f"Inference patch failed for {deal_id}: {_inf_e}")
             return jsonify({
                 "ok":       True,
                 "area":     cached,
