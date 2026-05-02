@@ -2623,7 +2623,7 @@ def get_gp_data(postcode: str) -> Dict[str, Any]:
                     out["metrics"] = {"count": len(gps), "postcode": pc}
                     return out
     except Exception as e:
-        app.logger.warning(f"GP data fetch failed: {e}")
+        print(f"⚠️ GP data fetch failed: {e}")
     return metric_unavailable(f"GP data not available for {pc}.", sources, retrieved)
 
 
@@ -2687,7 +2687,7 @@ def _get_rental_trend(lad_code: str) -> Dict[str, Any]:
 
         return {"direction": direction, "series": series, "latest_yoy": latest_yoy}
     except Exception as e:
-        app.logger.warning(f"Rental trend fetch failed for {lad_code}: {e}")
+        print(f"⚠️ Rental trend fetch failed for {lad_code}: {e}")
         return {"direction": "Unknown", "series": [], "latest_yoy": None}
 
 
@@ -2723,7 +2723,7 @@ def _get_population_trend(lad_code: str) -> Dict[str, Any]:
 
         return {"direction": direction, "series": series, "change_pct": round(change_pct, 2)}
     except Exception as e:
-        app.logger.warning(f"Population trend fetch failed for {lad_code}: {e}")
+        print(f"⚠️ Population trend fetch failed for {lad_code}: {e}")
         return {"direction": "Unknown", "series": [], "change_pct": None}
 
 
@@ -2956,7 +2956,7 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         }
 
     except Exception as e:
-        app.logger.exception(f"build_area_inference failed for {postcode}: {e}")
+        print(f"⚠️ build_area_inference failed for {postcode}: {e}")
         return {
             "inference": {
                 "trajectory":    "UNKNOWN",
@@ -3044,7 +3044,7 @@ def get_epc_data(postcode: str) -> Dict[str, Any]:
             return metric_unavailable(f"EPC API returned status {status} for {pc}.", sources, retrieved)
 
     except Exception as e:
-        app.logger.warning(f"EPC fetch failed for {pc}: {e}")
+        print(f"⚠️ EPC fetch failed for {pc}: {e}")
 
     return metric_unavailable(f"EPC data temporarily unavailable for {pc}.", sources, retrieved)
 
@@ -3134,7 +3134,7 @@ def get_planning_data(lat: Optional[float], lng: Optional[float], postcode: str 
             return metric_unavailable(f"Planning API returned status {status}.", sources, retrieved)
 
     except Exception as e:
-        app.logger.warning(f"Planning fetch failed for {lat},{lng}: {e}")
+        print(f"⚠️ Planning fetch failed for {lat},{lng}: {e}")
 
     return metric_unavailable("Planning data temporarily unavailable.", sources, retrieved)
 
@@ -3192,7 +3192,7 @@ def get_flood_risk(lat: Optional[float], lng: Optional[float], postcode: str = "
                 out["metrics"] = {"zone": 1, "flood_areas": 0}
                 return out
     except Exception as e:
-        app.logger.warning(f"Flood risk fetch failed for {lat},{lng}: {e}")
+        print(f"⚠️ Flood risk fetch failed for {lat},{lng}: {e}")
 
     return metric_unavailable(
         f"Flood risk data temporarily unavailable. Verify via Environment Agency Flood Map before bidding.",
@@ -4260,9 +4260,9 @@ def get_deal(deal_id: str):
                         "area_json":  area_data,
                         "updated_at": now_iso(),
                     }).eq("id", _did).execute()
-                    app.logger.info(f"[area] auto-fetch complete for deal {_did}")
+                    print(f"✅ [area] auto-fetch complete for deal {_did}")
                 except Exception as _e:
-                    app.logger.warning(f"[area] auto-fetch failed for {_did}: {_e}")
+                    print(f"⚠️ [area] auto-fetch failed for {_did}: {_e}")
             threading.Thread(target=_bg_area, daemon=True).start()
         return jsonify({"ok": True, "deal": deal}), 200
     except Exception as e:
