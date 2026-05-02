@@ -147,7 +147,7 @@ PP_MONTHLY_URL = "https://price-paid-data.publicdata.landregistry.gov.uk/pp-mont
 PP_ANNUAL_URL  = "https://price-paid-data.publicdata.landregistry.gov.uk/pp-{year}.csv"
 
 # All confirmed annual files
-PP_ANNUAL_YEARS = list(range(2018, 2027))  # 2018–2026
+PP_ANNUAL_YEARS = list(range(2023))  # 2018–2026
 
 
 def get_latest_pp_url() -> str:
