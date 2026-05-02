@@ -3293,7 +3293,7 @@ def _median_int(values: List[int]) -> Optional[int]:
     return int((vs[mid - 1] + vs[mid]) / 2)
 
 
-def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None) -> Dict[str, Any]:
+def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
 
@@ -3344,6 +3344,15 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             )
             out["metrics"]["payload"] = payload
             return out
+
+        # Filter by property type if provided — fall back to all types if < 5 matching comps
+        pt_filter = (property_type or "").strip().upper()
+        if pt_filter and pt_filter in ("D", "S", "T", "F", "O"):
+            matched = [r for r in rows if str(r.get("property_type") or "").upper() == pt_filter]
+            if len(matched) >= 5:
+                rows = matched
+            # If < 5 matching, use all rows but note the mismatch
+            # This prevents empty comps on rare property types in thin markets
 
         enrich_meta = {}
         rows, enrich_meta = _enrich_housing_rows_with_latlng(rows)
@@ -5723,7 +5732,7 @@ def save_area(deal_id: str):
 
     try:
         deal = supabase.table("deals") \
-            .select("id, postcode, area_json") \
+            .select("id, postcode, area_json, summary_json") \
             .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
         if not deal.data:
             return jsonify({"error": "Deal not found"}), 404
@@ -5771,6 +5780,17 @@ def save_area(deal_id: str):
     # Capture for background thread — Flask request context does not survive threads
     _deal_id  = deal_id
     _postcode = postcode
+    # Extract property type from summary_json for matched comps filtering
+    _summary     = deal.data.get("summary_json") or {}
+    _prop        = _summary.get("property") or {}
+    _prop_type   = str(_prop.get("type") or "").strip().upper()
+    # Map common labels to Land Registry codes
+    _pt_map = {
+        "DETACHED": "D", "SEMI-DETACHED": "S", "SEMI DETACHED": "S",
+        "TERRACED": "T", "FLAT": "F", "MAISONETTE": "F", "APARTMENT": "F",
+        "D": "D", "S": "S", "T": "T", "F": "F"
+    }
+    _prop_type_code = _pt_map.get(_prop_type) or None
 
     def _fetch_and_store():
         try:
@@ -5790,7 +5810,7 @@ def save_area(deal_id: str):
                 "lat":          lat,
                 "lng":          lng,
                 "area_code":    area_code,
-                "housing":      get_housing_data(_postcode),
+                "housing":      get_housing_data(_postcode, property_type=_prop_type_code),
                 "crime":        get_crime_data(lat, lng),
                 "transport":    get_transport_data(lat, lng),
                 "amenities":    get_amenities_data(lat, lng),
