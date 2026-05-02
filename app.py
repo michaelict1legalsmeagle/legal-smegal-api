@@ -5761,9 +5761,9 @@ def save_area(deal_id: str):
                             "area_json":  _cached_ref,
                             "updated_at": now_iso(),
                         }).eq("id", _deal_id_ref).execute()
-                        app.logger.info(f"Inference patched for deal {_deal_id_ref}")
+                        print(f"✅ Inference patched for deal {_deal_id_ref}")
                     except Exception as _e:
-                        app.logger.warning(f"Inference patch failed for {_deal_id_ref}: {_e}")
+                        print(f"⚠️ Inference patch failed for {_deal_id_ref}: {_e}")
                 import threading as _ti
                 _ti.Thread(target=_patch_inference, daemon=True).start()
             return jsonify({
