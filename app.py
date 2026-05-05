@@ -2727,6 +2727,233 @@ def _get_population_trend(lad_code: str) -> Dict[str, Any]:
         return {"direction": "Unknown", "series": [], "change_pct": None}
 
 
+def _get_national_rental_benchmark() -> Dict[str, Any]:
+    """
+    National rental growth benchmark from uk_prms_monthly.
+    Uses area_code E92000001 (England) or aggregates all LADs.
+    Returns latest YoY % and 12-month average.
+    """
+    try:
+        # Try England national code first
+        res = supabase.table("uk_prms_monthly") \
+            .select("period,rent_yoy_pct,rent_index") \
+            .eq("area_code", "E92000001") \
+            .order("period", desc=True) \
+            .limit(12).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if not rows:
+            # Fallback: average across all LADs for latest period
+            res2 = supabase.table("uk_prms_monthly") \
+                .select("rent_yoy_pct") \
+                .order("period", desc=True) \
+                .limit(500).execute()
+            rows2 = res2.data if hasattr(res2, "data") else []
+            vals = [safe_float(r.get("rent_yoy_pct")) for r in rows2 if r.get("rent_yoy_pct") is not None]
+            avg = round(sum(vals) / len(vals), 2) if vals else None
+            return {"latest_yoy": avg, "avg_12m": avg}
+        yoys = [safe_float(r.get("rent_yoy_pct")) for r in rows if r.get("rent_yoy_pct") is not None]
+        latest = yoys[0] if yoys else None
+        avg12  = round(sum(yoys) / len(yoys), 2) if yoys else None
+        return {"latest_yoy": latest, "avg_12m": avg12}
+    except Exception as e:
+        print(f"[WARN] National rental benchmark failed: {e}")
+        return {"latest_yoy": None, "avg_12m": None}
+
+
+def _get_national_price_benchmark() -> Dict[str, Any]:
+    """
+    National average sold price from uk_hpi_monthly.
+    Uses area_code E92000001 (England) — latest 12 months.
+    Returns avg price and YoY % growth.
+    """
+    try:
+        res = supabase.table("uk_hpi_monthly") \
+            .select("period,average_price,price_change_pct") \
+            .eq("area_code", "E92000001") \
+            .order("period", desc=True) \
+            .limit(13).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if not rows:
+            return {"avg_price": None, "yoy_pct": None}
+        latest = rows[0]
+        return {
+            "avg_price": safe_float(latest.get("average_price")),
+            "yoy_pct":   safe_float(latest.get("price_change_pct")),
+        }
+    except Exception as e:
+        print(f"[WARN] National price benchmark failed: {e}")
+        return {"avg_price": None, "yoy_pct": None}
+
+
+def _get_regional_price_benchmark(lad_code: str) -> Dict[str, Any]:
+    """
+    Regional average sold price from uk_hpi_monthly for the LAD.
+    Returns latest avg price and YoY %.
+    """
+    try:
+        res = supabase.table("uk_hpi_monthly") \
+            .select("period,average_price,price_change_pct") \
+            .eq("area_code", lad_code) \
+            .order("period", desc=True) \
+            .limit(13).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if not rows:
+            return {"avg_price": None, "yoy_pct": None}
+        latest = rows[0]
+        return {
+            "avg_price": safe_float(latest.get("average_price")),
+            "yoy_pct":   safe_float(latest.get("price_change_pct")),
+        }
+    except Exception as e:
+        print(f"[WARN] Regional price benchmark failed for {lad_code}: {e}")
+        return {"avg_price": None, "yoy_pct": None}
+
+
+def _get_regional_rental_benchmark(lad_code: str) -> Dict[str, Any]:
+    """
+    Regional rental growth from uk_prms_monthly for LAD.
+    Returns latest YoY % and direction.
+    """
+    try:
+        res = supabase.table("uk_prms_monthly") \
+            .select("period,rent_yoy_pct,rent_price_gbp") \
+            .eq("area_code", lad_code) \
+            .order("period", desc=True) \
+            .limit(12).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if not rows:
+            return {"latest_yoy": None, "avg_rent_gbp": None}
+        yoys = [safe_float(r.get("rent_yoy_pct")) for r in rows if r.get("rent_yoy_pct") is not None]
+        rents = [safe_float(r.get("rent_price_gbp")) for r in rows if r.get("rent_price_gbp") is not None]
+        return {
+            "latest_yoy":   round(yoys[0], 2) if yoys else None,
+            "avg_rent_gbp": round(sum(rents) / len(rents), 0) if rents else None,
+        }
+    except Exception as e:
+        print(f"[WARN] Regional rental benchmark failed for {lad_code}: {e}")
+        return {"latest_yoy": None, "avg_rent_gbp": None}
+
+
+def _get_transaction_liquidity(postcode: str, lad_code: str) -> Dict[str, Any]:
+    """
+    Transaction liquidity: count of sold transactions per quarter
+    within postcode district vs LAD average.
+    Sourced from price_paid_raw_2025.
+    """
+    try:
+        district = postcode.split()[0] if postcode else ""
+        if not district:
+            return {"local_qtly": None, "lad_qtly": None}
+        # Local: last 12 months in postcode district
+        import datetime as _dt
+        cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=365)).strftime("%Y-%m-%d")
+        res_local = supabase.table("price_paid_raw_2025") \
+            .select("transaction_unique_identifier", count="exact") \
+            .ilike("postcode", f"{district}%") \
+            .gte("date_of_transfer", cutoff) \
+            .execute()
+        local_count = res_local.count if hasattr(res_local, "count") else 0
+        local_qtly  = round((local_count or 0) / 4, 0)
+        return {
+            "local_qtly":  local_qtly,
+            "local_annual": local_count,
+            "district":   district,
+        }
+    except Exception as e:
+        print(f"[WARN] Transaction liquidity failed for {postcode}: {e}")
+        return {"local_qtly": None, "local_annual": None, "district": None}
+
+
+def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
+    """
+    Compute gross yield benchmarks from existing tables.
+    yield = (latest_monthly_rent * 12) / avg_price * 100
+    Local (LAD), regional (from HPI), national (England).
+    """
+    try:
+        results = {}
+
+        # Local yield — LAD rent + LAD price
+        rent_res = supabase.table("uk_prms_monthly") \
+            .select("rent_price_gbp") \
+            .eq("area_code", lad_code) \
+            .order("period", desc=True) \
+            .limit(1).execute()
+        rent_rows = rent_res.data if hasattr(rent_res, "data") else []
+        local_rent = safe_float((rent_rows[0].get("rent_price_gbp") if rent_rows else None))
+
+        price_res = supabase.table("uk_hpi_monthly") \
+            .select("average_price") \
+            .eq("area_code", lad_code) \
+            .order("period", desc=True) \
+            .limit(1).execute()
+        price_rows = price_res.data if hasattr(price_res, "data") else []
+        local_price = safe_float((price_rows[0].get("average_price") if price_rows else None))
+
+        if local_rent and local_price and local_price > 0:
+            results["local_yield"] = round((local_rent * 12 / local_price) * 100, 2)
+        else:
+            results["local_yield"] = None
+
+        # National yield — England E92000001
+        nat_rent_res = supabase.table("uk_prms_monthly") \
+            .select("rent_price_gbp") \
+            .eq("area_code", "E92000001") \
+            .order("period", desc=True) \
+            .limit(1).execute()
+        nat_rent_rows = nat_rent_res.data if hasattr(nat_rent_res, "data") else []
+        nat_rent = safe_float((nat_rent_rows[0].get("rent_price_gbp") if nat_rent_rows else None))
+
+        nat_price_res = supabase.table("uk_hpi_monthly") \
+            .select("average_price") \
+            .eq("area_code", "E92000001") \
+            .order("period", desc=True) \
+            .limit(1).execute()
+        nat_price_rows = nat_price_res.data if hasattr(nat_price_res, "data") else []
+        nat_price = safe_float((nat_price_rows[0].get("average_price") if nat_price_rows else None))
+
+        if nat_rent and nat_price and nat_price > 0:
+            results["national_yield"] = round((nat_rent * 12 / nat_price) * 100, 2)
+        else:
+            results["national_yield"] = None
+
+        results["local_rent_gbp"]    = local_rent
+        results["local_price_gbp"]   = local_price
+        results["national_rent_gbp"] = nat_rent
+        results["source"] = "ONS PRMS · Land Registry HPI"
+        return results
+
+    except Exception as e:
+        print(f"[WARN] Yield benchmark failed for {lad_code}: {e}")
+        return {"local_yield": None, "national_yield": None}
+
+
+def _get_imd_for_lsoa(lsoa_code: str) -> Dict[str, Any]:
+    """
+    IMD deprivation decile for an LSOA.
+    Reads from lsoa_imd table if loaded, returns None if not yet available.
+    Table: lsoa_imd (lsoa_code, imd_rank, imd_decile, lsoa_name)
+    """
+    if not lsoa_code:
+        return {"decile": None, "rank": None}
+    try:
+        res = supabase.table("lsoa_imd") \
+            .select("imd_rank,imd_decile") \
+            .eq("lsoa_code", lsoa_code) \
+            .limit(1).execute()
+        rows = res.data if hasattr(res, "data") else []
+        if rows:
+            return {
+                "decile": rows[0].get("imd_decile"),
+                "rank":   rows[0].get("imd_rank"),
+                "source": "MHCLG IMD 2019",
+            }
+        return {"decile": None, "rank": None}
+    except Exception as e:
+        print(f"[WARN] IMD lookup failed for {lsoa_code}: {e}")
+        return {"decile": None, "rank": None}
+
+
 def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, Any]:
     """
     7-step inference engine per spec.
@@ -2786,6 +3013,33 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         pop      = _get_population_trend(lad_code)
         pop_dir  = pop["direction"]        # Growing / Stable / Declining / Unknown
         pop_series = pop["series"]
+
+        # ── BENCHMARKS: national + regional comparisons ───────────
+        nat_price    = _get_national_price_benchmark()
+        reg_price    = _get_regional_price_benchmark(lad_code)
+        nat_rental   = _get_national_rental_benchmark()
+        reg_rental   = _get_regional_rental_benchmark(lad_code)
+        liquidity    = _get_transaction_liquidity(postcode, lad_code)
+
+        # Crime index: crimes per 1000 population vs national avg
+        # ONS 2023: ~82 crimes per 1000 population nationally (England & Wales)
+        crime_total  = safe_float((area_data.get("crime") or {}).get("metrics", {}).get("total") or 0) or 0
+        pop_latest   = safe_float(pop.get("latest_value") or 0) or 10000
+        local_crime_rate   = (crime_total / pop_latest * 1000) if pop_latest > 0 else 0
+        national_crime_rate = 82.0  # ONS Crime Survey England and Wales 2023
+        crime_index  = round(local_crime_rate / national_crime_rate, 2) if national_crime_rate > 0 else None
+
+        # Comp avg from housing for price benchmarking
+        housing_metrics = (area_data.get("housing") or {}).get("metrics") or {}
+        comp_avg    = safe_float(housing_metrics.get("avg") or housing_metrics.get("average_price") or 0) or None
+        comp_count  = safe_float(housing_metrics.get("count") or tx_count or 0) or 0
+
+        # Yield benchmarks — local vs national (computable from existing tables)
+        yield_data   = _get_yield_benchmarks(lad_code)
+
+        # IMD deprivation — requires lsoa_imd table to be loaded
+        lsoa_code    = str(area_data.get("lsoa_gss") or "").strip()
+        imd_data     = _get_imd_for_lsoa(lsoa_code)
 
         # ── STEP 2: SIGNAL MAPPING ────────────────────────────────
         # Demand Pressure
@@ -2890,42 +3144,127 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
             "growth":  growth_index,
         }
 
-        # ── STEP 5: DRIVER BULLETS ────────────────────────────────
+        # ── STEP 5: DRIVER BULLETS — benchmarked, sourced, no verdicts ──
+        # Moneyball principle: every number benchmarked. Data tells the story.
         drivers = []
 
-        # Positive drivers
-        if rental_up:
-            yoy_str = f"{rental['latest_yoy']:.1f}%" if rental.get("latest_yoy") else ""
-            drivers.append({"sign": "+", "text": f"Rental growth {yoy_str} — above baseline, demand pressure confirmed."})
-        if price_up:
-            pct_str = f"{price_yoy:.1f}%" if price_yoy else ""
-            drivers.append({"sign": "+", "text": f"Price trend {pct_str} YoY — market confirming upward trajectory."})
-        if plan_recent >= 5:
-            drivers.append({"sign": "+", "text": f"{plan_recent} planning applications in 24 months — active development pipeline."})
-        if pop_up:
-            drivers.append({"sign": "+", "text": f"Population growing — {pop.get('change_pct', 0):.1f}% over 5 years, demand base expanding."})
-        if epc_good:
-            drivers.append({"sign": "+", "text": f"EPC profile strong — dominant rating {epc_dominant}, above-average stock quality."})
+        def _fmt_gbp(v):
+            if v is None: return None
+            return f"£{int(v):,}"
 
-        # Negative drivers
-        if rental_down:
-            drivers.append({"sign": "-", "text": "Rental decline recorded — demand pressure weakening."})
-        if price_down:
-            drivers.append({"sign": "-", "text": "Price trend negative — market diverging from demand signals."})
-        if crime_rising:
-            drivers.append({"sign": "-", "text": "Crime trend rising — risk drag on rental demand and resale."})
-        if epc_poor:
-            drivers.append({"sign": "-", "text": f"EPC profile weak — dominant rating {epc_dominant}, stock quality below benchmark."})
-        if pop_down:
-            drivers.append({"sign": "-", "text": f"Population declining — {abs(pop.get('change_pct', 0)):.1f}% contraction over 5 years."})
+        def _fmt_pct(v):
+            if v is None: return None
+            return f"{v:+.1f}%"
 
-        # Trim to 2-4 bullets — prioritise by signal strength
-        if len(drivers) > 4:
-            pos = [d for d in drivers if d["sign"] == "+"][:2]
-            neg = [d for d in drivers if d["sign"] == "-"][:2]
-            drivers = pos + neg
-        elif len(drivers) < 2:
-            drivers.append({"sign": "~", "text": "Insufficient signal data to identify dominant drivers."})
+        # Rental growth — local vs regional vs national
+        if rental.get("latest_yoy") is not None:
+            local_r  = rental["latest_yoy"]
+            reg_r    = reg_rental.get("latest_yoy")
+            nat_r    = nat_rental.get("latest_yoy")
+            parts    = [f"Rental {_fmt_pct(local_r)} YoY"]
+            if reg_r is not None: parts.append(f"reg {_fmt_pct(reg_r)}")
+            if nat_r is not None: parts.append(f"nat {_fmt_pct(nat_r)}")
+            parts.append("· ONS PRMS")
+            sign = "+" if local_r > 0 else "-"
+            drivers.append({"sign": sign, "text": " · ".join(parts)})
+
+        # Price growth — local vs national
+        if price_yoy is not None:
+            nat_py = nat_price.get("yoy_pct")
+            parts  = [f"Price {_fmt_pct(price_yoy)} YoY"]
+            if nat_py is not None: parts.append(f"nat {_fmt_pct(nat_py)}")
+            parts.append("· Land Registry HPI")
+            sign = "+" if price_yoy > 0 else "-"
+            drivers.append({"sign": sign, "text": " · ".join(parts)})
+
+        # Average sold price — local vs regional vs national
+        if comp_avg and comp_avg > 0:
+            reg_p = reg_price.get("avg_price")
+            nat_p = nat_price.get("avg_price")
+            parts = [f"Avg sold {_fmt_gbp(comp_avg)}"]
+            if reg_p: parts.append(f"reg {_fmt_gbp(reg_p)}")
+            if nat_p: parts.append(f"nat {_fmt_gbp(nat_p)}")
+            parts.append(f"· {int(comp_count)} transactions · Land Registry")
+            drivers.append({"sign": "~", "text": " · ".join(parts)})
+
+        # Crime index — local rate vs national benchmark
+        if crime_index is not None:
+            nat_label = f"{national_crime_rate:.0f}/1000 national avg"
+            local_label = f"{local_crime_rate:.1f}/1000 local"
+            index_label = f"{crime_index:.2f}× national"
+            sign = "-" if crime_index > 1.2 else ("+" if crime_index < 0.8 else "~")
+            drivers.append({
+                "sign": sign,
+                "text": f"Crime {local_label} · {index_label} · {nat_label} · Police.uk"
+            })
+        elif crime_total > 0:
+            drivers.append({
+                "sign": "~" if crime_total < 300 else "-",
+                "text": f"Crime {int(crime_total)}/yr · Police.uk"
+            })
+
+        # Population trend — with magnitude
+        if pop.get("change_pct") is not None:
+            chg = pop["change_pct"]
+            parts = [f"Population {_fmt_pct(chg)} over 5yr"]
+            parts.append("· ONS Mid-Year Estimates")
+            sign = "+" if chg > 2 else ("-" if chg < -2 else "~")
+            drivers.append({"sign": sign, "text": " · ".join(parts)})
+
+        # Transaction liquidity
+        if liquidity.get("local_qtly") is not None:
+            qtly = int(liquidity["local_qtly"])
+            ann  = int(liquidity.get("local_annual") or 0)
+            dist = liquidity.get("district", "")
+            drivers.append({
+                "sign": "~",
+                "text": f"Transactions {ann}/yr ({qtly}/qtr) in {dist} · Land Registry"
+            })
+
+        # Yield benchmark — local vs national
+        if yield_data.get("local_yield"):
+            local_y  = yield_data["local_yield"]
+            nat_y    = yield_data.get("national_yield")
+            parts    = [f"Gross yield {local_y:.1f}%"]
+            if nat_y: parts.append(f"nat {nat_y:.1f}%")
+            parts.append("· ONS PRMS · Land Registry HPI")
+            sign = "+" if (nat_y and local_y > nat_y) else ("~" if nat_y else "~")
+            drivers.append({"sign": sign, "text": " · ".join(parts)})
+
+        # IMD deprivation decile (when lsoa_imd table is loaded)
+        if imd_data.get("decile") is not None:
+            decile = imd_data["decile"]
+            sign   = "-" if decile <= 2 else ("+" if decile >= 8 else "~")
+            drivers.append({
+                "sign": sign,
+                "text": f"IMD decile {decile}/10 · {imd_data.get('source', 'MHCLG IMD')}"
+            })
+
+        # Planning activity
+        if plan_recent >= 3:
+            sign = "+" if plan_recent >= 10 else "~"
+            drivers.append({
+                "sign": sign,
+                "text": f"Planning {plan_recent} applications in 24m · PlanningAlerts"
+            })
+
+        # EPC profile
+        if epc_dominant:
+            sign = "+" if epc_good else ("-" if epc_poor else "~")
+            drivers.append({
+                "sign": sign,
+                "text": f"EPC dominant {epc_dominant} · MHCLG"
+            })
+
+        # Sort: negative first (risk), then data points, then positive
+        # Keep max 6 drivers — enough for full picture without noise
+        neg = [d for d in drivers if d["sign"] == "-"]
+        pos = [d for d in drivers if d["sign"] == "+"]
+        neu = [d for d in drivers if d["sign"] == "~"]
+        drivers = (neg + pos + neu)[:6]
+
+        if not drivers:
+            drivers.append({"sign": "~", "text": "Insufficient data to compute area drivers."})
 
         # ── STEP 6: DEMAND VS SUPPLY ───────────────────────────────
         if demand_signal == "Increasing" and market_signal in ("Confirming", "Fragile"):
@@ -2949,7 +3288,55 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                 "chart_data":     chart_data,
                 "drivers":        drivers,
                 "demand_supply":  demand_supply,
-                "provenance":     "Sources: Land Registry · ONS Population · ONS PRMS Rental · OSM · PlanningAlerts · Police · EPC",
+                "benchmarks": {
+                    "price": {
+                        "local":    comp_avg,
+                        "regional": reg_price.get("avg_price"),
+                        "national": nat_price.get("avg_price"),
+                        "local_yoy":    price_yoy,
+                        "regional_yoy": reg_price.get("yoy_pct"),
+                        "national_yoy": nat_price.get("yoy_pct"),
+                        "source": "Land Registry HPI",
+                    },
+                    "rental": {
+                        "local_yoy":    rental.get("latest_yoy"),
+                        "regional_yoy": reg_rental.get("latest_yoy"),
+                        "national_yoy": nat_rental.get("latest_yoy"),
+                        "regional_rent_gbp": reg_rental.get("avg_rent_gbp"),
+                        "source": "ONS PRMS",
+                    },
+                    "crime": {
+                        "local_total":      int(crime_total),
+                        "local_rate_per_1000": round(local_crime_rate, 2),
+                        "national_rate_per_1000": national_crime_rate,
+                        "crime_index":      crime_index,
+                        "source": "Police.uk",
+                    },
+                    "liquidity": {
+                        "annual_transactions": liquidity.get("local_annual"),
+                        "quarterly_transactions": liquidity.get("local_qtly"),
+                        "district": liquidity.get("district"),
+                        "source": "Land Registry",
+                    },
+                    "population": {
+                        "change_pct_5yr": pop.get("change_pct"),
+                        "direction":      pop_dir,
+                        "source": "ONS Mid-Year Estimates",
+                    },
+                    "yield": {
+                        "local_pct":    yield_data.get("local_yield"),
+                        "national_pct": yield_data.get("national_yield"),
+                        "local_rent_gbp":    yield_data.get("local_rent_gbp"),
+                        "local_price_gbp":   yield_data.get("local_price_gbp"),
+                        "source": "ONS PRMS · Land Registry HPI",
+                    },
+                    "deprivation": {
+                        "imd_decile": imd_data.get("decile"),
+                        "imd_rank":   imd_data.get("rank"),
+                        "source": imd_data.get("source", "MHCLG IMD 2019"),
+                    },
+                },
+                "provenance":     "Land Registry · ONS Population · ONS PRMS · OSM · PlanningAlerts · Police.uk · MHCLG EPC",
                 "lad_code":       lad_code,
                 "computed_at":    now_iso(),
             }
@@ -2990,7 +3377,6 @@ def get_epc_data(postcode: str) -> Dict[str, Any]:
 
     try:
         import base64 as _b64
-        # EPC_API_KEY must be "email@domain.com:apikey" format
         _epc_token = _b64.b64encode(epc_key.encode()).decode()
         pc_encoded = pc.replace(" ", "%20")
         url = f"https://api.get-energy-performance-data.communities.gov.uk/domestic/search?postcode={pc_encoded}&rows=100"
@@ -3350,15 +3736,10 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
         # ── PHASE 1: RICS-GRADE COMP SCORING ─────────────────────────────────
         import datetime as _dt
-
-        # Step 1: Property type filter — same type only, fall back if < 5
         pt_filter = (property_type or "").strip().upper()
         if pt_filter and pt_filter in ("D", "S", "T", "F", "O"):
             matched = [r for r in rows if str(r.get("property_type") or "").upper() == pt_filter]
             rows = matched if len(matched) >= 5 else rows
-
-        # Step 2: Skip Google geocoding — rows already have lat/lng from price_paid_raw_2025
-        # Only call _enrich_housing_rows_with_latlng for rows missing coords
         rows_missing_coords = [r for r in rows if not _row_has_latlng(r)]
         enrich_meta = {"enabled": False, "attempted": 0, "filled": 0, "failed": 0, "notes": ""}
         if rows_missing_coords and HOUSING_ENRICH_LATLNG and GOOGLE_MAPS_API_KEY:
@@ -3367,44 +3748,36 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             rows = rows_with + rows_missing_coords
         else:
             enrich_meta["notes"] = "Skipped — lat/lng already present in price_paid data."
-
-        # Step 3: Price band filter ±35% when guide_price provided
         if guide_price and guide_price > 5000:
             lo_band = guide_price * 0.65
             hi_band = guide_price * 1.35
             in_band = [r for r in rows if lo_band <= safe_int(r.get("price") or 0) <= hi_band]
             rows = in_band if len(in_band) >= 5 else rows
-
-        # Step 4: Score each comp — recency decay + inverse distance weighting
         _now = _dt.datetime.utcnow()
         def _score_comp(r):
             score = 1.0
-            # Recency decay
             try:
                 tx_date = r.get("date_of_transfer") or r.get("date") or ""
                 if tx_date:
                     tx_dt = _dt.datetime.strptime(str(tx_date)[:10], "%Y-%m-%d")
                     age_months = (_now - tx_dt).days / 30.44
-                    if age_months <= 6:   score *= 1.00
+                    if age_months <= 6:    score *= 1.00
                     elif age_months <= 12: score *= 0.85
                     elif age_months <= 18: score *= 0.70
                     else:                  score *= 0.55
             except Exception:
                 score *= 0.70
-            # Distance weighting — inverse (closer = higher score)
             try:
                 miles = safe_float(r.get("miles"))
                 if isinstance(miles, float) and miles >= 0:
                     score *= max(0.1, 1.0 - (miles / r_miles) * 0.6)
             except Exception:
                 pass
-            # Property type match bonus
             if pt_filter and str(r.get("property_type") or "").upper() == pt_filter:
                 score *= 1.15
             return score
-
         rows_scored = sorted(rows, key=_score_comp, reverse=True)
-        rows = rows_scored[:10]  # Top 10 by composite RICS score
+        rows = rows_scored[:10]
 
         prices: List[int] = []
         ptypes: Dict[str, int] = {}
@@ -5840,11 +6213,9 @@ def save_area(deal_id: str):
         "D": "D", "S": "S", "T": "T", "F": "F"
     }
     _prop_type_code = _pt_map.get(_prop_type) or None
-    # Extract guide price for RICS price band filtering
     _raw_gp = _prop.get("guide_price_pence") or _prop.get("guide_price") or 0
     try:
         _gp_num = float(_raw_gp)
-        # Normalise: if value > 1,000,000 assume pence
         _guide_price_gbp = _gp_num / 100 if _gp_num > 1_000_000 else _gp_num
         if _guide_price_gbp < 5000 or _guide_price_gbp > 100_000_000:
             _guide_price_gbp = None
