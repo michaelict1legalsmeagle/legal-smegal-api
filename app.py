@@ -133,8 +133,8 @@ BROADBAND_PROVIDER = os.getenv("BROADBAND_PROVIDER", "").strip().lower()
 
 HOUSING_PROVIDER = os.getenv("HOUSING_PROVIDER", "supabase_rpc").strip().lower()
 HOUSING_RPC_NAME = os.getenv("HOUSING_RPC_NAME", "housing_comps_v1").strip()
-HOUSING_MAX_LIMIT = int(os.getenv("HOUSING_MAX_LIMIT", "50"))
-HOUSING_DEFAULT_LIMIT = int(os.getenv("HOUSING_DEFAULT_LIMIT", "20"))
+HOUSING_MAX_LIMIT = int(os.getenv("HOUSING_MAX_LIMIT", "200"))
+HOUSING_DEFAULT_LIMIT = int(os.getenv("HOUSING_DEFAULT_LIMIT", "100"))
 HOUSING_DEFAULT_RADIUS_MILES = float(os.getenv("HOUSING_DEFAULT_RADIUS_MILES", "3"))
 HOUSING_CONFIDENCE_VALUE = float(os.getenv("HOUSING_CONFIDENCE_VALUE", "0.96"))
 
@@ -2989,10 +2989,13 @@ def get_epc_data(postcode: str) -> Dict[str, Any]:
         return metric_unavailable("EPC data unavailable: no postcode.", sources, retrieved)
 
     try:
+        import base64 as _b64
+        # EPC_API_KEY must be "email@domain.com:apikey" format
+        _epc_token = _b64.b64encode(epc_key.encode()).decode()
         pc_encoded = pc.replace(" ", "%20")
-        url = f"https://epc.opendatacommunities.org/api/v1/domestic/search?postcode={pc_encoded}&size=100"
+        url = f"https://api.get-energy-performance-data.communities.gov.uk/domestic/search?postcode={pc_encoded}&rows=100"
         headers = {
-            "Authorization": f"Bearer {epc_key}",
+            "Authorization": f"Basic {_epc_token}",
             "Accept": "application/json",
         }
         status, payload = _http_get_json(url, headers=headers, timeout=15)
@@ -3293,7 +3296,7 @@ def _median_int(values: List[int]) -> Optional[int]:
     return int((vs[mid - 1] + vs[mid]) / 2)
 
 
-def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None) -> Dict[str, Any]:
+def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
 
@@ -3345,17 +3348,63 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             out["metrics"]["payload"] = payload
             return out
 
-        # Filter by property type if provided — fall back to all types if < 5 matching comps
+        # ── PHASE 1: RICS-GRADE COMP SCORING ─────────────────────────────────
+        import datetime as _dt
+
+        # Step 1: Property type filter — same type only, fall back if < 5
         pt_filter = (property_type or "").strip().upper()
         if pt_filter and pt_filter in ("D", "S", "T", "F", "O"):
             matched = [r for r in rows if str(r.get("property_type") or "").upper() == pt_filter]
-            if len(matched) >= 5:
-                rows = matched
-            # If < 5 matching, use all rows but note the mismatch
-            # This prevents empty comps on rare property types in thin markets
+            rows = matched if len(matched) >= 5 else rows
 
-        enrich_meta = {}
-        rows, enrich_meta = _enrich_housing_rows_with_latlng(rows)
+        # Step 2: Skip Google geocoding — rows already have lat/lng from price_paid_raw_2025
+        # Only call _enrich_housing_rows_with_latlng for rows missing coords
+        rows_missing_coords = [r for r in rows if not _row_has_latlng(r)]
+        enrich_meta = {"enabled": False, "attempted": 0, "filled": 0, "failed": 0, "notes": ""}
+        if rows_missing_coords and HOUSING_ENRICH_LATLNG and GOOGLE_MAPS_API_KEY:
+            rows_with = [r for r in rows if _row_has_latlng(r)]
+            rows_missing_coords, enrich_meta = _enrich_housing_rows_with_latlng(rows_missing_coords)
+            rows = rows_with + rows_missing_coords
+        else:
+            enrich_meta["notes"] = "Skipped — lat/lng already present in price_paid data."
+
+        # Step 3: Price band filter ±35% when guide_price provided
+        if guide_price and guide_price > 5000:
+            lo_band = guide_price * 0.65
+            hi_band = guide_price * 1.35
+            in_band = [r for r in rows if lo_band <= safe_int(r.get("price") or 0) <= hi_band]
+            rows = in_band if len(in_band) >= 5 else rows
+
+        # Step 4: Score each comp — recency decay + inverse distance weighting
+        _now = _dt.datetime.utcnow()
+        def _score_comp(r):
+            score = 1.0
+            # Recency decay
+            try:
+                tx_date = r.get("date_of_transfer") or r.get("date") or ""
+                if tx_date:
+                    tx_dt = _dt.datetime.strptime(str(tx_date)[:10], "%Y-%m-%d")
+                    age_months = (_now - tx_dt).days / 30.44
+                    if age_months <= 6:   score *= 1.00
+                    elif age_months <= 12: score *= 0.85
+                    elif age_months <= 18: score *= 0.70
+                    else:                  score *= 0.55
+            except Exception:
+                score *= 0.70
+            # Distance weighting — inverse (closer = higher score)
+            try:
+                miles = safe_float(r.get("miles"))
+                if isinstance(miles, float) and miles >= 0:
+                    score *= max(0.1, 1.0 - (miles / r_miles) * 0.6)
+            except Exception:
+                pass
+            # Property type match bonus
+            if pt_filter and str(r.get("property_type") or "").upper() == pt_filter:
+                score *= 1.15
+            return score
+
+        rows_scored = sorted(rows, key=_score_comp, reverse=True)
+        rows = rows_scored[:10]  # Top 10 by composite RICS score
 
         prices: List[int] = []
         ptypes: Dict[str, int] = {}
@@ -5791,6 +5840,16 @@ def save_area(deal_id: str):
         "D": "D", "S": "S", "T": "T", "F": "F"
     }
     _prop_type_code = _pt_map.get(_prop_type) or None
+    # Extract guide price for RICS price band filtering
+    _raw_gp = _prop.get("guide_price_pence") or _prop.get("guide_price") or 0
+    try:
+        _gp_num = float(_raw_gp)
+        # Normalise: if value > 1,000,000 assume pence
+        _guide_price_gbp = _gp_num / 100 if _gp_num > 1_000_000 else _gp_num
+        if _guide_price_gbp < 5000 or _guide_price_gbp > 100_000_000:
+            _guide_price_gbp = None
+    except Exception:
+        _guide_price_gbp = None
 
     def _fetch_and_store():
         try:
@@ -5810,7 +5869,7 @@ def save_area(deal_id: str):
                 "lat":          lat,
                 "lng":          lng,
                 "area_code":    area_code,
-                "housing":      get_housing_data(_postcode, property_type=_prop_type_code),
+                "housing":      get_housing_data(_postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp),
                 "crime":        get_crime_data(lat, lng),
                 "transport":    get_transport_data(lat, lng),
                 "amenities":    get_amenities_data(lat, lng),
