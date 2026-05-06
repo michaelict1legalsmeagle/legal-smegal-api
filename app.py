@@ -3267,12 +3267,13 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
             drivers.append({"sign": "~", "text": "Insufficient data to compute area drivers."})
 
         # ── STEP 6: DEMAND VS SUPPLY ───────────────────────────────
+        # Demand/supply: data classification only, no interpretive language
         if demand_signal == "Increasing" and market_signal in ("Confirming", "Fragile"):
-            demand_supply = "Demand > Supply — upward pressure on pricing."
+            demand_supply = f"Demand signal: {demand_signal} · Market: {market_signal}"
         elif demand_signal == "Weakening" or market_signal == "Diverging":
-            demand_supply = "Supply > Demand — downward pressure on pricing."
+            demand_supply = f"Demand signal: {demand_signal} · Market: {market_signal}"
         else:
-            demand_supply = "Balanced — stable pricing conditions."
+            demand_supply = f"Demand signal: {demand_signal} · Market: {market_signal}"
 
         # ── STEP 7: FINAL OUTPUT ───────────────────────────────────
         return {
