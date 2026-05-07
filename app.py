@@ -2518,6 +2518,62 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             retrieved,
         )
 
+    # ── Hetzner path (primary) ────────────────────────────────────────────────
+    # schools_ofsted table on Hetzner: 9,781 rows, England only
+    # Columns: urn, school_name, postcode, ofsted_rating, school_type, phase, la_name
+    try:
+        lat_lng_rows = data_query(
+            "SELECT lat, lng FROM public.nspl_postcodes WHERE pcd_nospace = %s LIMIT 1",
+            (pc.replace(" ", ""),)
+        )
+        if lat_lng_rows:
+            slat = lat_lng_rows[0].get("lat")
+            slng = lat_lng_rows[0].get("lng")
+        else:
+            slat, slng = None, None
+
+        if slat and slng:
+            school_rows = data_query(
+                """
+                SELECT s.urn, s.school_name, s.postcode, s.ofsted_rating,
+                       s.school_type, s.phase, s.la_name,
+                       ROUND(
+                         ST_Distance(
+                           ST_MakePoint(n.lng, n.lat)::geography,
+                           ST_MakePoint(%s, %s)::geography
+                         ) / 1609.34, 2
+                       ) AS miles
+                FROM public.schools_ofsted s
+                JOIN public.nspl_postcodes n ON n.pcd_nospace = REPLACE(s.postcode, ' ', '')
+                WHERE ST_Distance(
+                    ST_MakePoint(n.lng, n.lat)::geography,
+                    ST_MakePoint(%s, %s)::geography
+                ) <= 4828
+                ORDER BY miles ASC
+                LIMIT 10
+                """,
+                (slng, slat, slng, slat)
+            )
+        else:
+            school_rows = data_query(
+                """SELECT urn, school_name, postcode, ofsted_rating, school_type, phase, la_name
+                   FROM public.schools_ofsted
+                   WHERE postcode ILIKE %s
+                   LIMIT 10""",
+                (f"{district}%",)
+            )
+
+        if school_rows:
+            sources = [{"label": "Ofsted / DfE", "url": "https://reports.ofsted.gov.uk/"}]
+            out = metric_ok(
+                f"{len(school_rows)} schools within 3mi of {pc}.",
+                school_rows, sources, retrieved, 0.85,
+            )
+            out["metrics"] = {"provider": "hetzner", "count": len(school_rows)}
+            return out
+    except Exception as _se:
+        print(f"[WARN] Schools Hetzner query failed: {_se}")
+
     if SCHOOLS_PROVIDER == "supabase":
         if not supabase:
             return metric_unavailable(
@@ -2655,7 +2711,6 @@ def _get_lad_code_for_postcode(postcode: str) -> Optional[str]:
             "SELECT ladcd FROM public.postcode_to_lsoa WHERE pcds = %s LIMIT 1",
             (pc,)
         )
-        rows = res.data if hasattr(res, "data") else []
         if rows and rows[0].get("ladcd"):
             return str(rows[0]["ladcd"]).strip()
     except Exception:
