@@ -24,6 +24,8 @@ import sys
 import time
 import logging
 import requests
+import psycopg
+from psycopg.rows import dict_row
 from datetime import datetime
 from supabase import create_client, Client
 
@@ -33,6 +35,15 @@ log = logging.getLogger(__name__)
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Hetzner — price_paid_raw_2025 lives here, not on Supabase
+DATA_DATABASE_URL = os.environ.get(
+    "DATA_DATABASE_URL",
+    "postgresql://legalsmegal:Thesixkids68@159.69.27.104:5432/legalsmegal_data"
+)
+
+def _get_hetzner_conn():
+    return psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row)
 
 BATCH_SIZE = 500  # rows per upsert batch — keeps memory low on Render free tier
 
@@ -176,38 +187,49 @@ def get_latest_pp_url() -> str:
     return ""
 
 
-_nspl_cache: dict = {}
-
-
-def _get_nspl_lat_lng(pcd_nospace: str) -> tuple:
-    if pcd_nospace in _nspl_cache:
-        return _nspl_cache[pcd_nospace]
-    try:
-        res = supabase.table("nspl_lookup").select("lat,lng").eq("pcd_nospace", pcd_nospace).limit(1).execute()
-        if res.data:
-            lat = res.data[0].get("lat")
-            lng = res.data[0].get("lng")
-            _nspl_cache[pcd_nospace] = (lat, lng)
-            return lat, lng
-    except Exception:
-        pass
-    _nspl_cache[pcd_nospace] = (None, None)
-    return None, None
 
 
 def _upsert_pp_rows_from_csv(content_str: str, label: str):
-    """Parse PP CSV content and upsert into price_paid_geo. Returns (count, skipped)."""
+    """Parse PP CSV content and upsert into price_paid_raw_2025 on Hetzner. Returns (count, skipped)."""
     reader  = csv.reader(io.StringIO(content_str))
     batch   = []
     count   = 0
     skipped = 0
+
+    UPSERT_SQL = """
+        INSERT INTO public.price_paid_raw_2025 (
+            transaction_unique_identifier, price, date_of_transfer, postcode,
+            property_type, old_new, duration, paon, saon, street, locality,
+            town_city, district, county, ppd_category_type, record_status
+        ) VALUES (
+            %(transaction_unique_identifier)s, %(price)s, %(date_of_transfer)s, %(postcode)s,
+            %(property_type)s, %(old_new)s, %(duration)s, %(paon)s, %(saon)s, %(street)s, %(locality)s,
+            %(town_city)s, %(district)s, %(county)s, %(ppd_category_type)s, %(record_status)s
+        )
+        ON CONFLICT (transaction_unique_identifier) DO UPDATE SET
+            price             = EXCLUDED.price,
+            date_of_transfer  = EXCLUDED.date_of_transfer,
+            postcode          = EXCLUDED.postcode,
+            property_type     = EXCLUDED.property_type,
+            old_new           = EXCLUDED.old_new,
+            duration          = EXCLUDED.duration,
+            paon              = EXCLUDED.paon,
+            saon              = EXCLUDED.saon,
+            street            = EXCLUDED.street,
+            locality          = EXCLUDED.locality,
+            town_city         = EXCLUDED.town_city,
+            district          = EXCLUDED.district,
+            county            = EXCLUDED.county,
+            ppd_category_type = EXCLUDED.ppd_category_type,
+            record_status     = EXCLUDED.record_status
+    """
+
     for row in reader:
         if len(row) < 15:
             continue
         try:
             raw_pc = row[3].strip().upper()
-            pcd_ns = raw_pc.replace(" ", "")
-            if not pcd_ns:
+            if not raw_pc.replace(" ", ""):
                 continue
             record = {
                 "transaction_unique_identifier": row[0].strip("{}"),
@@ -232,21 +254,27 @@ def _upsert_pp_rows_from_csv(content_str: str, label: str):
                 continue
             batch.append(record)
             if len(batch) >= BATCH_SIZE:
-                supabase.table(PP_GEO_TABLE).upsert(
-                    batch, on_conflict="transaction_unique_identifier"
-                ).execute()
+                with _get_hetzner_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.executemany(UPSERT_SQL, batch)
+                    conn.commit()
                 count += len(batch)
                 batch = []
                 log.info(f"price_paid_geo [{label}]: {count} rows upserted")
-                time.sleep(3)  # throttle — prevents Supabase connection pool saturation
         except Exception as e:
             log.warning(f"PP geo row error [{label}]: {e}")
             continue
+
     if batch:
-        supabase.table(PP_GEO_TABLE).upsert(
-            batch, on_conflict="transaction_unique_identifier"
-        ).execute()
-        count += len(batch)
+        try:
+            with _get_hetzner_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(UPSERT_SQL, batch)
+                conn.commit()
+            count += len(batch)
+        except Exception as e:
+            log.warning(f"PP geo row error [{label}] (final batch): {e}")
+
     return count, skipped
 
 
@@ -300,8 +328,6 @@ def backfill_price_paid(years: list):
             r.content.decode("utf-8", errors="replace"), label=str(year)
         )
         log.info(f"Backfill {year} complete: {count} rows upserted, {skipped} skipped")
-        # Clear NSPL cache between years to avoid unbounded memory growth on large runs
-        _nspl_cache.clear()
     log.info("Backfill complete — running materialized view refresh")
     refresh_materialized_view()
 
@@ -309,19 +335,20 @@ def backfill_price_paid(years: list):
 # ── MATERIALIZED VIEW ─────────────────────────────────────────────────────────
 def refresh_materialized_view():
     """
-    Refresh price_paid_geo materialized view so nspl_lat/nspl_lng populate via JOIN.
-    This is what makes housing_comps_v1 return results (filters WHERE nspl_lat IS NOT NULL).
-    Uses exec_refresh_price_paid_geo RPC — confirmed working April 2026.
-    psycopg2 direct-SQL fallback removed — not installed on Render, RPC is the correct path.
+    Refresh price_paid_geo materialized view on Hetzner.
+    Runs after every PP upsert so lat/lng data is current.
     """
-    log.info("Refreshing materialized view price_paid_geo...")
+    log.info("Refreshing materialized view price_paid_geo on Hetzner...")
     try:
-        supabase.rpc("exec_refresh_price_paid_geo", {}).execute()
+        with _get_hetzner_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("REFRESH MATERIALIZED VIEW public.price_paid_geo")
+            conn.commit()
         log.info("Materialized view refresh complete")
     except Exception as e:
         log.error(
-            f"Materialized view RPC refresh failed: {e}. "
-            "Run manually in Supabase SQL editor: REFRESH MATERIALIZED VIEW public.price_paid_geo;"
+            f"Materialized view refresh failed: {e}. "
+            "Run manually: REFRESH MATERIALIZED VIEW public.price_paid_geo;"
         )
 
 
