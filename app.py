@@ -3008,6 +3008,22 @@ def _get_imd_for_lsoa(lsoa_code: str) -> Dict[str, Any]:
         return {"decile": None, "rank": None}
 
 
+def _get_census_private_rent_pct(lsoa_code: str) -> Optional[float]:
+    """Return % private rented for LSOA from Hetzner census_tenure_lsoa table."""
+    try:
+        if not lsoa_code:
+            return None
+        rows = data_query(
+            "SELECT private_rent_pct FROM public.census_tenure_lsoa WHERE lsoa_code = %s LIMIT 1",
+            (lsoa_code,)
+        )
+        if rows:
+            return float(rows[0]["private_rent_pct"])
+    except Exception as e:
+        print(f"[WARN] _get_census_private_rent_pct: {e}")
+    return None
+
+
 def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, Any]:
     """
     7-step inference engine per spec.
@@ -3094,6 +3110,19 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         # IMD deprivation — requires lsoa_imd table to be loaded
         lsoa_code    = str(area_data.get("lsoa_gss") or "").strip()
         imd_data     = _get_imd_for_lsoa(lsoa_code)
+
+        # Census 2021 tenure — private rent % from Hetzner census_tenure_lsoa
+        _census_private_rent_pct = None
+        try:
+            if lsoa_code:
+                _ct = data_query(
+                    "SELECT private_rent_pct FROM public.census_tenure_lsoa WHERE lsoa_code = %s LIMIT 1",
+                    (lsoa_code,)
+                )
+                if _ct:
+                    _census_private_rent_pct = float(_ct[0]["private_rent_pct"])
+        except Exception as _cte:
+            print(f"[WARN] Census tenure lookup: {_cte}")
 
         # ── STEP 2: SIGNAL MAPPING ────────────────────────────────
         # Demand Pressure
@@ -3390,8 +3419,12 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                         "imd_rank":   imd_data.get("rank"),
                         "source": imd_data.get("source", "MHCLG IMD 2019"),
                     },
+                    "census": {
+                        "private_rent_pct": _census_private_rent_pct,
+                        "source": "ONS Census 2021 TS054",
+                    },
                 },
-                "provenance":     "Land Registry · ONS Population · ONS PRMS · OSM · PlanningAlerts · Police.uk · MHCLG EPC",
+                "provenance":     "Land Registry · ONS Population · ONS PRMS · OSM · PlanningAlerts · Police.uk · MHCLG EPC · ONS Census 2021",
                 "lad_code":       lad_code,
                 "computed_at":    now_iso(),
             }
@@ -4256,6 +4289,7 @@ def market_insights():
                 "ts003": get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, nomis_geo),
                 "ts044": get_nomis_table("Accommodation type (TS044)", NOMIS_TS044_DIM, NOMIS_TS044_CATS, nomis_geo),
                 "ts054": get_nomis_table("Tenure (TS054)", NOMIS_TS054_DIM, NOMIS_TS054_CATS, nomis_geo),
+                "private_rent_pct": _get_census_private_rent_pct(lsoa_gss),
             },
         }
 
