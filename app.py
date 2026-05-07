@@ -2858,8 +2858,6 @@ def _get_regional_price_benchmark(lad_code: str) -> Dict[str, Any]:
             "SELECT period, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 13",
             (lad_code,)
         )
-        _ = None  # compat
-        _ = res.data if hasattr(res, "data") else []
         if not rows:
             return {"avg_price": None, "yoy_pct": None}
         latest = rows[0]
