@@ -14,8 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import jwt as pyjwt
 import io
-import psycopg2
-import psycopg2.extras
+import psycopg
+from psycopg.rows import dict_row
 try:
     import pdfplumber
 except ImportError:
@@ -192,23 +192,19 @@ DATA_DATABASE_URL = os.environ.get(
 )
 
 def get_data_conn():
-    """Get a psycopg2 connection to Hetzner data database."""
-    return psycopg2.connect(DATA_DATABASE_URL)
+    """Get a psycopg v3 connection to Hetzner data database."""
+    return psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row)
 
 def data_query(sql: str, params=None) -> list:
     """Execute a SELECT query on Hetzner and return list of dicts."""
-    conn = get_data_conn()
     try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, params or ())
-        rows = cur.fetchall()
-        cur.close()
-        return [dict(r) for r in rows]
+        with psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params or ())
+                return [dict(r) for r in cur.fetchall()]
     except Exception as e:
         print(f"[DATA_QUERY ERROR] {e}")
         return []
-    finally:
-        conn.close()
 
 print("🟢 Hetzner data connection configured:", DATA_DATABASE_URL.split("@")[1])
 
