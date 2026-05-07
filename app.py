@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import jwt as pyjwt
 import io
+import psycopg2
+import psycopg2.extras
 try:
     import pdfplumber
 except ImportError:
@@ -182,6 +184,33 @@ if SUPABASE_URL and SUPABASE_KEY:
     print("🟢 Supabase enabled. URL:", SUPABASE_URL)
 else:
     print("🔴 Supabase env vars not set. Supabase features are DISABLED.")
+
+# ── Hetzner data connection ────────────────────────────────────────
+DATA_DATABASE_URL = os.environ.get(
+    "DATA_DATABASE_URL",
+    "postgresql://legalsmegal:Thesixkids68@159.69.27.104:5432/legalsmegal_data"
+)
+
+def get_data_conn():
+    """Get a psycopg2 connection to Hetzner data database."""
+    return psycopg2.connect(DATA_DATABASE_URL)
+
+def data_query(sql: str, params=None) -> list:
+    """Execute a SELECT query on Hetzner and return list of dicts."""
+    conn = get_data_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params or ())
+        rows = cur.fetchall()
+        cur.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[DATA_QUERY ERROR] {e}")
+        return []
+    finally:
+        conn.close()
+
+print("🟢 Hetzner data connection configured:", DATA_DATABASE_URL.split("@")[1])
 
 
 def now_iso() -> str:
@@ -2036,34 +2065,29 @@ def nspl_lookup_latlng(postcode: str) -> Tuple[Optional[float], Optional[float],
         return None, None, meta
 
     try:
-        res = (
-            supabase.table("nspl_lookup")
-            .select("lat,lng")
-            .eq("pcd_nospace", pc_key)
-            .limit(1)
-            .execute()
+        rows = data_query(
+            "SELECT lat, lng FROM public.nspl_postcodes WHERE pcd_nospace = %s LIMIT 1",
+            (pc_key,)
         )
-
-        rows = res.data if hasattr(res, "data") else None
         if not isinstance(rows, list) or not rows:
             meta["notes"] = f"NSPL lookup returned no rows for {pc_key}."
-            meta["sources"] = [{"label": "Supabase (nspl_lookup)", "url": f"{SUPABASE_URL}"}]
+            meta["sources"] = [{"label": "Hetzner (nspl_postcodes)", "url": f"{SUPABASE_URL}"}]
             return None, None, meta
 
         lat = safe_float(rows[0].get("lat"))
         lng = safe_float(rows[0].get("lng"))
         if lat is None or lng is None:
             meta["notes"] = "NSPL lookup returned invalid coordinates."
-            meta["sources"] = [{"label": "Supabase (nspl_lookup)", "url": f"{SUPABASE_URL}"}]
+            meta["sources"] = [{"label": "Hetzner (nspl_postcodes)", "url": f"{SUPABASE_URL}"}]
             return None, None, meta
 
         meta["notes"] = "Resolved from NSPL."
-        meta["sources"] = [{"label": "Supabase (nspl_lookup)", "url": f"{SUPABASE_URL}"}]
+        meta["sources"] = [{"label": "Hetzner (nspl_postcodes)", "url": f"{SUPABASE_URL}"}]
         return lat, lng, meta
 
     except Exception as e:
         meta["notes"] = f"NSPL lookup exception: {str(e)}"
-        meta["sources"] = [{"label": "Supabase (nspl_lookup)", "url": f"{SUPABASE_URL}"}]
+        meta["sources"] = [{"label": "Hetzner (nspl_postcodes)", "url": f"{SUPABASE_URL}"}]
         return None, None, meta
 
 
@@ -2631,10 +2655,10 @@ def _get_lad_code_for_postcode(postcode: str) -> Optional[str]:
     """Look up LAD code from postcode_to_lsoa table."""
     try:
         pc = normalize_postcode(postcode)
-        res = supabase.table("postcode_to_lsoa") \
-            .select("ladcd") \
-            .eq("pcds", pc) \
-            .limit(1).execute()
+        rows = data_query(
+            "SELECT ladcd FROM public.postcode_to_lsoa WHERE pcds = %s LIMIT 1",
+            (pc,)
+        )
         rows = res.data if hasattr(res, "data") else []
         if rows and rows[0].get("ladcd"):
             return str(rows[0]["ladcd"]).strip()
@@ -2649,12 +2673,10 @@ def _get_rental_trend(lad_code: str) -> Dict[str, Any]:
     Returns direction: Increasing / Stable / Declining and 36-month series.
     """
     try:
-        res = supabase.table("uk_prms_monthly") \
-            .select("period,rent_index,rent_yoy_pct,rent_price_gbp") \
-            .eq("area_code", lad_code) \
-            .order("period", desc=False) \
-            .limit(48).execute()
-        rows = res.data if hasattr(res, "data") else []
+        rows = data_query(
+            "SELECT period, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period ASC LIMIT 48",
+            (lad_code,)
+        )
         if not rows:
             return {"direction": "Unknown", "series": [], "latest_yoy": None}
 
@@ -2697,12 +2719,10 @@ def _get_population_trend(lad_code: str) -> Dict[str, Any]:
     Returns direction: Growing / Stable / Declining and year series.
     """
     try:
-        res = supabase.table("ons_population") \
-            .select("year,population") \
-            .eq("lad_code", lad_code) \
-            .order("year", desc=False) \
-            .execute()
-        rows = res.data if hasattr(res, "data") else []
+        rows = data_query(
+            "SELECT year, population FROM public.ons_population WHERE lad_code = %s ORDER BY year ASC",
+            (lad_code,)
+        )
         if not rows or len(rows) < 2:
             return {"direction": "Unknown", "series": rows, "change_pct": None}
 
@@ -2734,20 +2754,14 @@ def _get_national_rental_benchmark() -> Dict[str, Any]:
     Returns latest YoY % and 12-month average.
     """
     try:
-        # Try England national code first
-        res = supabase.table("uk_prms_monthly") \
-            .select("period,rent_yoy_pct,rent_index") \
-            .eq("area_code", "E92000001") \
-            .order("period", desc=True) \
-            .limit(12).execute()
-        rows = res.data if hasattr(res, "data") else []
+        rows = data_query(
+            "SELECT period, rent_yoy_pct FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 48",
+            ("E92000001",)
+        )
         if not rows:
-            # Fallback: average across all LADs for latest period
-            res2 = supabase.table("uk_prms_monthly") \
-                .select("rent_yoy_pct") \
-                .order("period", desc=True) \
-                .limit(500).execute()
-            rows2 = res2.data if hasattr(res2, "data") else []
+            rows2 = data_query(
+                "SELECT rent_yoy_pct FROM public.uk_prms_monthly WHERE period = (SELECT MAX(period) FROM public.uk_prms_monthly) LIMIT 500"
+            )
             vals = [safe_float(r.get("rent_yoy_pct")) for r in rows2 if r.get("rent_yoy_pct") is not None]
             avg = round(sum(vals) / len(vals), 2) if vals else None
             return {"latest_yoy": avg, "avg_12m": avg}
@@ -2767,12 +2781,10 @@ def _get_national_price_benchmark() -> Dict[str, Any]:
     Returns avg price and YoY % growth.
     """
     try:
-        res = supabase.table("uk_hpi_monthly") \
-            .select("period,average_price,price_change_pct") \
-            .eq("area_code", "E92000001") \
-            .order("period", desc=True) \
-            .limit(13).execute()
-        rows = res.data if hasattr(res, "data") else []
+        rows = data_query(
+            "SELECT period, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 13",
+            ("E92000001",)
+        )
         if not rows:
             return {"avg_price": None, "yoy_pct": None}
         latest = rows[0]
@@ -2791,12 +2803,12 @@ def _get_regional_price_benchmark(lad_code: str) -> Dict[str, Any]:
     Returns latest avg price and YoY %.
     """
     try:
-        res = supabase.table("uk_hpi_monthly") \
-            .select("period,average_price,price_change_pct") \
-            .eq("area_code", lad_code) \
-            .order("period", desc=True) \
-            .limit(13).execute()
-        rows = res.data if hasattr(res, "data") else []
+        rows = data_query(
+            "SELECT period, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 13",
+            (lad_code,)
+        )
+        _ = None  # compat
+        _ = res.data if hasattr(res, "data") else []
         if not rows:
             return {"avg_price": None, "yoy_pct": None}
         latest = rows[0]
@@ -2815,12 +2827,10 @@ def _get_regional_rental_benchmark(lad_code: str) -> Dict[str, Any]:
     Returns latest YoY % and direction.
     """
     try:
-        res = supabase.table("uk_prms_monthly") \
-            .select("period,rent_yoy_pct,rent_price_gbp") \
-            .eq("area_code", lad_code) \
-            .order("period", desc=True) \
-            .limit(12).execute()
-        rows = res.data if hasattr(res, "data") else []
+        rows = data_query(
+            "SELECT period, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 3",
+            (lad_code,)
+        )
         if not rows:
             return {"latest_yoy": None, "avg_rent_gbp": None}
         yoys = [safe_float(r.get("rent_yoy_pct")) for r in rows if r.get("rent_yoy_pct") is not None]
@@ -2847,12 +2857,11 @@ def _get_transaction_liquidity(postcode: str, lad_code: str) -> Dict[str, Any]:
         # Local: last 12 months in postcode district
         import datetime as _dt
         cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=365)).strftime("%Y-%m-%d")
-        res_local = supabase.table("price_paid_raw_2025") \
-            .select("transaction_unique_identifier", count="exact") \
-            .ilike("postcode", f"{district}%") \
-            .gte("date_of_transfer", cutoff) \
-            .execute()
-        local_count = res_local.count if hasattr(res_local, "count") else 0
+        pp_rows = data_query(
+            "SELECT COUNT(*) AS cnt FROM public.price_paid_raw_2025 WHERE postcode ILIKE %s AND date_of_transfer >= %s",
+            (f"{district}%", cutoff)
+        )
+        local_count = int(pp_rows[0].get("cnt", 0)) if pp_rows else 0
         local_qtly  = round((local_count or 0) / 4, 0)
         return {
             "local_qtly":  local_qtly,
@@ -2874,19 +2883,17 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
         results = {}
 
         # Local yield — LAD rent + LAD price
-        rent_res = supabase.table("uk_prms_monthly") \
-            .select("rent_price_gbp") \
-            .eq("area_code", lad_code) \
-            .order("period", desc=True) \
-            .limit(1).execute()
-        rent_rows = rent_res.data if hasattr(rent_res, "data") else []
+        rent_rows = data_query(
+            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
+            (lad_code,)
+        )
         local_rent = safe_float((rent_rows[0].get("rent_price_gbp") if rent_rows else None))
 
-        price_res = supabase.table("uk_hpi_monthly") \
-            .select("average_price") \
-            .eq("area_code", lad_code) \
-            .order("period", desc=True) \
-            .limit(1).execute()
+        price_rows = data_query(
+            "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
+            (lad_code,)
+        )
+
         price_rows = price_res.data if hasattr(price_res, "data") else []
         local_price = safe_float((price_rows[0].get("average_price") if price_rows else None))
 
@@ -2896,19 +2903,17 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
             results["local_yield"] = None
 
         # National yield — England E92000001
-        nat_rent_res = supabase.table("uk_prms_monthly") \
-            .select("rent_price_gbp") \
-            .eq("area_code", "E92000001") \
-            .order("period", desc=True) \
-            .limit(1).execute()
-        nat_rent_rows = nat_rent_res.data if hasattr(nat_rent_res, "data") else []
+        nat_rent_rows = data_query(
+            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
+            ("E92000001",)
+        )
         nat_rent = safe_float((nat_rent_rows[0].get("rent_price_gbp") if nat_rent_rows else None))
 
-        nat_price_res = supabase.table("uk_hpi_monthly") \
-            .select("average_price") \
-            .eq("area_code", "E92000001") \
-            .order("period", desc=True) \
-            .limit(1).execute()
+        nat_price_rows = data_query(
+            "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
+            ("E92000001",)
+        )
+
         nat_price_rows = nat_price_res.data if hasattr(nat_price_res, "data") else []
         nat_price = safe_float((nat_price_rows[0].get("average_price") if nat_price_rows else None))
 
@@ -2937,11 +2942,11 @@ def _get_imd_for_lsoa(lsoa_code: str) -> Dict[str, Any]:
     if not lsoa_code:
         return {"decile": None, "rank": None}
     try:
-        res = supabase.table("lsoa_imd") \
-            .select("imd_rank,imd_decile") \
-            .eq("lsoa_code", lsoa_code) \
-            .limit(1).execute()
-        rows = res.data if hasattr(res, "data") else []
+        rows = data_query(
+            "SELECT imd_rank, imd_decile FROM public.lsoa_imd WHERE lsoa_code = %s LIMIT 1",
+            (lsoa_code,)
+        )
+        _ = []
         if rows:
             return {
                 "decile": rows[0].get("imd_decile"),
