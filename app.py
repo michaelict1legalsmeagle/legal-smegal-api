@@ -3725,6 +3725,48 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
         # ── PHASE 1: RICS-GRADE COMP SCORING ─────────────────────────────────
         import datetime as _dt
+
+        # STEP 0: UPRN deterministic matching
+        # When both subject and comp have UPRN, join EPC directly
+        # Gives exact bedroom count per transaction — no postcode-level inference
+        _subject_uprn = None
+        try:
+            _pc_norm = normalize_postcode(postcode)
+            _uprn_rows = data_query(
+                """SELECT uprn FROM public.epc_certificates
+                   WHERE postcode = %s AND uprn IS NOT NULL
+                   ORDER BY lodgement_date DESC LIMIT 1""",
+                (_pc_norm,)
+            )
+            if _uprn_rows:
+                _subject_uprn = str(_uprn_rows[0]["uprn"]).strip()
+        except Exception as _e:
+            print(f"[WARN] Subject UPRN lookup: {_e}")
+
+        if _subject_uprn:
+            # Enrich each comp with UPRN-linked EPC data
+            _uprn_enriched = 0
+            for _r in rows:
+                _comp_uprn = str(_r.get("uprn") or "").strip()
+                if _comp_uprn:
+                    _epc_uprn = data_query(
+                        """SELECT number_habitable_rooms, total_floor_area,
+                                  construction_age_band, current_energy_rating
+                           FROM public.epc_certificates
+                           WHERE uprn = %s
+                           AND number_habitable_rooms IS NOT NULL
+                           ORDER BY lodgement_date DESC LIMIT 1""",
+                        (_comp_uprn,)
+                    )
+                    if _epc_uprn:
+                        _r["habitable_rooms"]       = _epc_uprn[0].get("number_habitable_rooms")
+                        _r["floor_area"]            = _epc_uprn[0].get("total_floor_area")
+                        _r["construction_age_band"] = _epc_uprn[0].get("construction_age_band")
+                        _r["energy_rating"]         = _epc_uprn[0].get("current_energy_rating")
+                        _uprn_enriched += 1
+            if _uprn_enriched > 0:
+                print(f"[UPRN] Enriched {_uprn_enriched} comps via UPRN-linked EPC")
+
         pt_filter = (property_type or "").strip().upper()
         if pt_filter and pt_filter in ("D", "S", "T", "F", "O"):
             matched = [r for r in rows if str(r.get("property_type") or "").upper() == pt_filter]
@@ -3836,6 +3878,55 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 print(f"[RICS] Tenure matched: {len(rows)} comps ({'Freehold' if _subject_tenure == 'F' else 'Leasehold'})")
             else:
                 print(f"[RICS] Insufficient tenure matches ({len(_tenure_matched)}), skipping tenure filter")
+
+        # STEP 6: Construction age band filter ±2 bands
+        # Victorian terrace vs 1980s terrace — not RICS comparable
+        # Bands: A=pre1900, B=1900-29, C=1930-49, D=1950-66, E=1967-75,
+        #        F=1976-82, G=1983-90, H=1991-95, I=1996-02, J=2003-06, K=2007-11, L=2012+
+        _band_order = ['A','B','C','D','E','F','G','H','I','J','K','L']
+        _subject_band = None
+        try:
+            _pc_norm = normalize_postcode(postcode)
+            _epc_band = data_query(
+                """SELECT construction_age_band
+                   FROM public.epc_certificates
+                   WHERE postcode = %s
+                   AND construction_age_band IS NOT NULL
+                   ORDER BY lodgement_date DESC LIMIT 1""",
+                (_pc_norm,)
+            )
+            if _epc_band:
+                _subject_band = str(_epc_band[0]["construction_age_band"]).strip().upper()
+        except Exception as _e:
+            print(f"[WARN] Age band lookup: {_e}")
+
+        if _subject_band and _subject_band in _band_order:
+            _sub_idx = _band_order.index(_subject_band)
+            _age_matched = []
+            for _r in rows:
+                _pc = normalize_postcode(str(_r.get("postcode") or ""))
+                _epc_age = data_query(
+                    """SELECT construction_age_band FROM public.epc_certificates
+                       WHERE postcode = %s AND construction_age_band IS NOT NULL
+                       ORDER BY lodgement_date DESC LIMIT 1""",
+                    (_pc,)
+                ) if _pc else []
+                _comp_band = str(_epc_age[0]["construction_age_band"]).strip().upper() if _epc_age else None
+                _r["construction_age_band"] = _comp_band
+                if _comp_band and _comp_band in _band_order:
+                    _comp_idx = _band_order.index(_comp_band)
+                    if abs(_comp_idx - _sub_idx) <= 2:
+                        _age_matched.append(_r)
+                else:
+                    _age_matched.append(_r)  # include if no age band data
+
+            if len(_age_matched) >= 5:
+                _excluded = len(rows) - len(_age_matched)
+                if _excluded > 0:
+                    print(f"[RICS] Age band filter: removed {_excluded} comps outside ±2 bands of {_subject_band}")
+                rows = _age_matched
+            else:
+                print(f"[RICS] Insufficient age band matches ({len(_age_matched)}), skipping age filter")
         rows_missing_coords = [r for r in rows if not _row_has_latlng(r)]
         enrich_meta = {"enabled": False, "attempted": 0, "filled": 0, "failed": 0, "notes": ""}
         if rows_missing_coords and HOUSING_ENRICH_LATLNG and GOOGLE_MAPS_API_KEY:
