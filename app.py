@@ -3363,81 +3363,68 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
 
 def get_epc_data(postcode: str) -> Dict[str, Any]:
     """
-    MHCLG EPC API — returns energy rating distribution for postcodes within 3 miles.
-    Uses EPC_API_KEY Bearer token from environment.
-    Returns rating counts (A-G) and dominant rating for inference engine.
+    EPC data from Hetzner epc_certificates table.
+    Returns rating distribution + dominant rating + habitable rooms for subject postcode.
     """
     retrieved = now_iso()
-    sources = [{"label": "MHCLG EPC Register", "url": "https://epc.opendatacommunities.org/"}]
-    pc = normalize_postcode(postcode)
-
-    epc_key = os.environ.get("EPC_API_KEY", "")
-    if not epc_key:
-        return metric_unavailable("EPC data unavailable: API key not configured.", sources, retrieved)
-    if not pc:
-        return metric_unavailable("EPC data unavailable: no postcode.", sources, retrieved)
-
     try:
-        import base64 as _b64
-        _epc_token = _b64.b64encode(epc_key.encode()).decode()
-        pc_encoded = pc.replace(" ", "%20")
-        url = f"https://api.get-energy-performance-data.communities.gov.uk/domestic/search?postcode={pc_encoded}&rows=100"
-        headers = {
-            "Authorization": f"Basic {_epc_token}",
-            "Accept": "application/json",
-        }
-        status, payload = _http_get_json(url, headers=headers, timeout=15)
+        pc = normalize_postcode(postcode)
+        if not pc:
+            return {"fetch_status": "skipped", "metrics": {}}
 
-        if status == 200 and isinstance(payload, dict):
-            rows = payload.get("rows") or []
-            if not rows:
-                return metric_unavailable(
-                    f"No EPC certificates found for {pc}.",
-                    sources, retrieved
-                )
+        # Get EPC data for the exact postcode and nearby (district level)
+        district = pc.split()[0] if ' ' in pc else pc[:3]
 
-            # Build rating distribution
-            rating_counts = {"A": 0, "B": 0, "C": 0, "D": 0, "E": 0, "F": 0, "G": 0}
-            for row in rows:
-                r = str(row.get("current-energy-rating") or "").upper().strip()
-                if r in rating_counts:
-                    rating_counts[r] += 1
+        # Subject property EPC
+        subject_rows = data_query(
+            """SELECT current_energy_rating, number_habitable_rooms, total_floor_area,
+                      property_type, built_form
+               FROM public.epc_certificates
+               WHERE postcode = %s
+               ORDER BY lodgement_date DESC LIMIT 5""",
+            (pc,)
+        )
 
-            total = sum(rating_counts.values())
-            if total == 0:
-                return metric_unavailable(f"No valid EPC ratings found for {pc}.", sources, retrieved)
+        # District-level distribution for area profile
+        dist_rows = data_query(
+            """SELECT current_energy_rating, COUNT(*) AS cnt
+               FROM public.epc_certificates
+               WHERE postcode LIKE %s
+               AND current_energy_rating IS NOT NULL
+               GROUP BY 1 ORDER BY 1""",
+            (f"{district}%",)
+        )
 
-            # Dominant rating
-            dominant = max(rating_counts, key=rating_counts.get)
+        rating_counts = {r["current_energy_rating"]: int(r["cnt"]) for r in dist_rows if r.get("current_energy_rating")}
+        total = sum(rating_counts.values())
+        dominant = max(rating_counts, key=rating_counts.get) if rating_counts else None
 
-            # Efficiency score — weighted A=7 to G=1
-            weight_map = {"A": 7, "B": 6, "C": 5, "D": 4, "E": 3, "F": 2, "G": 1}
-            score = sum(weight_map.get(r, 0) * c for r, c in rating_counts.items()) / total
+        # Subject property details
+        subject_rating = None
+        subject_rooms  = None
+        subject_area   = None
+        if subject_rows:
+            subject_rating = subject_rows[0].get("current_energy_rating")
+            subject_rooms  = subject_rows[0].get("number_habitable_rooms")
+            subject_area   = subject_rows[0].get("total_floor_area")
 
-            summary = (
-                f"Dominant rating: {dominant} across {total} certificates. "
-                f"Efficiency score: {score:.1f}/7. "
-                f"Distribution: " + ", ".join(f"{r}:{c}" for r, c in rating_counts.items() if c > 0) + "."
-            )
-
-            out = metric_ok(summary, rating_counts, sources, retrieved, 0.85)
-            out["metrics"] = {
-                "dominant_rating": dominant,
+        return {
+            "fetch_status": "ok",
+            "retrieved_at": retrieved,
+            "source": "Hetzner epc_certificates · MHCLG EPC Register",
+            "metrics": {
                 "total_certificates": total,
-                "efficiency_score": round(score, 2),
-                "distribution": rating_counts,
+                "dominant_rating": dominant,
+                "rating_counts": rating_counts,
+                "subject_rating": subject_rating,
+                "subject_habitable_rooms": int(subject_rooms) if subject_rooms else None,
+                "subject_floor_area": float(subject_area) if subject_area else None,
             }
-            return out
-
-        elif status == 401:
-            return metric_unavailable("EPC API authentication failed — check EPC_API_KEY.", sources, retrieved)
-        else:
-            return metric_unavailable(f"EPC API returned status {status} for {pc}.", sources, retrieved)
+        }
 
     except Exception as e:
-        print(f"[WARN] EPC fetch failed for {pc}: {e}")
-
-    return metric_unavailable(f"EPC data temporarily unavailable for {pc}.", sources, retrieved)
+        print(f"[WARN] get_epc_data failed for {postcode}: {e}")
+        return {"fetch_status": "error", "error": str(e), "metrics": {}}
 
 
 def get_planning_data(lat: Optional[float], lng: Optional[float], postcode: str = "") -> Dict[str, Any]:
@@ -3742,6 +3729,113 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         if pt_filter and pt_filter in ("D", "S", "T", "F", "O"):
             matched = [r for r in rows if str(r.get("property_type") or "").upper() == pt_filter]
             rows = matched if len(matched) >= 5 else rows
+
+        # ── EPC BEDROOM MATCHING (Phase 2) ─────────────────────────────
+        # Get subject property habitable rooms from Hetzner epc_certificates
+        _subject_rooms = None
+        try:
+            _pc_norm = normalize_postcode(postcode)
+            _epc_sub = data_query(
+                "SELECT number_habitable_rooms FROM public.epc_certificates WHERE postcode = %s AND number_habitable_rooms IS NOT NULL ORDER BY lodgement_date DESC LIMIT 1",
+                (_pc_norm,)
+            )
+            if _epc_sub:
+                _subject_rooms = int(_epc_sub[0]["number_habitable_rooms"])
+        except Exception as _e:
+            print(f"[WARN] EPC subject lookup: {_e}")
+
+        if _subject_rooms:
+            # Enrich comps with EPC bedroom + floor area data
+            _enriched = []
+            for _r in rows:
+                _pc = normalize_postcode(str(_r.get("postcode") or ""))
+                _epc_comp = data_query(
+                    """SELECT number_habitable_rooms, total_floor_area
+                       FROM public.epc_certificates
+                       WHERE postcode = %s
+                       AND number_habitable_rooms IS NOT NULL
+                       ORDER BY lodgement_date DESC LIMIT 1""",
+                    (_pc,)
+                ) if _pc else []
+                _comp_rooms = int(_epc_comp[0]["number_habitable_rooms"]) if _epc_comp else None
+                _comp_area  = float(_epc_comp[0]["total_floor_area"]) if _epc_comp and _epc_comp[0].get("total_floor_area") else None
+                _r["habitable_rooms"] = _comp_rooms
+                _r["floor_area"]      = _comp_area
+                _enriched.append(_r)
+
+            # STEP 2: Bedroom filter ±1 room
+            _bedroom_matched = [r for r in _enriched if r.get("habitable_rooms") is not None
+                                and abs(r["habitable_rooms"] - _subject_rooms) <= 1]
+            if len(_bedroom_matched) >= 5:
+                rows = _bedroom_matched
+                print(f"[EPC] Bedroom matched: {len(rows)} comps (subject={_subject_rooms} rooms)")
+            else:
+                print(f"[EPC] Insufficient bedroom matches ({len(_bedroom_matched)}), using property-type filter")
+                rows = _enriched  # keep enriched for floor area step
+
+        # STEP 3: Floor area filter ±20%
+        # Get subject floor area from EPC
+        _subject_area = None
+        try:
+            _pc_norm = normalize_postcode(postcode)
+            _epc_area = data_query(
+                """SELECT total_floor_area FROM public.epc_certificates
+                   WHERE postcode = %s AND total_floor_area IS NOT NULL
+                   ORDER BY lodgement_date DESC LIMIT 1""",
+                (_pc_norm,)
+            )
+            if _epc_area:
+                _subject_area = float(_epc_area[0]["total_floor_area"])
+        except Exception as _e:
+            print(f"[WARN] EPC floor area lookup: {_e}")
+
+        if _subject_area and _subject_area > 0:
+            _lower = _subject_area * 0.80
+            _upper = _subject_area * 1.20
+            _area_matched = [r for r in rows
+                             if r.get("floor_area") is not None
+                             and _lower <= r["floor_area"] <= _upper]
+            if len(_area_matched) >= 5:
+                rows = _area_matched
+                print(f"[EPC] Floor area matched: {len(rows)} comps (subject={_subject_area:.0f}m² ±20%)")
+            else:
+                print(f"[EPC] Insufficient area matches ({len(_area_matched)}), skipping area filter")
+
+        # STEP 4: New build exclusion
+        # If subject property is not a new build, exclude new builds from comps
+        # new builds sell at 15-25% premium — materially distorts ceiling
+        _new_build_filtered = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
+        if len(_new_build_filtered) >= 5:
+            _nb_excluded = len(rows) - len(_new_build_filtered)
+            if _nb_excluded > 0:
+                print(f"[RICS] New build exclusion: removed {_nb_excluded} new builds")
+            rows = _new_build_filtered
+
+        # STEP 5: Tenure match (freehold/leasehold)
+        # Leasehold with short lease sells at significant discount — not comparable to freehold
+        _subject_tenure = None
+        try:
+            # Try to get tenure from deal data via postcode district
+            _tenure_rows = data_query(
+                """SELECT duration, COUNT(*) AS cnt
+                   FROM public.price_paid_raw_2025
+                   WHERE postcode = %s AND duration IN ('F','L')
+                   GROUP BY duration ORDER BY cnt DESC LIMIT 1""",
+                (normalize_postcode(postcode),)
+            )
+            if _tenure_rows:
+                _subject_tenure = _tenure_rows[0].get("duration")
+        except Exception as _e:
+            print(f"[WARN] Tenure lookup: {_e}")
+
+        if _subject_tenure in ("F", "L"):
+            _tenure_matched = [r for r in rows
+                               if str(r.get("duration") or "").upper() == _subject_tenure]
+            if len(_tenure_matched) >= 5:
+                rows = _tenure_matched
+                print(f"[RICS] Tenure matched: {len(rows)} comps ({'Freehold' if _subject_tenure == 'F' else 'Leasehold'})")
+            else:
+                print(f"[RICS] Insufficient tenure matches ({len(_tenure_matched)}), skipping tenure filter")
         rows_missing_coords = [r for r in rows if not _row_has_latlng(r)]
         enrich_meta = {"enabled": False, "attempted": 0, "filled": 0, "failed": 0, "notes": ""}
         if rows_missing_coords and HOUSING_ENRICH_LATLNG and GOOGLE_MAPS_API_KEY:
