@@ -2942,8 +2942,6 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
             "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
             (lad_code,)
         )
-
-        price_rows = price_res.data if hasattr(price_res, "data") else []
         local_price = safe_float((price_rows[0].get("average_price") if price_rows else None))
 
         if local_rent and local_price and local_price > 0:
@@ -2962,8 +2960,6 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
             "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
             ("E92000001",)
         )
-
-        nat_price_rows = nat_price_res.data if hasattr(nat_price_res, "data") else []
         nat_price = safe_float((nat_price_rows[0].get("average_price") if nat_price_rows else None))
 
         if nat_rent and nat_price and nat_price > 0:
