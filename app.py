@@ -2593,6 +2593,31 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
     except Exception as _se:
         print(f"[WARN] Schools Hetzner query failed: {_se}")
 
+    # ── Supabase auto-fallback: schools_clean_v2 (no env var required) ──────
+    if supabase:
+        try:
+            sources_sb = [{"label": "Ofsted / DfE", "url": "https://reports.ofsted.gov.uk/"}]
+            res_sb = (
+                supabase.table("schools_clean_v2")
+                .select("urn,school_name,postcode,ofsted_rating,school_type,phase,la_name")
+                .ilike("postcode", f"{district}%")
+                .limit(SCHOOLS_MAX_RESULTS)
+                .execute()
+            )
+            sb_rows = res_sb.data if hasattr(res_sb, "data") and isinstance(res_sb.data, list) else []
+            if sb_rows:
+                for r in sb_rows:
+                    r.setdefault("name", r.get("school_name", ""))
+                    r.setdefault("miles", None)
+                out_sb = metric_ok(
+                    f"{len(sb_rows)} schools found for district {district}.",
+                    sb_rows, sources_sb, retrieved, SCHOOLS_CONFIDENCE_VALUE,
+                )
+                out_sb["metrics"] = {"provider": "supabase_schools_clean_v2", "district": district, "count": len(sb_rows)}
+                return out_sb
+        except Exception as _sb_se:
+            print(f"[WARN] Schools Supabase fallback failed: {_sb_se}")
+
     if SCHOOLS_PROVIDER == "supabase":
         if not supabase:
             return metric_unavailable(

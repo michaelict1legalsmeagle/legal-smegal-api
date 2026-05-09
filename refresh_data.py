@@ -154,6 +154,107 @@ def refresh_hpi():
     log.info(f"HPI refresh complete: {monthly_count} monthly rows, {by_type_count} by-type rows")
 
 
+# ── ONS PRMS (Private Rental Market Statistics) ──────────────────────────────
+# Writes to Supabase uk_prms_monthly: area_code, date, region_name, rent_price_gbp,
+# rent_yoy_pct. Source: ONS private rental index CSV (England, LAD level).
+PRMS_URL = (
+    "https://www.ons.gov.uk/generator?format=csv"
+    "&uri=/economy/inflationandpriceindices/bulletins"
+    "/privaterentalmarketsummarystatisticsinengland/latest"
+)
+# Stable direct CSV: ONS publish median rent by local authority
+PRMS_LA_URL = (
+    "https://www.ons.gov.uk/file?uri=/economy/inflationandpriceindices"
+    "/datasets/privaterentalmarketsummarystatisticsinengland"
+    "/current/prt1a.csv"
+)
+PRMS_TABLE = "uk_prms_monthly"
+
+
+def refresh_prms():
+    """
+    Download ONS Private Rental Market Statistics (England, local authority level).
+    Upserts into Supabase uk_prms_monthly.
+    ONS publish annually (typically March) covering the previous 12 months.
+    Table columns: area_code, date, region_name, rent_price_gbp, rent_yoy_pct.
+    """
+    log.info("Starting ONS PRMS refresh...")
+    urls_to_try = [PRMS_LA_URL, PRMS_URL]
+    r = None
+    used_url = None
+    for url in urls_to_try:
+        try:
+            resp = requests.get(url, timeout=60, allow_redirects=True)
+            if resp.status_code == 200 and len(resp.content) > 500:
+                r = resp
+                used_url = url
+                break
+            else:
+                log.warning(f"PRMS URL {resp.status_code}: {url}")
+        except Exception as e:
+            log.warning(f"PRMS URL failed ({url}): {e}")
+
+    if not r:
+        log.error("PRMS: no working URL found — skipping.")
+        return
+
+    log.info(f"PRMS: downloaded from {used_url}")
+    content = r.content.decode("utf-8", errors="replace")
+    reader = csv.DictReader(io.StringIO(content))
+
+    batch = []
+    count = 0
+    skipped = 0
+
+    for row in reader:
+        try:
+            # ONS LA rent CSV columns vary by release — try common names
+            area_code   = (row.get("area_code") or row.get("LACODE") or row.get("Code") or "").strip()
+            region_name = (row.get("area_name") or row.get("LANAME") or row.get("Area") or row.get("Name") or "").strip()
+            date_str    = (row.get("date") or row.get("Date") or row.get("Period") or "").strip()
+            rent_raw    = row.get("median_rent") or row.get("Median") or row.get("rent_price_gbp") or row.get("Value") or None
+            yoy_raw     = row.get("annual_change") or row.get("YoY") or row.get("rent_yoy_pct") or None
+
+            if not area_code or not date_str:
+                skipped += 1
+                continue
+
+            # Normalise date
+            if "/" in date_str:
+                parts = date_str.split("/")
+                if len(parts) == 3:
+                    date_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
+            elif len(date_str) == 7 and "-" in date_str:
+                date_str = date_str + "-01"
+
+            rent = float(str(rent_raw).replace(",", "")) if rent_raw else None
+            yoy  = float(str(yoy_raw).replace("%", "").replace(",", "")) if yoy_raw else None
+
+            batch.append({
+                "area_code":    area_code,
+                "date":         date_str,
+                "region_name":  region_name or area_code,
+                "rent_price_gbp": rent,
+                "rent_yoy_pct": yoy,
+            })
+
+            if len(batch) >= BATCH_SIZE:
+                supabase.table(PRMS_TABLE).upsert(batch, on_conflict="area_code,date").execute()
+                count += len(batch)
+                batch = []
+                log.info(f"PRMS: {count} rows upserted")
+        except Exception as e:
+            log.warning(f"PRMS row error: {e} — row: {dict(list(row.items())[:4])}")
+            skipped += 1
+            continue
+
+    if batch:
+        supabase.table(PRMS_TABLE).upsert(batch, on_conflict="area_code,date").execute()
+        count += len(batch)
+
+    log.info(f"PRMS refresh complete: {count} rows upserted, {skipped} skipped")
+
+
 # ── LAND REGISTRY PRICE PAID ──────────────────────────────────────────────────
 # Price Paid writes to Hetzner (price_paid_raw_2025), NOT Supabase
 PP_MONTHLY_URL  = "https://price-paid-data.publicdata.landregistry.gov.uk/pp-monthly-update-new-version.csv"
@@ -381,6 +482,7 @@ if __name__ == "__main__":
     else:
         log.info(f"LegalSmegal data refresh started — {datetime.utcnow().isoformat()}")
         refresh_hpi()
+        refresh_prms()
         refresh_price_paid()
         refresh_materialized_view()
         month = datetime.utcnow().month
