@@ -3049,10 +3049,16 @@ def _get_imd_for_lsoa(lsoa_code: str) -> Dict[str, Any]:
 
 
 def _get_census_private_rent_pct(lsoa_code: str) -> Optional[float]:
-    """Return % private rented for LSOA from Hetzner census_tenure_lsoa table."""
+    """
+    Return % private rented for LSOA.
+    Primary:  Hetzner census_tenure_lsoa table.
+    Fallback: ONS Census 2021 open API — no key required.
+    """
+    if not lsoa_code:
+        return None
+
+    # Primary: Hetzner
     try:
-        if not lsoa_code:
-            return None
         rows = data_query(
             "SELECT private_rent_pct FROM public.census_tenure_lsoa WHERE lsoa_code = %s LIMIT 1",
             (lsoa_code,)
@@ -3060,7 +3066,33 @@ def _get_census_private_rent_pct(lsoa_code: str) -> Optional[float]:
         if rows:
             return float(rows[0]["private_rent_pct"])
     except Exception as e:
-        print(f"[WARN] _get_census_private_rent_pct: {e}")
+        print(f"[WARN] _get_census_private_rent_pct hetzner: {e}")
+
+    # Fallback: ONS Census 2021 API (TS054 Tenure — open, no key needed)
+    try:
+        url = (
+            f"https://api.beta.ons.gov.uk/v1/datasets/TS054/editions/2021/versions/1"
+            f"/observations?area-type=lsoa&areas={lsoa_code}"
+        )
+        r = requests.get(url, timeout=8)
+        if r.status_code == 200:
+            observations = (r.json() or {}).get("observations") or []
+            total = 0
+            private_rent = 0
+            for obs in observations:
+                dims = obs.get("dimensions") or {}
+                tenure = str((dims.get("Tenure of household (5 categories)") or {}).get("label") or "").lower()
+                val = int(obs.get("observation") or 0)
+                total += val
+                if "private rented" in tenure:
+                    private_rent += val
+            if total > 0:
+                pct = round((private_rent / total) * 100, 1)
+                print(f"[INFO] ONS TS054 for {lsoa_code}: {pct}% private rented")
+                return pct
+    except Exception as e:
+        print(f"[WARN] _get_census_private_rent_pct ONS API: {e}")
+
     return None
 
 
@@ -3151,18 +3183,8 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         lsoa_code    = str(area_data.get("lsoa_gss") or "").strip()
         imd_data     = _get_imd_for_lsoa(lsoa_code)
 
-        # Census 2021 tenure — private rent % from Hetzner census_tenure_lsoa
-        _census_private_rent_pct = None
-        try:
-            if lsoa_code:
-                _ct = data_query(
-                    "SELECT private_rent_pct FROM public.census_tenure_lsoa WHERE lsoa_code = %s LIMIT 1",
-                    (lsoa_code,)
-                )
-                if _ct:
-                    _census_private_rent_pct = float(_ct[0]["private_rent_pct"])
-        except Exception as _cte:
-            print(f"[WARN] Census tenure lookup: {_cte}")
+        # Census 2021 tenure — private rent % (Hetzner primary, ONS API fallback)
+        _census_private_rent_pct = _get_census_private_rent_pct(lsoa_code) if lsoa_code else None
 
         # ── STEP 2: SIGNAL MAPPING ────────────────────────────────
         # Demand Pressure
