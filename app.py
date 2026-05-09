@@ -208,6 +208,25 @@ def data_query(sql: str, params=None) -> list:
 
 print("🟢 Hetzner data connection configured:", DATA_DATABASE_URL.split("@")[1])
 
+# ── Supabase direct Postgres connection (for uk_hpi_monthly, uk_prms_monthly) ──
+# Set SUPABASE_DB_URL in Render env to:
+# postgresql://postgres.[ref]:[password]@aws-0-eu-west-2.pooler.supabase.com:6543/postgres
+SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "")
+
+def supabase_data_query(sql: str, params=None) -> list:
+    """Execute a SELECT query on Supabase postgres directly and return list of dicts."""
+    if not SUPABASE_DB_URL:
+        print("[SUPABASE_DATA_QUERY] SUPABASE_DB_URL not set — cannot query Supabase tables directly")
+        return []
+    try:
+        with psycopg.connect(SUPABASE_DB_URL, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params or ())
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[SUPABASE_DATA_QUERY ERROR] {e}")
+        return []
+
 
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2724,8 +2743,8 @@ def _get_rental_trend(lad_code: str) -> Dict[str, Any]:
     Returns direction: Increasing / Stable / Declining and 36-month series.
     """
     try:
-        rows = data_query(
-            "SELECT period, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period ASC LIMIT 48",
+        rows = supabase_data_query(
+            "SELECT date, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date ASC LIMIT 48",
             (lad_code,)
         )
         if not rows:
@@ -2735,7 +2754,7 @@ def _get_rental_trend(lad_code: str) -> Dict[str, Any]:
         for r in rows:
             yoy = safe_float(r.get("rent_yoy_pct"))
             idx = safe_float(r.get("rent_index"))
-            period = str(r.get("period") or "")[:10]
+            period = str(r.get("date") or "")[:10]
             if period:
                 series.append({
                     "period":        period,
@@ -2805,13 +2824,13 @@ def _get_national_rental_benchmark() -> Dict[str, Any]:
     Returns latest YoY % and 12-month average.
     """
     try:
-        rows = data_query(
-            "SELECT period, rent_yoy_pct FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 48",
+        rows = supabase_data_query(
+            "SELECT date, rent_yoy_pct FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 48",
             ("E92000001",)
         )
         if not rows:
-            rows2 = data_query(
-                "SELECT rent_yoy_pct FROM public.uk_prms_monthly WHERE period = (SELECT MAX(period) FROM public.uk_prms_monthly) LIMIT 500"
+            rows2 = supabase_data_query(
+                "SELECT rent_yoy_pct FROM public.uk_prms_monthly WHERE date = (SELECT MAX(date) FROM public.uk_prms_monthly) LIMIT 500"
             )
             vals = [safe_float(r.get("rent_yoy_pct")) for r in rows2 if r.get("rent_yoy_pct") is not None]
             avg = round(sum(vals) / len(vals), 2) if vals else None
@@ -2832,8 +2851,8 @@ def _get_national_price_benchmark() -> Dict[str, Any]:
     Returns avg price and YoY % growth.
     """
     try:
-        rows = data_query(
-            "SELECT period, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 13",
+        rows = supabase_data_query(
+            "SELECT date, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 13",
             ("E92000001",)
         )
         if not rows:
@@ -2854,8 +2873,8 @@ def _get_regional_price_benchmark(lad_code: str) -> Dict[str, Any]:
     Returns latest avg price and YoY %.
     """
     try:
-        rows = data_query(
-            "SELECT period, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 13",
+        rows = supabase_data_query(
+            "SELECT date, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 13",
             (lad_code,)
         )
         if not rows:
@@ -2876,8 +2895,8 @@ def _get_regional_rental_benchmark(lad_code: str) -> Dict[str, Any]:
     Returns latest YoY % and direction.
     """
     try:
-        rows = data_query(
-            "SELECT period, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 3",
+        rows = supabase_data_query(
+            "SELECT date, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 3",
             (lad_code,)
         )
         if not rows:
@@ -2932,14 +2951,14 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
         results = {}
 
         # Local yield — LAD rent + LAD price
-        rent_rows = data_query(
-            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
+        rent_rows = supabase_data_query(
+            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
             (lad_code,)
         )
         local_rent = safe_float((rent_rows[0].get("rent_price_gbp") if rent_rows else None))
 
-        price_rows = data_query(
-            "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
+        price_rows = supabase_data_query(
+            "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
             (lad_code,)
         )
         local_price = safe_float((price_rows[0].get("average_price") if price_rows else None))
@@ -2950,14 +2969,14 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
             results["local_yield"] = None
 
         # National yield — England E92000001
-        nat_rent_rows = data_query(
-            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
+        nat_rent_rows = supabase_data_query(
+            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
             ("E92000001",)
         )
         nat_rent = safe_float((nat_rent_rows[0].get("rent_price_gbp") if nat_rent_rows else None))
 
-        nat_price_rows = data_query(
-            "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
+        nat_price_rows = supabase_data_query(
+            "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
             ("E92000001",)
         )
         nat_price = safe_float((nat_price_rows[0].get("average_price") if nat_price_rows else None))
