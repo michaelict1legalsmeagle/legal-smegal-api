@@ -206,14 +206,38 @@ def refresh_prms():
     count = 0
     skipped = 0
 
+    # Build case-insensitive column lookup from first row
+    _col_norm = {}  # lowercase_no_special -> actual header
+
     for row in reader:
+        # Build normalised column map once from first row
+        if not _col_norm:
+            for k in row.keys():
+                _col_norm[k.lower().replace(" ", "_").replace("-", "_")] = k
+
+        def _get(*keys):
+            for k in keys:
+                # Try exact key first
+                v = row.get(k)
+                if v is not None and str(v).strip():
+                    return str(v).strip()
+                # Try normalised lookup
+                norm = k.lower().replace(" ", "_").replace("-", "_")
+                actual = _col_norm.get(norm)
+                if actual:
+                    v = row.get(actual)
+                    if v is not None and str(v).strip():
+                        return str(v).strip()
+            return ""
+
         try:
-            # ONS LA rent CSV columns vary by release — try common names
-            area_code   = (row.get("area_code") or row.get("LACODE") or row.get("Code") or "").strip()
-            region_name = (row.get("area_name") or row.get("LANAME") or row.get("Area") or row.get("Name") or "").strip()
-            date_str    = (row.get("date") or row.get("Date") or row.get("Period") or "").strip()
-            rent_raw    = row.get("median_rent") or row.get("Median") or row.get("rent_price_gbp") or row.get("Value") or None
-            yoy_raw     = row.get("annual_change") or row.get("YoY") or row.get("rent_yoy_pct") or None
+            # ONS prt1a.csv columns: Area_Code, Area_Name, Year_ending_Month, Median
+            # Also handles older variants and alternative column names
+            area_code   = _get("area_code", "Area_Code", "LACODE", "Code", "geography_code")
+            region_name = _get("area_name", "Area_Name", "LANAME", "Area", "Name", "geography")
+            date_str    = _get("date", "Date", "Period", "Year_ending_Month", "year_ending_month", "Time")
+            rent_raw    = _get("median_rent", "Median", "median", "rent_price_gbp", "Value", "value") or None
+            yoy_raw     = _get("annual_change", "Annual_Change", "YoY", "rent_yoy_pct") or None
 
             if not area_code or not date_str:
                 skipped += 1
