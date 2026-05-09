@@ -23,5 +23,5 @@ errorlog = "-"
 loglevel = "info"
 
 # Prevent worker crashes from killing the whole process
-max_requests = 100          # Restart workers after 100 requests (memory leak prevention)
-max_requests_jitter = 10    # Stagger restarts
+max_requests = 500          # Restart workers after 500 requests — reduced frequency protects long-running background threads (area fetch)
+max_requests_jitter = 50    # Stagger restarts

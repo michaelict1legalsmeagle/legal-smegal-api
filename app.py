@@ -6595,6 +6595,19 @@ def save_area(deal_id: str):
             except Exception:
                 pass
 
+    # Mark as fetching in DB immediately — polls can detect live fetch vs dead thread
+    try:
+        supabase.table("deals").update({
+            "area_json":  {
+                "postcode":     postcode,
+                "fetch_status": "fetching",
+                "fetched_at":   now_iso(),
+            },
+            "updated_at": now_iso(),
+        }).eq("id", _deal_id).execute()
+    except Exception:
+        pass  # Non-fatal — background thread will overwrite on success
+
     import threading as _t
     _t.Thread(target=_fetch_and_store, daemon=True).start()
 

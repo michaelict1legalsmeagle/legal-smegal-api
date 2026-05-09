@@ -479,6 +479,16 @@ if __name__ == "__main__":
             years = [now.year - 1, now.year]
         log.info(f"Backfill mode — years: {years}")
         backfill_price_paid(years)
+    elif "--schools" in args:
+        # Manual schools-only refresh: python refresh_data.py --schools
+        log.info("Schools-only refresh triggered manually")
+        refresh_schools()
+        log.info("Schools refresh complete")
+    elif "--prms" in args:
+        # Manual PRMS-only refresh: python refresh_data.py --prms
+        log.info("PRMS-only refresh triggered manually")
+        refresh_prms()
+        log.info("PRMS refresh complete")
     else:
         log.info(f"LegalSmegal data refresh started — {datetime.utcnow().isoformat()}")
         refresh_hpi()
