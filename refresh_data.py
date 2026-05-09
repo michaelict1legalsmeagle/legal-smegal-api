@@ -112,7 +112,7 @@ def refresh_hpi():
             monthly_batch.append({
                 "area_code":     area_code,
                 "date":          date_str,
-                "avg_price":     float(avg_price) if avg_price else None,
+                "average_price": float(avg_price) if avg_price else None,
                 "annual_change": float(pct_change) if pct_change else None,
                 "region_name":   row.get("RegionName") or area_code,
             })
@@ -129,7 +129,7 @@ def refresh_hpi():
                         "area_code":     area_code,
                         "date":          date_str,
                         "property_type": prop_type,
-                        "avg_price":     float(avg),
+                        "average_price": float(avg),
                         "annual_change": float(chg) if chg else None,
                     })
             if len(monthly_batch) >= BATCH_SIZE:
