@@ -1311,6 +1311,7 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
             meta["notes"] = "Resolved from geo cache."
             meta["lat"] = safe_float(cached.get("lat"))
             meta["lng"] = safe_float(cached.get("lng"))
+            meta["area_code"] = (cached.get("area_code") or "").strip() or None
             return lsoa_cached.strip(), meta
 
     url = f"https://api.postcodes.io/postcodes/{pc_key}"
@@ -1344,7 +1345,7 @@ def resolve_lsoa_gss_from_postcode(postcode: str) -> Tuple[Optional[str], Dict[s
             meta["notes"] = "postcodes.io result missing codes.lsoa (GSS)."
             return None, meta
 
-        geo_cache_set(cache_key, {"lsoa_gss": lsoa_gss, "lat": meta["lat"], "lng": meta["lng"]})
+        geo_cache_set(cache_key, {"lsoa_gss": lsoa_gss, "lat": meta["lat"], "lng": meta["lng"], "area_code": area_code or ""})
         meta["notes"] = "Resolved LSOA GSS (+ coords) from postcodes.io."
         return lsoa_gss, meta
 
@@ -4148,6 +4149,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "limit": lim,
             "count": len(rows),
             "median_price": med,
+            "avg": med,            # alias used by inference engine + frontend avCompAvg
+            "average_price": med,  # alias for build_area_inference comp_avg lookup
             "min_miles": min_m,
             "max_miles": max_m,
             "property_type_counts": ptypes,
@@ -4978,50 +4981,9 @@ def get_deal(deal_id: str):
         if not result.data:
             return jsonify({"error": "Deal not found"}), 404
         deal = result.data
-        # If area_json is missing, trigger a background re-fetch so comps
-        # are available on next page load without requiring the user to visit
-        # the Area Intelligence page manually.
-        if not deal.get("area_json") and deal.get("postcode"):
-            import threading
-            _did = deal_id
-            _pc  = normalize_postcode(deal["postcode"])
-            def _bg_area():
-                try:
-                    lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(_pc)
-                    lat = safe_float((lsoa_meta or {}).get("lat"))
-                    lng = safe_float((lsoa_meta or {}).get("lng"))
-                    area_code = str((lsoa_meta or {}).get("area_code") or "").strip()
-                    if lat is None or lng is None:
-                        lat, lng, _ = nspl_lookup_latlng(_pc)
-                    area_data = {
-                        "postcode":     _pc,
-                        "lsoa_gss":     lsoa_gss,
-                        "lat":          lat,
-                        "lng":          lng,
-                        "area_code":    area_code,
-                        "housing":      get_housing_data(_pc),
-                        "crime":        get_crime_data(lat, lng),
-                        "transport":    get_transport_data(lat, lng),
-                        "amenities":    get_amenities_data(lat, lng),
-                        "schools":      get_schools_data(_pc),
-                        "broadband":    get_broadband_data(_pc),
-                        "flood":        get_flood_risk(lat, lng, _pc),
-                        "epc":          get_epc_data(_pc),
-                        "planning":     get_planning_data(lat, lng, _pc),
-                        "trends":       build_trends_from_uk_hpi(_pc, area_code, 24),
-                        "fetched_at":   now_iso(),
-                        "fetch_status": "complete",
-                    }
-                    inference_result = build_area_inference(area_data, _pc)
-                    area_data.update(inference_result)
-                    supabase.table("deals").update({
-                        "area_json":  area_data,
-                        "updated_at": now_iso(),
-                    }).eq("id", _did).execute()
-                    print(f"[INFO] area auto-fetch complete for deal {_did}")
-                except Exception as _e:
-                    print(f"[WARN] area auto-fetch failed for {_did}: {_e}")
-            threading.Thread(target=_bg_area, daemon=True).start()
+        # area_json is fetched via POST /api/deals/:id/area (verdict and area pages both trigger this)
+        # Do NOT launch a second background thread here — it races with the POST /area fetch
+        # and produces inconsistent area_json (missing property_type, guide_price, gp data).
         return jsonify({"ok": True, "deal": deal}), 200
     except Exception as e:
         app.logger.exception("get_deal failed")
