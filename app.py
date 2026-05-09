@@ -219,9 +219,8 @@ def supabase_data_query(sql: str, params=None) -> list:
     Primary:  direct psycopg via SUPABASE_DB_URL.
     Fallback: Supabase REST client — works when pooler DNS fails on Render.
     """
-    import re as _re
+    import re as _re2
 
-    # ── Primary: direct postgres ───────────────────────────────────────
     if SUPABASE_DB_URL:
         try:
             with psycopg.connect(SUPABASE_DB_URL, row_factory=dict_row, connect_timeout=8) as conn:
@@ -231,50 +230,37 @@ def supabase_data_query(sql: str, params=None) -> list:
         except Exception as e:
             print(f"[SUPABASE_DATA_QUERY] direct postgres failed ({e}) — REST fallback")
 
-    # ── Fallback: Supabase REST API ────────────────────────────────────
     if not supabase:
         return []
     try:
         sql_u = sql.upper()
-        # Table
-        tm = _re.search(r"FROM\s+public\.(\w+)", sql, _re.IGNORECASE)
+        tm = _re2.search(r"FROM\s+public\.(\w+)", sql, _re2.IGNORECASE)
         if not tm:
             return []
         table = tm.group(1)
-
-        # Columns (handle "col AS alias")
-        cm = _re.search(r"SELECT\s+(.+?)\s+FROM", sql, _re.IGNORECASE | _re.DOTALL)
+        cm = _re2.search(r"SELECT\s+(.+?)\s+FROM", sql, _re2.IGNORECASE | _re2.DOTALL)
         cols_raw = cm.group(1).strip() if cm else "*"
         raw_cols, alias_map = [], {}
         for c in cols_raw.split(","):
             c = c.strip()
-            am = _re.match(r"(\w+)\s+AS\s+(\w+)", c, _re.IGNORECASE)
+            am = _re2.match(r"(\w+)\s+AS\s+(\w+)", c, _re2.IGNORECASE)
             if am:
                 raw_cols.append(am.group(1))
                 alias_map[am.group(1)] = am.group(2)
             else:
                 raw_cols.append(c)
-        select_str = ",".join(raw_cols)
-
-        q = supabase.table(table).select(select_str)
-
-        # WHERE area_code = %s
+        q = supabase.table(table).select(",".join(raw_cols))
         if "WHERE" in sql_u and "AREA_CODE" in sql_u and params:
             q = q.eq("area_code", params[0])
-
-        # WHERE date = (SELECT MAX...) → order desc, limit 500
         if "SELECT MAX" in sql_u:
             q = q.order("date", desc=True).limit(500)
         else:
             desc = "DESC" in sql_u
             q = q.order("date", desc=desc)
-            lm = _re.search(r"LIMIT\s+(\d+)", sql, _re.IGNORECASE)
+            lm = _re2.search(r"LIMIT\s+(\d+)", sql, _re2.IGNORECASE)
             if lm:
                 q = q.limit(int(lm.group(1)))
-
         rows = q.execute().data or []
-
-        # Apply aliases
         for row in rows:
             for orig, alias in alias_map.items():
                 if orig in row:
@@ -2652,10 +2638,8 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
         print(f"[WARN] Schools Hetzner query failed: {_se}")
 
     # ── Supabase auto-fallback: schools_clean_v2 (no env var required) ──────
-    _OFSTED_CODE_MAP = {
-        "1": "Outstanding", "2": "Good",
-        "3": "Requires Improvement", "4": "Inadequate",
-    }
+    _OFSTED_CODE_MAP = {"1": "Outstanding", "2": "Good",
+                        "3": "Requires Improvement", "4": "Inadequate"}
     if supabase:
         for _cols in [
             "urn,school_name,postcode,ofsted_rating,phase,la_name",
@@ -2673,15 +2657,13 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
                 if not sb_rows:
                     continue
                 for r in sb_rows:
-                    # Normalise name column
                     if "name" in r and "school_name" not in r:
                         r["school_name"] = r["name"]
                     r.setdefault("school_name", "")
                     r.setdefault("miles", None)
-                    # Normalise numeric Ofsted code to text
-                    raw_rating = str(r.get("ofsted_rating") or "").strip()
-                    if raw_rating in _OFSTED_CODE_MAP:
-                        r["ofsted_rating"] = _OFSTED_CODE_MAP[raw_rating]
+                    raw_r = str(r.get("ofsted_rating") or "").strip()
+                    if raw_r in _OFSTED_CODE_MAP:
+                        r["ofsted_rating"] = _OFSTED_CODE_MAP[raw_r]
                 sources_sb = [{"label": "Ofsted / DfE", "url": "https://reports.ofsted.gov.uk/"}]
                 out_sb = metric_ok(
                     f"{len(sb_rows)} schools found for district {district}.",
@@ -6630,6 +6612,21 @@ def save_area(deal_id: str):
             # ── INFERENCE ENGINE ─────────────────────────────────
             inference_result = build_area_inference(area_data, _postcode)
             area_data.update(inference_result)
+
+            # Write census.private_rent_pct to TOP-LEVEL area_json.census so
+            # frontend can read it at area_json.census.private_rent_pct.
+            # (build_area_inference buries it at inference.benchmarks.census)
+            try:
+                _pct = (
+                    (area_data.get("inference") or {})
+                    .get("benchmarks", {})
+                    .get("census", {})
+                    .get("private_rent_pct")
+                )
+                if _pct is not None:
+                    area_data.setdefault("census", {})["private_rent_pct"] = _pct
+            except Exception:
+                pass
 
             supabase.table("deals").update({
                 "area_json":  area_data,
