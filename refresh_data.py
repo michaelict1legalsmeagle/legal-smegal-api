@@ -46,14 +46,16 @@ def _get_hetzner_conn():
 
 
 # ── LAND REGISTRY HPI ────────────────────────────────────────────────────────
-HPI_URL           = "https://www.gov.uk/government/uploads/system/uploads/attachment_data/file/UK-HPI-full-file-{year}-{month:02d}.csv"
+# Updated URL: Land Registry moved to publicdata.landregistry.gov.uk in 2025
+HPI_URL           = "https://publicdata.landregistry.gov.uk/market-trend-data/house-price-index-data/UK-HPI-full-file-{year}-{month:02d}.csv"
 HPI_TABLE_MONTHLY = "uk_hpi_monthly"
 HPI_TABLE_BY_TYPE = "uk_hpi_monthly_by_property_type"
 
 
 def get_latest_hpi_url() -> str:
     now = datetime.utcnow()
-    for m_offset in [0, 1, 2, 3, 4]:
+    # HPI data lags ~2 months, so try current month back 5 months
+    for m_offset in range(0, 6):
         month = now.month - m_offset
         year  = now.year
         if month <= 0:
@@ -61,13 +63,19 @@ def get_latest_hpi_url() -> str:
             year -= 1
         url = HPI_URL.format(year=year, month=month)
         try:
-            r = requests.head(url, timeout=10)
+            r = requests.head(url, timeout=10, allow_redirects=True)
             if r.status_code == 200:
                 log.info(f"HPI URL found: {url}")
                 return url
-        except Exception:
-            pass
-    fallback = HPI_URL.format(year=2026, month=2)
+            else:
+                log.debug(f"HPI {r.status_code}: {url}")
+        except Exception as e:
+            log.debug(f"HPI head check failed ({url}): {e}")
+
+    # Dynamic fallback: last December as safe anchor (always published by March)
+    fallback_year  = now.year if now.month > 3 else now.year - 1
+    fallback_month = 12
+    fallback = HPI_URL.format(year=fallback_year, month=fallback_month)
     log.warning(f"HPI: no live URL found in range, using fallback {fallback}")
     return fallback
 
