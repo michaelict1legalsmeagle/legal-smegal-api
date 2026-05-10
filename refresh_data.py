@@ -256,14 +256,14 @@ def refresh_prms():
 
             batch.append({
                 "area_code":    area_code,
-                "date":         date_str,
+                "period":       date_str,
                 "region_name":  region_name or area_code,
                 "rent_price_gbp": rent,
                 "rent_yoy_pct": yoy,
             })
 
             if len(batch) >= BATCH_SIZE:
-                supabase.table(PRMS_TABLE).upsert(batch, on_conflict="area_code,date").execute()
+                supabase.table(PRMS_TABLE).upsert(batch, on_conflict="area_code,period").execute()
                 count += len(batch)
                 batch = []
                 log.info(f"PRMS: {count} rows upserted")
@@ -273,7 +273,7 @@ def refresh_prms():
             continue
 
     if batch:
-        supabase.table(PRMS_TABLE).upsert(batch, on_conflict="area_code,date").execute()
+        supabase.table(PRMS_TABLE).upsert(batch, on_conflict="area_code,period").execute()
         count += len(batch)
 
     log.info(f"PRMS refresh complete: {count} rows upserted, {skipped} skipped")

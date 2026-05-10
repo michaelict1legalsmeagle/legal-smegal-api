@@ -256,10 +256,22 @@ def supabase_data_query(sql: str, params=None) -> list:
             q = q.order("date", desc=True).limit(500)
         else:
             desc = "DESC" in sql_u
-            q = q.order("date", desc=desc)
             lm = _re2.search(r"LIMIT\s+(\d+)", sql, _re2.IGNORECASE)
-            if lm:
-                q = q.limit(int(lm.group(1)))
+            lim = int(lm.group(1)) if lm else 500
+            # Try ordering by "period" first (uk_prms_monthly), then "date" (uk_hpi_monthly)
+            for _order_col in ["period", "date", "month"]:
+                try:
+                    rows = q.order(_order_col, desc=desc).limit(lim).execute().data or []
+                    if rows is not None:
+                        break
+                except Exception:
+                    rows = []
+                    continue
+            for row in rows:
+                for orig, alias in alias_map.items():
+                    if orig in row:
+                        row[alias] = row[orig]
+            return rows
         rows = q.execute().data or []
         for row in rows:
             for orig, alias in alias_map.items():
@@ -2599,7 +2611,7 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             school_rows = data_query(
                 """
                 SELECT s.urn, s.school_name, s.postcode, s.ofsted_rating,
-                       s.phase, s.la_name,
+                       s.la_name,
                        ROUND(
                          ST_Distance(
                            ST_MakePoint(n.lng, n.lat)::geography,
@@ -2619,7 +2631,7 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             )
         else:
             school_rows = data_query(
-                """SELECT urn, school_name, postcode, ofsted_rating, phase, la_name
+                """SELECT urn, school_name, postcode, ofsted_rating, la_name
                    FROM public.schools_ofsted
                    WHERE postcode ILIKE %s
                    LIMIT 10""",
@@ -2641,26 +2653,32 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
     _OFSTED_CODE_MAP = {"1": "Outstanding", "2": "Good",
                         "3": "Requires Improvement", "4": "Inadequate"}
     if supabase:
+        # Try progressively minimal column sets — handle any schools_clean_v2 schema variant
         for _cols in [
-            "urn,school_name,postcode,ofsted_rating,phase,la_name",
-            "urn,name,postcode,ofsted_rating,phase,la_name",
+            "urn,school_name,postcode,ofsted_rating",
+            "urn,name,postcode,ofsted_rating",
+            "urn,postcode",
+            "*",
         ]:
             try:
-                res_sb = (
-                    supabase.table("schools_clean_v2")
-                    .select(_cols)
-                    .ilike("postcode", f"{district}%")
-                    .limit(SCHOOLS_MAX_RESULTS)
-                    .execute()
-                )
+                _q = supabase.table("schools_clean_v2").select(_cols)
+                # Try postcode ilike first; fallback to postcode_district eq
+                try:
+                    res_sb = _q.ilike("postcode", f"{district}%").limit(SCHOOLS_MAX_RESULTS).execute()
+                except Exception:
+                    res_sb = supabase.table("schools_clean_v2").select(_cols).eq("postcode_district", district).limit(SCHOOLS_MAX_RESULTS).execute()
                 sb_rows = res_sb.data if hasattr(res_sb, "data") and isinstance(res_sb.data, list) else []
                 if not sb_rows:
-                    continue
+                    break  # Table empty — no point trying other column sets
                 for r in sb_rows:
+                    # Normalise name variants to school_name
                     if "name" in r and "school_name" not in r:
                         r["school_name"] = r["name"]
-                    r.setdefault("school_name", "")
+                    elif "EstablishmentName" in r and "school_name" not in r:
+                        r["school_name"] = r["EstablishmentName"]
+                    r.setdefault("school_name", r.get("urn", "School"))
                     r.setdefault("miles", None)
+                    # Normalise numeric Ofsted codes to text
                     raw_r = str(r.get("ofsted_rating") or "").strip()
                     if raw_r in _OFSTED_CODE_MAP:
                         r["ofsted_rating"] = _OFSTED_CODE_MAP[raw_r]
@@ -2826,7 +2844,7 @@ def _get_rental_trend(lad_code: str) -> Dict[str, Any]:
     """
     try:
         rows = supabase_data_query(
-            "SELECT date, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date ASC LIMIT 48",
+            "SELECT period, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period ASC LIMIT 48",
             (lad_code,)
         )
         if not rows:
@@ -2836,7 +2854,7 @@ def _get_rental_trend(lad_code: str) -> Dict[str, Any]:
         for r in rows:
             yoy = safe_float(r.get("rent_yoy_pct"))
             idx = safe_float(r.get("rent_index"))
-            period = str(r.get("date") or "")[:10]
+            period = str(r.get("period") or r.get("date") or "")[:10]
             if period:
                 series.append({
                     "period":        period,
@@ -2907,12 +2925,12 @@ def _get_national_rental_benchmark() -> Dict[str, Any]:
     """
     try:
         rows = supabase_data_query(
-            "SELECT date, rent_yoy_pct FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 48",
+            "SELECT period, rent_yoy_pct FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 48",
             ("E92000001",)
         )
         if not rows:
             rows2 = supabase_data_query(
-                "SELECT rent_yoy_pct FROM public.uk_prms_monthly WHERE date = (SELECT MAX(date) FROM public.uk_prms_monthly) LIMIT 500"
+                "SELECT rent_yoy_pct FROM public.uk_prms_monthly WHERE period = (SELECT MAX(period) FROM public.uk_prms_monthly) LIMIT 500"
             )
             vals = [safe_float(r.get("rent_yoy_pct")) for r in rows2 if r.get("rent_yoy_pct") is not None]
             avg = round(sum(vals) / len(vals), 2) if vals else None
@@ -2978,7 +2996,7 @@ def _get_regional_rental_benchmark(lad_code: str) -> Dict[str, Any]:
     """
     try:
         rows = supabase_data_query(
-            "SELECT date, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 3",
+            "SELECT period, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 3",
             (lad_code,)
         )
         if not rows:
@@ -3034,7 +3052,7 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
 
         # Local yield — LAD rent + LAD price
         rent_rows = supabase_data_query(
-            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
             (lad_code,)
         )
         local_rent = safe_float((rent_rows[0].get("rent_price_gbp") if rent_rows else None))
@@ -3052,7 +3070,7 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
 
         # National yield — England E92000001
         nat_rent_rows = supabase_data_query(
-            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+            "SELECT rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
             ("E92000001",)
         )
         nat_rent = safe_float((nat_rent_rows[0].get("rent_price_gbp") if nat_rent_rows else None))
@@ -4048,15 +4066,45 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             else:
                 print(f"[EPC] Insufficient area matches ({len(_area_matched)}), skipping area filter")
 
-        # STEP 4: New build exclusion
-        # If subject property is not a new build, exclude new builds from comps
-        # new builds sell at 15-25% premium — materially distorts ceiling
-        _new_build_filtered = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
-        if len(_new_build_filtered) >= 5:
-            _nb_excluded = len(rows) - len(_new_build_filtered)
-            if _nb_excluded > 0:
-                print(f"[RICS] New build exclusion: removed {_nb_excluded} new builds")
-            rows = _new_build_filtered
+        # STEP 4: New build handling
+        # Determine subject property build status from price_paid data
+        _subject_old_new = None
+        try:
+            _nb_rows = data_query(
+                """SELECT old_new FROM public.price_paid_raw_2025
+                   WHERE postcode = %s AND old_new IN ('Y','N')
+                   ORDER BY date_of_transfer DESC LIMIT 1""",
+                (normalize_postcode(postcode),)
+            )
+            if _nb_rows:
+                _subject_old_new = str(_nb_rows[0]["old_new"]).upper()
+        except Exception as _nbe:
+            print(f"[WARN] New build subject lookup: {_nbe}")
+
+        if _subject_old_new == "N":
+            # Subject IS a new build: prefer new build comps, deprioritise old stock
+            # New builds trade at a premium — old stock comps undervalue them
+            _nb_only = [r for r in rows if str(r.get("old_new") or "").upper() == "N"]
+            if len(_nb_only) >= 5:
+                print(f"[RICS] Subject is new build: using {len(_nb_only)} new build comps")
+                rows = _nb_only
+            else:
+                print(f"[RICS] Subject is new build but only {len(_nb_only)} NB comps — keeping all")
+        elif _subject_old_new == "Y":
+            # Subject is established: exclude new builds (sell at 15-25% premium)
+            _new_build_filtered = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
+            if len(_new_build_filtered) >= 5:
+                _nb_excluded = len(rows) - len(_new_build_filtered)
+                if _nb_excluded > 0:
+                    print(f"[RICS] New build exclusion: removed {_nb_excluded} new builds")
+                rows = _new_build_filtered
+            else:
+                print(f"[RICS] Insufficient non-new-build comps, keeping all")
+        else:
+            # Unknown — apply soft exclusion only if clear majority are not new builds
+            _new_build_filtered = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
+            if len(_new_build_filtered) >= 5:
+                rows = _new_build_filtered
 
         # STEP 5: Tenure match (freehold/leasehold)
         # Leasehold with short lease sells at significant discount — not comparable to freehold
@@ -4140,11 +4188,9 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             rows = rows_with + rows_missing_coords
         else:
             enrich_meta["notes"] = "Skipped — lat/lng already present in price_paid data."
-        if guide_price and guide_price > 5000:
-            lo_band = guide_price * 0.65
-            hi_band = guide_price * 1.35
-            in_band = [r for r in rows if lo_band <= safe_int(r.get("price") or 0) <= hi_band]
-            rows = in_band if len(in_band) >= 5 else rows
+        # Guide price band filter REMOVED: auction guide prices are deliberately low
+        # and create circular bias (low guide → removes high-value comps → low ceiling).
+        # RICS scoring weights comps by recency and proximity; price band not needed.
         _now = _dt.datetime.utcnow()
         def _score_comp(r):
             score = 1.0
