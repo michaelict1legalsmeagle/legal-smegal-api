@@ -682,12 +682,19 @@ def calculate_ceiling(
 
     # Step 5 — confidence
     hi_count = len(set(hi_labels_all))
-    data_pen = {"none": 0.30, "yield": 0.08, "comps": 0.08,
-                "yield_fallback": 0.15, "external_valuation": 0.02}.get(base_method, 0.05)
-    conf = round(max(0.20, min(0.95,
-        0.65 + (1.0 - min(total_disc, 0.40)) * 0.35
+    # data_pen reflects inherent uncertainty of the base method.
+    # yield-only ceiling has no transaction evidence — higher penalty than comps.
+    # These penalties are heuristic; calibration requires outcome data (v2).
+    data_pen = {"none": 0.45, "yield": 0.25, "comps": 0.05,
+                "yield_fallback": 0.35, "external_valuation": 0.10}.get(base_method, 0.15)
+    # INVARIANT: confidence must not exceed 0.60 until backtesting validates formula.
+    # Base 0.65 is undeclared heuristic — not empirically derived.
+    # confidenceValue > 0.60 is statistically unjustifiable without outcome data.
+    conf = round(max(0.15, min(0.60,
+        0.55 + (1.0 - min(total_disc, 0.40)) * 0.25
         - data_pen - hi_count * HIGH_IMPACT_CONFIDENCE_PENALTY
     )), 2)
+    conf_basis = "heuristic_uncalibrated_no_backtesting"
 
     # Step 6 — scenarios
     seen_c: set[str] = set()
@@ -713,6 +720,8 @@ def calculate_ceiling(
         "ceiling_range":           {"low": int(net_low),   "high": int(net_high)},
         "gross_ceiling_range":     {"low": int(gross_low), "high": int(gross_high)},
         "confidence":              conf,
+        "confidence_basis":        conf_basis,
+        "confidence_max_validated": 0.60,
         "base_valuation":          int(base),
         "base_method":             base_method,
         "risk_discount_pct":       round(total_disc * 100, 1),

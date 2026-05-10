@@ -1022,8 +1022,32 @@ def build_trends_from_uk_hpi(
 
     base["status"] = "ok"
     base["summary"] = "Local UK HPI trends provided (area-level series)."
-    base["confidenceValue"] = 0.96
+    # INVARIANT: no hardcoded confidenceValue. Derive from series quality.
+    _series_recency_months = 0
+    try:
+        from datetime import datetime as _dtt
+        _latest_period = series[-1]["period"] if series else ""
+        if _latest_period:
+            _lp = _dtt.strptime(_latest_period + "-01", "%Y-%m-%d")
+            _series_recency_months = max(0, (_dtt.utcnow() - _lp).days // 30)
+    except Exception:
+        pass
+    _hpi_conf = round(min(0.55, max(0.15,
+        0.55 - max(0, _series_recency_months - 3) * 0.01  # decay by 1% per month stale
+    )), 2)
+    base["confidenceValue"] = _hpi_conf
+    base["confidence_basis"] = "hpi_series_recency_heuristic_uncalibrated"
+    base["is_synthetic"] = False
+    base["ui_display_permitted"] = True
+    base.pop("suppression_reason", None)  # clear synthetic marker when real data present
     base["source"] = src
+    # Reset futureOutlook — synthetic narrative must not persist when real data exists
+    base.setdefault("signals", {})["futureOutlook"] = {
+        "rating": "Neutral",
+        "narrative": "Future outlook based on HPI trend direction only. Not a forecast.",
+        "historicalData": [],
+        "source": "Land Registry HPI (area-level series)",
+    }
     base["retrievedAtISO"] = now_iso()
     base.setdefault("signals", {})
     base["signals"]["priceGrowth"] = {
@@ -3267,6 +3291,8 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         rental_down = rental_dir == "Declining"
         pop_up      = pop_dir == "Growing"
         pop_down    = pop_dir == "Declining"
+        rental_unknown = rental_dir == "Unknown"
+        pop_unknown    = pop_dir == "Unknown"
 
         if rental_up and pop_up:
             demand_signal = "Increasing"
@@ -3274,6 +3300,10 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
             demand_signal = "Weakening"
         elif rental_up or pop_up:
             demand_signal = "Increasing"
+        elif rental_unknown and pop_unknown:
+            # INVARIANT: "Stable" must not be used when both source datasets are unavailable.
+            # "Stable" implies data-backed stability. "Insufficient Data" is honest.
+            demand_signal = "Insufficient Data"
         else:
             demand_signal = "Stable"
 
@@ -3316,12 +3346,32 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         # ── STEP 3: AREA TRAJECTORY ───────────────────────────────
         # Score: demand(2) + growth(1) + market(2) - risk(2)
         score = 0
-        score += {"Increasing": 2, "Stable": 0, "Weakening": -2}.get(demand_signal, 0)
+        # "Insufficient Data" maps to 0 (neutral) but trajectory label must reflect data absence
+        score += {"Increasing": 2, "Stable": 0, "Weakening": -2, "Insufficient Data": 0}.get(demand_signal, 0)
         score += {"Expanding": 2, "Emerging": 1, "Flat": 0}.get(growth_signal, 0)
         score += {"Confirming": 2, "Fragile": 1, "Neutral": 0, "Diverging": -2}.get(market_signal, 0)
         score += {"Minimal": 1, "Neutral": 0, "Suppressing": -2}.get(risk_signal, 0)
 
-        if score >= 4:
+        # INVARIANT: Must not label trajectory without minimum data coverage
+        # Use fetch_status to detect data absence vs genuine 0 crimes
+        # crime_total = 0 in a safe rural area is real data, not missing data
+        _crime_data_present = (
+            (area_data.get("crime") or {}).get("fetch_status") not in
+            ("unavailable", "error", None, "")
+            and (area_data.get("crime") or {}).get("status") not in ("unavailable", "error")
+        )
+        _data_signals_present = sum([
+            rental_dir != "Unknown",
+            pop_dir != "Unknown",
+            price_yoy is not None,
+            _crime_data_present,
+        ])
+        _data_availability_pct = _data_signals_present / 4.0
+
+        if _data_availability_pct < 0.5:
+            # Fewer than 2 of 4 core signals available — trajectory is not determinable
+            trajectory = "INSUFFICIENT DATA"
+        elif score >= 4:
             trajectory = "EXPANDING"
         elif score >= 1:
             trajectory = "STABLE"
@@ -3564,6 +3614,8 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                 "provenance":     "Land Registry · ONS Population · ONS PRMS · OSM · PlanningAlerts · Police.uk · MHCLG EPC · ONS Census 2021",
                 "lad_code":       lad_code,
                 "computed_at":    now_iso(),
+                "data_availability_pct": round(_data_availability_pct, 2),
+                "data_signals_present": _data_signals_present,
             }
         }
 
@@ -3946,285 +3998,396 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             out["metrics"]["payload"] = payload
             return out
 
-        # ── PHASE 1: RICS-GRADE COMP SCORING ─────────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        # SIMILARITY-WEIGHTED COMPARABLE ENGINE
+        # ══════════════════════════════════════════════════════════════════════
+        # Methodology: property-similarity filtering + dimensional scoring
+        # + HPI temporal normalisation + floor-area price normalisation
+        # + IQR outlier rejection + adaptive radius
+        # + explicit uncertainty disclosure
+        #
+        # All dimensions derived from verified data sources:
+        #   property_type   → price_paid_raw_2025.property_type
+        #   floor_area      → epc_certificates.total_floor_area
+        #   habitable_rooms → epc_certificates.number_habitable_rooms
+        #   tenure          → price_paid_raw_2025.duration
+        #   old_new         → price_paid_raw_2025.old_new
+        #   age_band        → epc_certificates.construction_age_band
+        #   HPI multiplier  → uk_hpi_monthly.annual_change (LAD level)
+        #   miles           → housing_comps_v1 RPC (haversine from subject)
+        # ══════════════════════════════════════════════════════════════════════
+
         import datetime as _dt
 
-        # STEP 0: UPRN deterministic matching
-        # When both subject and comp have UPRN, join EPC directly
-        # Gives exact bedroom count per transaction — no postcode-level inference
-        _subject_uprn = None
+        # ── AUDIT TRAIL ─────────────────────────────────────────────────────
+        # Every decision recorded for lineage disclosure
+        _audit: dict = {
+            "postcode": pc,
+            "initial_rpc_count": len(rows),
+            "radius_miles": r_miles,
+            "filters_applied": [],
+            "filters_skipped": [],
+            "outliers_rejected": 0,
+            "hpi_adjusted_count": 0,
+            "area_normalised_count": 0,
+            "final_comp_count": 0,
+            "methodology_degraded": False,
+            "insufficient_evidence": False,
+            "warnings": [],
+        }
+
+        # ── SUBJECT PROPERTY DATA COLLECTION ────────────────────────────────
+        _pc_norm = normalize_postcode(postcode)
+
+        # Subject: EPC data (single lookup, reused across all dimensions)
+        _subject_epc = {}
         try:
-            _pc_norm = normalize_postcode(postcode)
-            _uprn_rows = data_query(
-                """SELECT uprn FROM public.epc_certificates
-                   WHERE postcode = %s AND uprn IS NOT NULL
+            _sepc = data_query(
+                """SELECT number_habitable_rooms, total_floor_area,
+                          construction_age_band, current_energy_rating, uprn
+                   FROM public.epc_certificates
+                   WHERE postcode = %s
+                   AND (number_habitable_rooms IS NOT NULL OR total_floor_area IS NOT NULL)
                    ORDER BY lodgement_date DESC LIMIT 1""",
                 (_pc_norm,)
             )
-            if _uprn_rows:
-                _subject_uprn = str(_uprn_rows[0]["uprn"]).strip()
+            if _sepc:
+                _subject_epc = _sepc[0]
         except Exception as _e:
-            print(f"[WARN] Subject UPRN lookup: {_e}")
+            _audit["warnings"].append(f"subject_epc_lookup_failed: {_e}")
 
-        if _subject_uprn:
-            # Enrich each comp with UPRN-linked EPC data
-            _uprn_enriched = 0
-            for _r in rows:
-                _comp_uprn = str(_r.get("uprn") or "").strip()
-                if _comp_uprn:
-                    _epc_uprn = data_query(
-                        """SELECT number_habitable_rooms, total_floor_area,
-                                  construction_age_band, current_energy_rating
-                           FROM public.epc_certificates
-                           WHERE uprn = %s
-                           AND number_habitable_rooms IS NOT NULL
-                           ORDER BY lodgement_date DESC LIMIT 1""",
-                        (_comp_uprn,)
-                    )
-                    if _epc_uprn:
-                        _r["habitable_rooms"]       = _epc_uprn[0].get("number_habitable_rooms")
-                        _r["floor_area"]            = _epc_uprn[0].get("total_floor_area")
-                        _r["construction_age_band"] = _epc_uprn[0].get("construction_age_band")
-                        _r["energy_rating"]         = _epc_uprn[0].get("current_energy_rating")
-                        _uprn_enriched += 1
-            if _uprn_enriched > 0:
-                print(f"[UPRN] Enriched {_uprn_enriched} comps via UPRN-linked EPC")
+        _subject_rooms      = int(_subject_epc.get("number_habitable_rooms") or 0) or None
+        _subject_area       = float(_subject_epc.get("total_floor_area") or 0) or None
+        _subject_band       = str(_subject_epc.get("construction_age_band") or "").strip().upper() or None
+        _subject_uprn       = str(_subject_epc.get("uprn") or "").strip() or None
 
-        pt_filter = (property_type or "").strip().upper()
-        if pt_filter and pt_filter in ("D", "S", "T", "F", "O"):
-            matched = [r for r in rows if str(r.get("property_type") or "").upper() == pt_filter]
-            rows = matched if len(matched) >= 5 else rows
-
-        # ── EPC BEDROOM MATCHING (Phase 2) ─────────────────────────────
-        # Get subject property habitable rooms from Hetzner epc_certificates
-        _subject_rooms = None
-        try:
-            _pc_norm = normalize_postcode(postcode)
-            _epc_sub = data_query(
-                "SELECT number_habitable_rooms FROM public.epc_certificates WHERE postcode = %s AND number_habitable_rooms IS NOT NULL ORDER BY lodgement_date DESC LIMIT 1",
-                (_pc_norm,)
-            )
-            if _epc_sub:
-                _subject_rooms = int(_epc_sub[0]["number_habitable_rooms"])
-        except Exception as _e:
-            print(f"[WARN] EPC subject lookup: {_e}")
-
-        if _subject_rooms:
-            # Enrich comps with EPC bedroom + floor area data
-            _enriched = []
-            for _r in rows:
-                _pc = normalize_postcode(str(_r.get("postcode") or ""))
-                _epc_comp = data_query(
-                    """SELECT number_habitable_rooms, total_floor_area
-                       FROM public.epc_certificates
-                       WHERE postcode = %s
-                       AND number_habitable_rooms IS NOT NULL
-                       ORDER BY lodgement_date DESC LIMIT 1""",
-                    (_pc,)
-                ) if _pc else []
-                _comp_rooms = int(_epc_comp[0]["number_habitable_rooms"]) if _epc_comp else None
-                _comp_area  = float(_epc_comp[0]["total_floor_area"]) if _epc_comp and _epc_comp[0].get("total_floor_area") else None
-                _r["habitable_rooms"] = _comp_rooms
-                _r["floor_area"]      = _comp_area
-                _enriched.append(_r)
-
-            # STEP 2: Bedroom filter ±1 room
-            _bedroom_matched = [r for r in _enriched if r.get("habitable_rooms") is not None
-                                and abs(r["habitable_rooms"] - _subject_rooms) <= 1]
-            if len(_bedroom_matched) >= 5:
-                rows = _bedroom_matched
-                print(f"[EPC] Bedroom matched: {len(rows)} comps (subject={_subject_rooms} rooms)")
-            else:
-                print(f"[EPC] Insufficient bedroom matches ({len(_bedroom_matched)}), using property-type filter")
-                rows = _enriched  # keep enriched for floor area step
-
-        # STEP 3: Floor area filter ±20%
-        # Get subject floor area from EPC
-        _subject_area = None
-        try:
-            _pc_norm = normalize_postcode(postcode)
-            _epc_area = data_query(
-                """SELECT total_floor_area FROM public.epc_certificates
-                   WHERE postcode = %s AND total_floor_area IS NOT NULL
-                   ORDER BY lodgement_date DESC LIMIT 1""",
-                (_pc_norm,)
-            )
-            if _epc_area:
-                _subject_area = float(_epc_area[0]["total_floor_area"])
-        except Exception as _e:
-            print(f"[WARN] EPC floor area lookup: {_e}")
-
-        if _subject_area and _subject_area > 0:
-            _lower = _subject_area * 0.80
-            _upper = _subject_area * 1.20
-            _area_matched = [r for r in rows
-                             if r.get("floor_area") is not None
-                             and _lower <= r["floor_area"] <= _upper]
-            if len(_area_matched) >= 5:
-                rows = _area_matched
-                print(f"[EPC] Floor area matched: {len(rows)} comps (subject={_subject_area:.0f}m² ±20%)")
-            else:
-                print(f"[EPC] Insufficient area matches ({len(_area_matched)}), skipping area filter")
-
-        # STEP 4: New build handling
-        # Determine subject property build status from price_paid data
-        _subject_old_new = None
-        try:
-            _nb_rows = data_query(
-                """SELECT old_new FROM public.price_paid_raw_2025
-                   WHERE postcode = %s AND old_new IN ('Y','N')
-                   ORDER BY date_of_transfer DESC LIMIT 1""",
-                (normalize_postcode(postcode),)
-            )
-            if _nb_rows:
-                _subject_old_new = str(_nb_rows[0]["old_new"]).upper()
-        except Exception as _nbe:
-            print(f"[WARN] New build subject lookup: {_nbe}")
-
-        if _subject_old_new == "N":
-            # Subject IS a new build: prefer new build comps, deprioritise old stock
-            # New builds trade at a premium — old stock comps undervalue them
-            _nb_only = [r for r in rows if str(r.get("old_new") or "").upper() == "N"]
-            if len(_nb_only) >= 5:
-                print(f"[RICS] Subject is new build: using {len(_nb_only)} new build comps")
-                rows = _nb_only
-            else:
-                print(f"[RICS] Subject is new build but only {len(_nb_only)} NB comps — keeping all")
-        elif _subject_old_new == "Y":
-            # Subject is established: exclude new builds (sell at 15-25% premium)
-            _new_build_filtered = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
-            if len(_new_build_filtered) >= 5:
-                _nb_excluded = len(rows) - len(_new_build_filtered)
-                if _nb_excluded > 0:
-                    print(f"[RICS] New build exclusion: removed {_nb_excluded} new builds")
-                rows = _new_build_filtered
-            else:
-                print(f"[RICS] Insufficient non-new-build comps, keeping all")
-        else:
-            # Unknown — apply soft exclusion only if clear majority are not new builds
-            _new_build_filtered = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
-            if len(_new_build_filtered) >= 5:
-                rows = _new_build_filtered
-
-        # STEP 5: Tenure match (freehold/leasehold)
-        # Leasehold with short lease sells at significant discount — not comparable to freehold
+        # Subject: tenure from price_paid (majority vote at this postcode)
         _subject_tenure = None
         try:
-            # Try to get tenure from deal data via postcode district
-            _tenure_rows = data_query(
+            _tr = data_query(
                 """SELECT duration, COUNT(*) AS cnt
                    FROM public.price_paid_raw_2025
                    WHERE postcode = %s AND duration IN ('F','L')
                    GROUP BY duration ORDER BY cnt DESC LIMIT 1""",
-                (normalize_postcode(postcode),)
-            )
-            if _tenure_rows:
-                _subject_tenure = _tenure_rows[0].get("duration")
-        except Exception as _e:
-            print(f"[WARN] Tenure lookup: {_e}")
-
-        if _subject_tenure in ("F", "L"):
-            _tenure_matched = [r for r in rows
-                               if str(r.get("duration") or "").upper() == _subject_tenure]
-            if len(_tenure_matched) >= 5:
-                rows = _tenure_matched
-                print(f"[RICS] Tenure matched: {len(rows)} comps ({'Freehold' if _subject_tenure == 'F' else 'Leasehold'})")
-            else:
-                print(f"[RICS] Insufficient tenure matches ({len(_tenure_matched)}), skipping tenure filter")
-
-        # STEP 6: Construction age band filter ±2 bands
-        # Victorian terrace vs 1980s terrace — not RICS comparable
-        # Bands: A=pre1900, B=1900-29, C=1930-49, D=1950-66, E=1967-75,
-        #        F=1976-82, G=1983-90, H=1991-95, I=1996-02, J=2003-06, K=2007-11, L=2012+
-        _band_order = ['A','B','C','D','E','F','G','H','I','J','K','L']
-        _subject_band = None
-        try:
-            _pc_norm = normalize_postcode(postcode)
-            _epc_band = data_query(
-                """SELECT construction_age_band
-                   FROM public.epc_certificates
-                   WHERE postcode = %s
-                   AND construction_age_band IS NOT NULL
-                   ORDER BY lodgement_date DESC LIMIT 1""",
                 (_pc_norm,)
             )
-            if _epc_band:
-                _subject_band = str(_epc_band[0]["construction_age_band"]).strip().upper()
+            if _tr:
+                _subject_tenure = str(_tr[0].get("duration") or "").upper() or None
         except Exception as _e:
-            print(f"[WARN] Age band lookup: {_e}")
+            _audit["warnings"].append(f"subject_tenure_lookup_failed: {_e}")
 
-        if _subject_band and _subject_band in _band_order:
-            _sub_idx = _band_order.index(_subject_band)
-            _age_matched = []
-            for _r in rows:
-                _pc = normalize_postcode(str(_r.get("postcode") or ""))
-                _epc_age = data_query(
-                    """SELECT construction_age_band FROM public.epc_certificates
-                       WHERE postcode = %s AND construction_age_band IS NOT NULL
-                       ORDER BY lodgement_date DESC LIMIT 1""",
-                    (_pc,)
-                ) if _pc else []
-                _comp_band = str(_epc_age[0]["construction_age_band"]).strip().upper() if _epc_age else None
-                _r["construction_age_band"] = _comp_band
-                if _comp_band and _comp_band in _band_order:
-                    _comp_idx = _band_order.index(_comp_band)
-                    if abs(_comp_idx - _sub_idx) <= 2:
-                        _age_matched.append(_r)
-                else:
-                    _age_matched.append(_r)  # include if no age band data
+        # Subject: new-build status from price_paid
+        _subject_old_new = None
+        try:
+            _nbr = data_query(
+                """SELECT old_new FROM public.price_paid_raw_2025
+                   WHERE postcode = %s AND old_new IN ('Y','N')
+                   ORDER BY date_of_transfer DESC LIMIT 1""",
+                (_pc_norm,)
+            )
+            if _nbr:
+                _subject_old_new = str(_nbr[0]["old_new"]).upper()
+        except Exception as _e:
+            _audit["warnings"].append(f"subject_new_build_lookup_failed: {_e}")
 
-            if len(_age_matched) >= 5:
-                _excluded = len(rows) - len(_age_matched)
-                if _excluded > 0:
-                    print(f"[RICS] Age band filter: removed {_excluded} comps outside ±2 bands of {_subject_band}")
-                rows = _age_matched
+        # Subject: LAD code for HPI temporal adjustment
+        _lad_code_for_hpi = _get_lad_code_for_postcode(_pc_norm)
+        _hpi_yoy = None  # latest annual_change for this LAD
+        if _lad_code_for_hpi:
+            try:
+                _hpi_rows = supabase_data_query(
+                    "SELECT annual_change FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+                    (_lad_code_for_hpi,)
+                )
+                if _hpi_rows:
+                    _hpi_yoy = safe_float(_hpi_rows[0].get("annual_change"))
+            except Exception as _e:
+                _audit["warnings"].append(f"hpi_yoy_lookup_failed: {_e}")
+
+        # ── STEP 1: PROPERTY TYPE FILTER ────────────────────────────────────
+        pt_filter = (property_type or "").strip().upper()
+        if pt_filter and pt_filter in ("D", "S", "T", "F", "O"):
+            _pt_matched = [r for r in rows if str(r.get("property_type") or "").upper() == pt_filter]
+            if len(_pt_matched) >= 5:
+                rows = _pt_matched
+                _audit["filters_applied"].append(f"property_type={pt_filter}:{len(rows)}_comps")
             else:
-                print(f"[RICS] Insufficient age band matches ({len(_age_matched)}), skipping age filter")
-        rows_missing_coords = [r for r in rows if not _row_has_latlng(r)]
-        enrich_meta = {"enabled": False, "attempted": 0, "filled": 0, "failed": 0, "notes": ""}
-        if rows_missing_coords and HOUSING_ENRICH_LATLNG and GOOGLE_MAPS_API_KEY:
-            rows_with = [r for r in rows if _row_has_latlng(r)]
-            rows_missing_coords, enrich_meta = _enrich_housing_rows_with_latlng(rows_missing_coords)
-            rows = rows_with + rows_missing_coords
-        else:
-            enrich_meta["notes"] = "Skipped — lat/lng already present in price_paid data."
-        # Guide price band filter REMOVED: auction guide prices are deliberately low
-        # and create circular bias (low guide → removes high-value comps → low ceiling).
-        # RICS scoring weights comps by recency and proximity; price band not needed.
-        _now = _dt.datetime.utcnow()
-        def _score_comp(r):
-            score = 1.0
+                _audit["filters_skipped"].append(f"property_type={pt_filter}:only_{len(_pt_matched)}_matched")
+                _audit["methodology_degraded"] = True
+                _audit["warnings"].append(f"Cross-type contamination: insufficient {pt_filter} comps ({len(_pt_matched)}), using all property types")
+
+        # ── STEP 2: EPC ENRICHMENT ───────────────────────────────────────────
+        # Enrich comps with EPC data via UPRN (deterministic) then postcode fallback
+        _band_order = ["A","B","C","D","E","F","G","H","I","J","K","L"]
+        _uprn_enriched_count = 0
+
+        for _r in rows:
+            if _r.get("habitable_rooms") is not None and _r.get("floor_area") is not None:
+                continue  # already enriched by prior UPRN path
+            _comp_pc = normalize_postcode(str(_r.get("postcode") or ""))
+            if not _comp_pc:
+                continue
             try:
-                tx_date = r.get("date_of_transfer") or r.get("date") or ""
-                if tx_date:
-                    tx_dt = _dt.datetime.strptime(str(tx_date)[:10], "%Y-%m-%d")
-                    age_months = (_now - tx_dt).days / 30.44
-                    if age_months <= 6:    score *= 1.00
-                    elif age_months <= 12: score *= 0.85
-                    elif age_months <= 18: score *= 0.70
-                    else:                  score *= 0.55
-            except Exception:
-                score *= 0.70
-            try:
-                miles = safe_float(r.get("miles"))
-                if isinstance(miles, float) and miles >= 0:
-                    score *= max(0.1, 1.0 - (miles / r_miles) * 0.6)
+                _cepc = data_query(
+                    """SELECT number_habitable_rooms, total_floor_area,
+                              construction_age_band, current_energy_rating
+                       FROM public.epc_certificates
+                       WHERE postcode = %s
+                       AND (number_habitable_rooms IS NOT NULL OR total_floor_area IS NOT NULL)
+                       ORDER BY lodgement_date DESC LIMIT 1""",
+                    (_comp_pc,)
+                )
+                if _cepc:
+                    _r["habitable_rooms"]       = _cepc[0].get("number_habitable_rooms")
+                    _r["floor_area"]            = float(_cepc[0].get("total_floor_area") or 0) or None
+                    _r["construction_age_band"] = str(_cepc[0].get("construction_age_band") or "").strip().upper() or None
+                    _r["energy_rating"]         = _cepc[0].get("current_energy_rating")
+                    _uprn_enriched_count += 1
             except Exception:
                 pass
-            if pt_filter and str(r.get("property_type") or "").upper() == pt_filter:
-                score *= 1.15
-            return score
-        rows_scored = sorted(rows, key=_score_comp, reverse=True)
+
+        # ── STEP 3: HABITABLE ROOM FILTER ───────────────────────────────────
+        if _subject_rooms:
+            _room_matched = [
+                r for r in rows
+                if r.get("habitable_rooms") is not None
+                and abs(int(r["habitable_rooms"]) - _subject_rooms) <= 1
+            ]
+            if len(_room_matched) >= 5:
+                rows = _room_matched
+                _audit["filters_applied"].append(f"habitable_rooms={_subject_rooms}±1:{len(rows)}_comps")
+            else:
+                _audit["filters_skipped"].append(f"habitable_rooms:only_{len(_room_matched)}_matched")
+                _audit["methodology_degraded"] = True
+                _audit["warnings"].append(f"Room-size contamination: insufficient ±1-room matches ({len(_room_matched)}), bedroom filter skipped")
+        else:
+            _audit["warnings"].append("subject_rooms_unknown: bedroom filter skipped — EPC not lodged or not found")
+
+        # ── STEP 4: NEW BUILD ROUTING ────────────────────────────────────────
+        if _subject_old_new == "N":
+            _nb_only = [r for r in rows if str(r.get("old_new") or "").upper() == "N"]
+            if len(_nb_only) >= 5:
+                rows = _nb_only
+                _audit["filters_applied"].append(f"new_build_preferred:{len(rows)}_nb_comps")
+            else:
+                _audit["filters_skipped"].append(f"new_build_preferred:only_{len(_nb_only)}_nb_comps")
+                _audit["warnings"].append(f"New-build subject: only {len(_nb_only)} new-build comps available, using mixed stock (ceiling may be understated)")
+        elif _subject_old_new == "Y":
+            _established = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
+            if len(_established) >= 5:
+                rows = _established
+                _audit["filters_applied"].append(f"new_build_excluded:{len(rows)}_established_comps")
+            else:
+                _audit["filters_skipped"].append("new_build_excluded:insufficient_established")
+        else:
+            # Unknown: soft exclude new builds if majority are established
+            _established = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
+            if len(_established) >= 5:
+                rows = _established
+
+        # ── STEP 5: TENURE FILTER ────────────────────────────────────────────
+        if _subject_tenure in ("F", "L"):
+            _tenure_matched = [r for r in rows if str(r.get("duration") or "").upper() == _subject_tenure]
+            if len(_tenure_matched) >= 5:
+                rows = _tenure_matched
+                _audit["filters_applied"].append(f"tenure={'Freehold' if _subject_tenure=='F' else 'Leasehold'}:{len(rows)}_comps")
+            else:
+                _audit["filters_skipped"].append(f"tenure:only_{len(_tenure_matched)}_matched")
+                _audit["warnings"].append(f"Tenure contamination: cross-tenure comps included ({len(_tenure_matched)} same-tenure comps insufficient)")
+        else:
+            _audit["warnings"].append("subject_tenure_unknown: tenure filter skipped")
+
+        # ── STEP 6: CONSTRUCTION AGE BAND FILTER ─────────────────────────────
+        if _subject_band and _subject_band in _band_order:
+            _sub_idx = _band_order.index(_subject_band)
+            _age_matched = [
+                r for r in rows
+                if (r.get("construction_age_band") in _band_order
+                    and abs(_band_order.index(r["construction_age_band"]) - _sub_idx) <= 2)
+                or r.get("construction_age_band") is None  # include unknown-age comps
+            ]
+            if len(_age_matched) >= 5:
+                rows = _age_matched
+                _audit["filters_applied"].append(f"age_band={_subject_band}±2:{len(rows)}_comps")
+            else:
+                _audit["filters_skipped"].append(f"age_band:only_{len(_age_matched)}_matched")
+        else:
+            _audit["warnings"].append("subject_age_band_unknown: age filter skipped — EPC construction age not found")
+
+        # ── STEP 7: IQR OUTLIER REJECTION ────────────────────────────────────
+        _prices_raw = sorted([r.get("price") or 0 for r in rows if r.get("price")])
+        if len(_prices_raw) >= 6:
+            _n = len(_prices_raw)
+            _q1 = _prices_raw[_n // 4]
+            _q3 = _prices_raw[(3 * _n) // 4]
+            _iqr = _q3 - _q1
+            _fence_lo = _q1 - 1.5 * _iqr
+            _fence_hi = _q3 + 1.5 * _iqr
+            _iqr_filtered = [r for r in rows if _fence_lo <= (r.get("price") or 0) <= _fence_hi]
+            if len(_iqr_filtered) >= 5:
+                _audit["outliers_rejected"] = len(rows) - len(_iqr_filtered)
+                rows = _iqr_filtered
+                if _audit["outliers_rejected"] > 0:
+                    _audit["filters_applied"].append(f"iqr_outlier_rejection:{_audit['outliers_rejected']}_removed")
+            else:
+                _audit["warnings"].append(f"IQR rejection skipped: only {len(_iqr_filtered)} comps survive fence lo={_fence_lo:.0f} hi={_fence_hi:.0f}")
+
+        # ── STEP 8: HPI TEMPORAL NORMALISATION ───────────────────────────────
+        # Adjusts historical nominal prices to current-equivalent using LAD-level HPI
+        # Formula: adjusted = nominal × (1 + hpi_yoy/100)^(age_months/12)
+        # Rationale: a comp from 18 months ago at £350k in a +3.5% YoY area
+        #            has current-equivalent value of £350k × 1.035^1.5 ≈ £368k
+        # Directionally valid; residual error from non-linear appreciation not addressed
+        _now = _dt.datetime.utcnow()
+        _hpi_adjusted_count = 0
+        for _r in rows:
+            _tx_date_str = str(_r.get("date_of_transfer") or "")[:10]
+            _age_months = None
+            try:
+                _tx_dt = _dt.datetime.strptime(_tx_date_str, "%Y-%m-%d")
+                _age_months = (_now - _tx_dt).days / 30.44
+            except Exception:
+                pass
+            _r["age_months"] = _age_months
+            _r["nominal_price"] = _r.get("price")
+            if _hpi_yoy is not None and _age_months is not None and _age_months > 3:
+                _age_years = _age_months / 12.0
+                _hpi_mult = (1.0 + _hpi_yoy / 100.0) ** _age_years
+                _adj = int((_r.get("price") or 0) * _hpi_mult)
+                _r["hpi_adjusted_price"] = _adj
+                _r["hpi_multiplier"] = round(_hpi_mult, 4)
+                _hpi_adjusted_count += 1
+            else:
+                _r["hpi_adjusted_price"] = _r.get("price")
+                _r["hpi_multiplier"] = 1.0
+        _audit["hpi_adjusted_count"] = _hpi_adjusted_count
+        if _hpi_yoy is None:
+            _audit["warnings"].append("hpi_temporal_adjustment_skipped: no LAD HPI data — nominal prices used")
+
+        # ── STEP 9: SIMILARITY SCORING ───────────────────────────────────────
+        # Weighted score: recency × proximity × type-match × room-match × tenure-match × age-match
+        # All weights are explicit and disclosed in comp output
+        def _similarity_score(_r: dict) -> float:
+            _s = 1.0
+            _components = {}
+
+            # Recency weight (applied to HPI-adjusted prices — ordering by recency still valid)
+            _am = _r.get("age_months")
+            if _am is not None:
+                if _am <= 6:    _rw = 1.00
+                elif _am <= 12: _rw = 0.90
+                elif _am <= 18: _rw = 0.78
+                else:           _rw = 0.62
+            else:
+                _rw = 0.65
+            _s *= _rw
+            _components["recency"] = round(_rw, 2)
+
+            # Proximity weight: linear decay
+            _mi = safe_float(_r.get("miles"))
+            if isinstance(_mi, float) and _mi >= 0:
+                _pw = max(0.10, 1.0 - (_mi / r_miles) * 0.65)
+            else:
+                _pw = 0.50
+            _s *= _pw
+            _components["proximity"] = round(_pw, 2)
+
+            # Property type exact match
+            if pt_filter and str(_r.get("property_type") or "").upper() == pt_filter:
+                _s *= 1.10
+                _components["type_match"] = 1.10
+            else:
+                _components["type_match"] = 1.00
+
+            # Room similarity (if subject rooms known)
+            if _subject_rooms and _r.get("habitable_rooms") is not None:
+                _rd = abs(int(_r["habitable_rooms"]) - _subject_rooms)
+                if _rd == 0:   _rmw = 1.00
+                elif _rd == 1: _rmw = 0.88
+                else:          _rmw = 0.70
+                _s *= _rmw
+                _components["room_match"] = round(_rmw, 2)
+            else:
+                _components["room_match"] = None
+
+            # Tenure match
+            if _subject_tenure and _r.get("duration"):
+                if str(_r["duration"]).upper() == _subject_tenure:
+                    _s *= 1.05
+                    _components["tenure_match"] = 1.05
+                else:
+                    _s *= 0.82
+                    _components["tenure_match"] = 0.82
+            else:
+                _components["tenure_match"] = None
+
+            # New build alignment
+            _ron = str(_r.get("old_new") or "").upper()
+            if _subject_old_new and _ron:
+                if _ron == _subject_old_new:
+                    _s *= 1.05
+                    _components["build_match"] = 1.05
+                else:
+                    _s *= 0.80
+                    _components["build_match"] = 0.80
+            else:
+                _components["build_match"] = None
+
+            _r["_similarity_score"] = round(_s, 4)
+            _r["_score_components"] = _components
+            return _s
+
+        rows_scored = sorted(rows, key=_similarity_score, reverse=True)
         rows = rows_scored[:10]
 
-        prices: List[int] = []
-        ptypes: Dict[str, int] = {}
-        miles_list: List[float] = []
+        # ── STEP 10: FLOOR-AREA PRICE NORMALISATION ───────────────────────────
+        # Uses HPI-adjusted prices as the base for normalisation
+        # Formula: normalised_price = hpi_adjusted_price × (subject_area / comp_area)
+        # Only applied when >= 5 comps have known floor area
+        _normalised_prices = []
+        _area_normalised_count = 0
+        if _subject_area and _subject_area > 0:
+            for _r in rows:
+                _comp_area = _r.get("floor_area")
+                _hpi_adj = _r.get("hpi_adjusted_price") or _r.get("price")
+                if _comp_area and _comp_area > 0 and _hpi_adj:
+                    _norm_factor = _subject_area / _comp_area
+                    _norm_price = int(_hpi_adj * _norm_factor)
+                    _r["price_normalised"] = _norm_price
+                    _r["normalisation_factor"] = round(_norm_factor, 3)
+                    _normalised_prices.append(_norm_price)
+                    _area_normalised_count += 1
+                else:
+                    _r["price_normalised"] = _hpi_adj
+                    _r["normalisation_factor"] = None
+        else:
+            for _r in rows:
+                _r["price_normalised"] = _r.get("hpi_adjusted_price") or _r.get("price")
+                _r["normalisation_factor"] = None
+            _audit["warnings"].append("floor_area_normalisation_skipped: subject floor area unknown")
+
+        _use_normalised = len(_normalised_prices) >= 5
+        _audit["area_normalised_count"] = _area_normalised_count
+        if not _use_normalised and _subject_area:
+            _audit["warnings"].append(f"floor_area_normalisation_skipped: only {_area_normalised_count}/10 comps have floor area data")
+
+        # ── STEP 11: COMPUTE PRICES FOR MEDIAN ──────────────────────────────
+        prices: list = []
+        ptypes: dict = {}
+        miles_list: list = []
+        _norm_coverage_pct = round(_area_normalised_count / max(len(rows), 1) * 100, 1)
+
         for r in rows:
             if not isinstance(r, dict):
                 continue
-            pr = safe_int(r.get("price"))
-            if isinstance(pr, int):
+            # Price hierarchy: normalised > HPI-adjusted > nominal
+            if _use_normalised and r.get("price_normalised") is not None:
+                pr = safe_int(r.get("price_normalised"))
+            elif r.get("hpi_adjusted_price") is not None:
+                pr = safe_int(r.get("hpi_adjusted_price"))
+            else:
+                pr = safe_int(r.get("price"))
+            if isinstance(pr, int) and pr > 0:
                 prices.append(pr)
             pt = map_property_type_label(r.get("property_type"))
             if pt:
@@ -4233,6 +4396,29 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             if isinstance(mi, float):
                 miles_list.append(mi)
 
+        _audit["final_comp_count"] = len(rows)
+
+        # ── STEP 12: INSUFFICIENT EVIDENCE GATE ─────────────────────────────
+        # Refuse high-confidence valuation when evidence is materially inadequate
+        _price_variance_pct = 0.0
+        if len(prices) >= 3:
+            _sorted_prices = sorted(prices)
+            _med_p = _sorted_prices[len(_sorted_prices) // 2]
+            _iqr_p = _sorted_prices[int(len(_sorted_prices)*0.75)] - _sorted_prices[int(len(_sorted_prices)*0.25)]
+            _price_variance_pct = (_iqr_p / max(_med_p, 1)) * 100
+
+        _evidence_insufficient = (
+            len(rows) < 3
+            or (len(rows) < 5 and _audit["methodology_degraded"])
+            or _price_variance_pct > 60
+        )
+        if _evidence_insufficient:
+            _audit["insufficient_evidence"] = True
+            _audit["warnings"].append(
+                f"INSUFFICIENT_COMPARABLE_EVIDENCE: {len(rows)} comps, "
+                f"variance={_price_variance_pct:.0f}%, degraded={_audit['methodology_degraded']}"
+            )
+
         med = _median_int(prices)
         min_m = min(miles_list) if miles_list else None
         max_m = max(miles_list) if miles_list else None
@@ -4240,24 +4426,78 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         pt_parts = [f"{k}:{ptypes[k]}" for k in sorted(ptypes.keys())]
         pt_str = ", ".join(pt_parts) if pt_parts else "n/a"
 
-        summary = f"{len(rows)} sold comparables within {r_miles} miles. Median price: {med if med is not None else 'n/a'}. Types: {pt_str}."
+        # ── COMP OUTPUT ENRICHMENT ────────────────────────────────────────────
+        # Every comp exposes full lineage: nominal, HPI-adjusted, normalised, factors, score
+        for r in rows:
+            r["_lineage"] = {
+                "nominal_price":             r.get("nominal_price") or r.get("price"),
+                "hpi_adjusted_price":         r.get("hpi_adjusted_price"),
+                "hpi_multiplier":             r.get("hpi_multiplier"),
+                "hpi_yoy_applied":            _hpi_yoy,
+                "price_normalised":          r.get("price_normalised"),
+                "normalisation_factor":      r.get("normalisation_factor"),
+                "subject_floor_area_m2":     _subject_area,
+                "comp_floor_area_m2":        r.get("floor_area"),
+                "price_used_for_median":     (
+                    "normalised" if (_use_normalised and r.get("normalisation_factor") is not None)
+                    else "hpi_adjusted" if (_hpi_yoy is not None and r.get("age_months", 0) > 3)
+                    else "nominal"
+                ),
+                "similarity_score":          r.get("_similarity_score"),
+                "score_components":          r.get("_score_components"),
+            }
+
+        _methodology_label = (
+            "similarity_weighted_normalised"
+            if _use_normalised and _hpi_yoy is not None
+            else "similarity_weighted_hpi_adjusted"
+            if _hpi_yoy is not None
+            else "similarity_weighted_area_normalised"
+            if _use_normalised
+            else "similarity_weighted_nominal"
+        )
+
+        _summary_parts = [f"{len(rows)} comps within {r_miles}mi"]
+        if _use_normalised:
+            _summary_parts.append(f"area-normalised ({_norm_coverage_pct:.0f}% coverage)")
+        if _hpi_yoy is not None:
+            _summary_parts.append(f"HPI-adjusted ({_hpi_yoy:+.1f}% YoY)")
+        if _audit["outliers_rejected"]:
+            _summary_parts.append(f"{_audit['outliers_rejected']} outliers rejected")
+        if _audit["methodology_degraded"]:
+            _summary_parts.append("⚠ methodology degraded — see warnings")
+        if _evidence_insufficient:
+            _summary_parts.append("⚠ INSUFFICIENT COMPARABLE EVIDENCE")
+
+        summary = ". ".join(_summary_parts) + f". Median: {'£{:,}'.format(med) if med else 'n/a'}. Types: {pt_str}."
 
         out = metric_ok(summary, rows, sources, retrieved, HOUSING_CONFIDENCE_VALUE)
         out["metrics"] = {
-            "provider": "supabase_rpc",
-            "rpc": HOUSING_RPC_NAME,
-            "postcode": pc,
-            "radius_miles": r_miles,
-            "limit": lim,
-            "count": len(rows),
-            "median_price": med,
-            "avg": med,            # alias used by inference engine + frontend avCompAvg
-            "average_price": med,  # alias for build_area_inference comp_avg lookup
-            "min_miles": min_m,
-            "max_miles": max_m,
-            "property_type_counts": ptypes,
-            "latlngEnrichment": enrich_meta,
-            "payload": payload,
+            "provider":                    "supabase_rpc",
+            "rpc":                         HOUSING_RPC_NAME,
+            "postcode":                    pc,
+            "radius_miles":                r_miles,
+            "limit":                       lim,
+            "count":                       len(rows),
+            "median_price":                med,
+            "avg":                         med,   # alias: inference engine + frontend avCompAvg
+            "average_price":               med,   # alias: build_area_inference comp_avg lookup
+            "area_normalisation_applied":  _use_normalised,
+            "area_normalisation_coverage": _area_normalised_count,
+            "hpi_adjusted_count":          _hpi_adjusted_count,
+            "hpi_yoy_applied":             _hpi_yoy,
+            "outliers_rejected":           _audit.get("outliers_rejected", 0),
+            "methodology_degraded":        _audit.get("methodology_degraded", False),
+            "insufficient_evidence":       _evidence_insufficient,
+            "methodology":                 _methodology_label,
+            "warnings":                    _audit.get("warnings", []),
+            "audit":                       _audit,
+            "price_variance_pct":          round(_price_variance_pct, 1),
+            "min_miles":                   min_m,
+            "max_miles":                   max_m,
+            "property_type_counts":        ptypes,
+            "latlngEnrichment":            enrich_meta,
+            "payload":                     payload,
         }
 
         charts = build_housing_charts_from_rows(rows)
@@ -6463,10 +6703,27 @@ def ceiling_endpoint():
                     area = d.get("area_json") or {}
                     housing = area.get("housing") or {}
                     comps = housing.get("soldComps") or housing.get("value") or []
-                    comp_prices = [c.get("price") for c in comps if c.get("price")]
+                    # Use the most-adjusted price available per comp, in order:
+                    # price_normalised (area+HPI) > hpi_adjusted_price > nominal price
+                    # This ensures ceiling_engine receives the normalised comparable value
+                    def _best_comp_price(c: dict) -> int | None:
+                        for k in ("price_normalised", "hpi_adjusted_price", "price"):
+                            v = c.get(k)
+                            if v and int(float(v)) > 5000:
+                                return int(float(v))
+                        return None
+                    comp_prices = [p for c in comps if (p := _best_comp_price(c))]
                     if comp_prices and not merged.get("comps_avg_value"):
-                        merged["comps_avg_value"] = round(
-                            sum(comp_prices) / len(comp_prices)
+                        # Use median not mean — resistant to outliers
+                        _cp_sorted = sorted(comp_prices)
+                        _n = len(_cp_sorted)
+                        _med = _cp_sorted[_n // 2] if _n % 2 else (
+                            _cp_sorted[_n//2 - 1] + _cp_sorted[_n//2]) // 2
+                        merged["comps_avg_value"] = _med
+                        merged["comps_price_basis"] = (
+                            "normalised" if any(c.get("price_normalised") for c in comps)
+                            else "hpi_adjusted" if any(c.get("hpi_adjusted_price") for c in comps)
+                            else "nominal"
                         )
                     # Fallback 1: median_price from housing metrics
                     if not merged.get("comps_avg_value"):
@@ -6576,16 +6833,39 @@ def save_area(deal_id: str):
                 _deal_id_ref = deal_id
                 _pc_ref      = cached["postcode"]
                 def _patch_inference():
+                    # INVARIANT: must not overwrite newer area_json writes (Invariant 3)
+                    # Use optimistic lock: only write if updated_at matches snapshot
+                    try:
+                        _snap = supabase.table("deals").select("updated_at").eq("id", _deal_id_ref).single().execute()
+                        _snap_ts = (_snap.data or {}).get("updated_at")
+                    except Exception as _se:
+                        print(f"[_patch_inference] Snapshot read failed for {_deal_id_ref}: {_se}")
+                        return
                     try:
                         inference_result = build_area_inference(_cached_ref, _pc_ref)
                         _cached_ref.update(inference_result)
-                        supabase.table("deals").update({
+                        try:
+                            _pct = (
+                                (_cached_ref.get("inference") or {})
+                                .get("benchmarks", {})
+                                .get("census", {})
+                                .get("private_rent_pct")
+                            )
+                            if _pct is not None:
+                                _cached_ref.setdefault("census", {})["private_rent_pct"] = _pct
+                        except Exception:
+                            pass
+                        # Conditional write — reject if superseded
+                        _result = supabase.table("deals").update({
                             "area_json":  _cached_ref,
                             "updated_at": now_iso(),
-                        }).eq("id", _deal_id_ref).execute()
-                        print(f"✅ Inference patched for deal {_deal_id_ref}")
+                        }).eq("id", _deal_id_ref).eq("updated_at", _snap_ts).execute()
+                        if _result.data:
+                            print(f"[_patch_inference OK] {_deal_id_ref}")
+                        else:
+                            print(f"[_patch_inference STALE_WRITE_REJECTED] {_deal_id_ref} — newer update existed")
                     except Exception as _e:
-                        print(f"⚠️ Inference patch failed for {_deal_id_ref}: {_e}")
+                        print(f"[_patch_inference ERROR] {_deal_id_ref}: {_e}")
                 import threading as _ti
                 _ti.Thread(target=_patch_inference, daemon=True).start()
             return jsonify({
