@@ -254,14 +254,14 @@ def supabase_data_query(sql: str, params=None) -> list:
             q = q.eq("area_code", params[0])
         if "SELECT MAX" in sql_u:
             # Try "period" (uk_prms_monthly) then "date" (uk_hpi_monthly)
+            rows = []
             for _om in ["period", "date"]:
                 try:
                     _max_rows = q.order(_om, desc=True).limit(500).execute().data or []
-                    if _max_rows is not None:
+                    if _max_rows:   # truthy — only break when data returned, not on []
                         rows = _max_rows
                         break
                 except Exception:
-                    rows = []
                     continue
             for row in rows:
                 for orig, alias in alias_map.items():
@@ -276,7 +276,7 @@ def supabase_data_query(sql: str, params=None) -> list:
             for _order_col in ["period", "date", "month"]:
                 try:
                     rows = q.order(_order_col, desc=desc).limit(lim).execute().data or []
-                    if rows is not None:
+                    if rows:   # only break when data actually returned — [] is falsy
                         break
                 except Exception:
                     rows = []
@@ -6682,6 +6682,41 @@ def get_dashboard():
     }), 200
 
 
+# ── HPI DATA DIAGNOSTIC ENDPOINT ─────────────────────────────
+@app.route("/api/test-hpi", methods=["GET", "OPTIONS"])
+def test_hpi_endpoint():
+    """
+    GET /api/test-hpi
+    Diagnostic: verify uk_hpi_monthly is populated and queryable.
+    Returns sample area_codes and whether England aggregate exists.
+    NO AUTH REQUIRED — read-only diagnostic only.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    results = {}
+    # Test 1: query for England aggregate
+    for code in ("E92000001", "England", "United Kingdom"):
+        rows = supabase_data_query(
+            "SELECT average_price, annual_change FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+            (code,)
+        )
+        results[code] = rows[0] if rows else None
+    # Test 2: query for Darlington LAD
+    for code in ("E06000005", "Darlington"):
+        rows = supabase_data_query(
+            "SELECT average_price, annual_change FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+            (code,)
+        )
+        results[code] = rows[0] if rows else None
+    # Test 3: count total rows
+    count_rows = supabase_data_query(
+        "SELECT COUNT(*) AS total FROM public.uk_hpi_monthly",
+        ()
+    )
+    results["total_rows"] = count_rows[0].get("total") if count_rows else "QUERY FAILED"
+    return jsonify({"ok": True, "hpi_test": results}), 200
+
+
 # ── AREA INTELLIGENCE ─────────────────────────────────────────
 
 
@@ -6748,6 +6783,10 @@ def ceiling_endpoint():
                     area = d.get("area_json") or {}
                     housing = area.get("housing") or {}
                     comps = housing.get("soldComps") or housing.get("value") or []
+                    print(f"[ceiling] deal={deal_id} area_json={'present' if area else 'MISSING'} "
+                          f"inference={'present' if area.get('inference') else 'MISSING'} "
+                          f"comps={len(comps)} guide={d.get('guide_price')} "
+                          f"strategy={strategy}")
                     # Use the most-adjusted price available per comp, in order:
                     # price_normalised (area+HPI) > hpi_adjusted_price > nominal price
                     # This ensures ceiling_engine receives the normalised comparable value
