@@ -253,7 +253,21 @@ def supabase_data_query(sql: str, params=None) -> list:
         if "WHERE" in sql_u and "AREA_CODE" in sql_u and params:
             q = q.eq("area_code", params[0])
         if "SELECT MAX" in sql_u:
-            q = q.order("date", desc=True).limit(500)
+            # Try "period" (uk_prms_monthly) then "date" (uk_hpi_monthly)
+            for _om in ["period", "date"]:
+                try:
+                    _max_rows = q.order(_om, desc=True).limit(500).execute().data or []
+                    if _max_rows is not None:
+                        rows = _max_rows
+                        break
+                except Exception:
+                    rows = []
+                    continue
+            for row in rows:
+                for orig, alias in alias_map.items():
+                    if orig in row:
+                        row[alias] = row[orig]
+            return rows
         else:
             desc = "DESC" in sql_u
             lm = _re2.search(r"LIMIT\s+(\d+)", sql, _re2.IGNORECASE)
@@ -2685,15 +2699,17 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
         print(f"[WARN] Schools Hetzner query failed: {_se}")
 
     # ── Supabase auto-fallback: schools_clean_v2 (no env var required) ──────
+    # schools_clean_v2 schema is unknown — SELECT * and map whatever columns exist
     _OFSTED_CODE_MAP = {"1": "Outstanding", "2": "Good",
                         "3": "Requires Improvement", "4": "Inadequate"}
     if supabase:
-        # Try progressively minimal column sets — handle any schools_clean_v2 schema variant
+        # Always use SELECT * — the table schema may differ from expected columns
+        # (e.g. --schools job never run, or table created with different schema)
         for _cols in [
+            "*",  # always try * first — handles any schema
             "urn,school_name,postcode,ofsted_rating",
             "urn,name,postcode,ofsted_rating",
             "urn,postcode",
-            "*",
         ]:
             try:
                 _q = supabase.table("schools_clean_v2").select(_cols)
@@ -3010,13 +3026,26 @@ def _get_national_price_benchmark() -> Dict[str, Any]:
 def _get_regional_price_benchmark(lad_code: str) -> Dict[str, Any]:
     """
     Regional average sold price from uk_hpi_monthly for the LAD.
-    Returns latest avg price and YoY %.
+    Tries LAD code (E09000005 format) then falls back to any England-level data.
+    uk_hpi_monthly area_code may be stored as E-code OR RegionName depending on HPI CSV format.
+    After refresh_data.py fix: E-code is preferred. Existing data may still have RegionName.
     """
     try:
+        # Try exact LAD E-code match (will work after refresh_data fix)
         rows = supabase_data_query(
             "SELECT date, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 13",
             (lad_code,)
         )
+        if not rows:
+            # Fallback: try England aggregate (area_code = "England" or "E92000001")
+            for _eng_code in ("E92000001", "England", "United Kingdom", "K02000001"):
+                rows = supabase_data_query(
+                    "SELECT date, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+                    (_eng_code,)
+                )
+                if rows:
+                    print(f"[HPI] LAD {lad_code} not found, using {_eng_code} aggregate")
+                    break
         if not rows:
             return {"avg_price": None, "yoy_pct": None}
         latest = rows[0]
@@ -6782,6 +6811,26 @@ def ceiling_endpoint():
                                 print(f"[ceiling] Fallback 4: using HPI {_hpi_src} avg £{int(_hpi_avg):,} for {deal_id}")
                         except Exception as _f4e:
                             print(f"[ceiling] Fallback 4 failed: {_f4e}")
+
+                    # Fallback 5: England aggregate HPI average price — absolute last resort
+                    # This fires when: no comps, no guide price, no LAD-level HPI match
+                    # UK national average provides a floor from which discounts are applied
+                    if not merged.get("comps_avg_value"):
+                        try:
+                            for _fb5_code in ("E92000001", "England", "United Kingdom", "K02000001"):
+                                _fb5_rows = supabase_data_query(
+                                    "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+                                    (_fb5_code,)
+                                )
+                                if _fb5_rows:
+                                    _fb5_avg = safe_float(_fb5_rows[0].get("average_price"))
+                                    if _fb5_avg and _fb5_avg > 5000:
+                                        merged["comps_avg_value"] = int(_fb5_avg)
+                                        merged["comps_source"] = "hpi_england_aggregate_proxy"
+                                        print(f"[ceiling] Fallback 5: using England avg £{int(_fb5_avg):,} for {deal_id}")
+                                        break
+                        except Exception as _f5e:
+                            print(f"[ceiling] Fallback 5 failed: {_f5e}")
 
                     financial_inputs = merged
 

@@ -99,7 +99,10 @@ def refresh_hpi():
 
     for row in reader:
         try:
-            area_code  = (row.get("RegionName") or row.get("AreaCode") or "").strip()
+            # FIXED: prefer AreaCode (E09000005 ONS format) over RegionName ("Brent")
+            # Queries use lad_code from postcodes.io which returns E-code format
+            # Storing RegionName as primary caused all WHERE area_code = lad_code to return 0 rows
+            area_code  = (row.get("AreaCode") or row.get("RegionName") or "").strip()
             date_str   = (row.get("Date") or "").strip()
             avg_price  = row.get("AveragePrice") or row.get("Average price") or None
             pct_change = row.get("AnnualChange") or row.get("12m % change") or None
