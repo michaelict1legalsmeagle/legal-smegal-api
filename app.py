@@ -6759,19 +6759,27 @@ def ceiling_endpoint():
                             merged["comps_avg_value"] = round(_gp * 1.15)
                             merged["comps_source"] = "guide_price_proxy"
 
-                    # Fallback 4: LAD average house price from inference benchmarks
-                    # Used when housing_comps_v1 returns 0 rows (Supabase copy sparse/empty
-                    # for the subject postcode's LAD). avg_price from uk_hpi_monthly is a
-                    # real Land Registry market average — not a comp but a disclosed proxy.
+                    # Fallback 4: HPI average house price from inference benchmarks
+                    # benchmarks.price structure: {local: comp_avg, regional: LAD HPI avg, national: England avg}
+                    # "local" = comp_avg (null when housing_comps_v1 returns 0 rows)
+                    # "regional" = uk_hpi_monthly average_price for this LAD (non-null when HPI data loaded)
+                    # "national" = England-wide average (always available)
                     if not merged.get("comps_avg_value"):
                         try:
                             _inf = (area.get("inference") or {})
                             _bprice = (_inf.get("benchmarks") or {}).get("price") or {}
-                            _lad_avg = _bprice.get("avg_price") or _bprice.get("local")
-                            if _lad_avg and float(_lad_avg) > 5000:
-                                merged["comps_avg_value"] = int(float(_lad_avg))
-                                merged["comps_source"] = "hpi_lad_avg_proxy"
-                                print(f"[ceiling] Fallback 4: using LAD avg price {int(float(_lad_avg))} for {deal_id}")
+                            # Priority: regional LAD avg → national avg → null
+                            _hpi_avg = None
+                            for _price_key in ("regional", "national", "local"):
+                                _v = _bprice.get(_price_key)
+                                if _v and isinstance(_v, (int, float)) and float(_v) > 5000:
+                                    _hpi_avg = float(_v)
+                                    _hpi_src = _price_key
+                                    break
+                            if _hpi_avg:
+                                merged["comps_avg_value"] = int(_hpi_avg)
+                                merged["comps_source"] = f"hpi_{_hpi_src}_avg_proxy"
+                                print(f"[ceiling] Fallback 4: using HPI {_hpi_src} avg £{int(_hpi_avg):,} for {deal_id}")
                         except Exception as _f4e:
                             print(f"[ceiling] Fallback 4 failed: {_f4e}")
 
@@ -6795,6 +6803,27 @@ def ceiling_endpoint():
             base_valuation=float(base_val) if base_val else None,
             strategy=str(strategy),
         )
+
+        # Store ceiling to DB so dashboard can show yield/cashflow
+        # without requiring Financial Model to be visited first
+        if deal_id and result and supabase:
+            try:
+                _cr = result.get("ceiling_range") or {}
+                _low  = _cr.get("low")
+                _high = _cr.get("high")
+                _mid  = round((_low + _high) / 2) if _low and _high else None
+                if _mid and _mid > 5000:
+                    # Update financials_json.ceiling_snapshot for dashboard reads
+                    _existing_fin = merged or {}
+                    _monthly_rent = _existing_fin.get("monthly_rent")
+                    _gy = round((_monthly_rent * 12 / _mid) * 100, 2) if _monthly_rent and _mid else None
+                    supabase.table("deals").update({
+                        "bid_ceiling": _mid,
+                        "updated_at": now_iso(),
+                    }).eq("id", deal_id).eq("user_id", request.user_id).execute()
+                    print(f"[ceiling] Stored bid_ceiling £{_mid:,} for {deal_id}")
+            except Exception as _se:
+                print(f"[ceiling] Store to DB failed: {_se}")
 
         return jsonify({"ok": True, "ceiling": result}), 200
 
