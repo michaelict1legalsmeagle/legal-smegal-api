@@ -134,6 +134,7 @@ def refresh_hpi():
                         "property_type": prop_type,
                         "average_price": float(avg),
                         "annual_change": float(chg) if chg else None,
+                        "region_name":   row.get("RegionName") or area_code,
                     })
             if len(monthly_batch) >= BATCH_SIZE:
                 supabase.table(HPI_TABLE_MONTHLY).upsert(monthly_batch, on_conflict="area_code,date").execute()
