@@ -2663,6 +2663,17 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             )
 
         if school_rows:
+            # Normalise numeric Ofsted codes to text — applies to both Hetzner and Supabase paths
+            _OFSTED_NORM = {"1": "Outstanding", "2": "Good",
+                            "3": "Requires Improvement", "4": "Inadequate"}
+            for _sr in school_rows:
+                _raw_rating = str(_sr.get("ofsted_rating") or "").strip()
+                if _raw_rating in _OFSTED_NORM:
+                    _sr["ofsted_rating"] = _OFSTED_NORM[_raw_rating]
+                # Sanitise school name — replace numeric URN with "School"
+                _sn = str(_sr.get("school_name") or "").strip()
+                if not _sn or _sn.isdigit():
+                    _sr["school_name"] = "School"
             sources = [{"label": "Ofsted / DfE", "url": "https://reports.ofsted.gov.uk/"}]
             out = metric_ok(
                 f"{len(school_rows)} schools within 3mi of {pc}.",
@@ -2700,7 +2711,12 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
                         r["school_name"] = r["name"]
                     elif "EstablishmentName" in r and "school_name" not in r:
                         r["school_name"] = r["EstablishmentName"]
-                    r.setdefault("school_name", r.get("urn", "School"))
+                    # Use "School" not URN as name fallback — URNs are meaningless to investors
+                    _raw_name = r.get("school_name") or r.get("name") or r.get("EstablishmentName")
+                    if not _raw_name or str(_raw_name).strip().isdigit():
+                        r["school_name"] = "School"
+                    else:
+                        r["school_name"] = str(_raw_name).strip()
                     r.setdefault("miles", None)
                     # Normalise numeric Ofsted codes to text
                     raw_r = str(r.get("ofsted_rating") or "").strip()
@@ -6741,7 +6757,23 @@ def ceiling_endpoint():
                         _gp = float(d.get("guide_price") or 0)
                         if _gp > 5000:
                             merged["comps_avg_value"] = round(_gp * 1.15)
-                            merged["comps_source"] = "guide_price_proxy" 
+                            merged["comps_source"] = "guide_price_proxy"
+
+                    # Fallback 4: LAD average house price from inference benchmarks
+                    # Used when housing_comps_v1 returns 0 rows (Supabase copy sparse/empty
+                    # for the subject postcode's LAD). avg_price from uk_hpi_monthly is a
+                    # real Land Registry market average — not a comp but a disclosed proxy.
+                    if not merged.get("comps_avg_value"):
+                        try:
+                            _inf = (area.get("inference") or {})
+                            _bprice = (_inf.get("benchmarks") or {}).get("price") or {}
+                            _lad_avg = _bprice.get("avg_price") or _bprice.get("local")
+                            if _lad_avg and float(_lad_avg) > 5000:
+                                merged["comps_avg_value"] = int(float(_lad_avg))
+                                merged["comps_source"] = "hpi_lad_avg_proxy"
+                                print(f"[ceiling] Fallback 4: using LAD avg price {int(float(_lad_avg))} for {deal_id}")
+                        except Exception as _f4e:
+                            print(f"[ceiling] Fallback 4 failed: {_f4e}")
 
                     financial_inputs = merged
 
