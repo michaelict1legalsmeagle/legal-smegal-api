@@ -3003,59 +3003,60 @@ def _get_national_rental_benchmark() -> Dict[str, Any]:
 def _get_national_price_benchmark() -> Dict[str, Any]:
     """
     National average sold price from uk_hpi_monthly.
-    Uses area_code E92000001 (England) — latest 12 months.
-    Returns avg price and YoY % growth.
+    Uses get_hpi_benchmark RPC (SECURITY DEFINER) — proven to work on Render
+    where direct supabase.table().select() for uk_hpi_monthly returns [] via REST.
     """
-    try:
-        rows = supabase_data_query(
-            "SELECT date, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 13",
-            ("E92000001",)
-        )
-        if not rows:
-            return {"avg_price": None, "yoy_pct": None}
-        latest = rows[0]
-        return {
-            "avg_price": safe_float(latest.get("average_price")),
-            "yoy_pct":   safe_float(latest.get("price_change_pct")),
-        }
-    except Exception as e:
-        print(f"[WARN] National price benchmark failed: {e}")
-        return {"avg_price": None, "yoy_pct": None}
+    if supabase:
+        try:
+            res = supabase.rpc("get_hpi_benchmark", {"p_area_code": "E92000001"}).execute()
+            rows = res.data if hasattr(res, "data") and isinstance(res.data, list) else []
+            if rows:
+                r = rows[0]
+                return {
+                    "avg_price": safe_float(r.get("average_price")),
+                    "yoy_pct":   safe_float(r.get("annual_change")),
+                }
+        except Exception as e:
+            print(f"[WARN] National price benchmark RPC failed: {e}")
+    return {"avg_price": None, "yoy_pct": None}
 
 
 def _get_regional_price_benchmark(lad_code: str) -> Dict[str, Any]:
     """
     Regional average sold price from uk_hpi_monthly for the LAD.
-    Tries LAD code (E09000005 format) then falls back to any England-level data.
-    uk_hpi_monthly area_code may be stored as E-code OR RegionName depending on HPI CSV format.
-    After refresh_data.py fix: E-code is preferred. Existing data may still have RegionName.
+    Uses get_hpi_benchmark RPC (SECURITY DEFINER) — bypasses the REST table path
+    which silently returns [] even with GRANT applied (proven on production).
+    Falls back to England aggregate if LAD not found.
     """
-    try:
-        # Try exact LAD E-code match (will work after refresh_data fix)
-        rows = supabase_data_query(
-            "SELECT date, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 13",
-            (lad_code,)
-        )
-        if not rows:
-            # Fallback: try England aggregate (area_code = "England" or "E92000001")
-            for _eng_code in ("E92000001", "England", "United Kingdom", "K02000001"):
-                rows = supabase_data_query(
-                    "SELECT date, average_price, annual_change AS price_change_pct FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
-                    (_eng_code,)
-                )
-                if rows:
-                    print(f"[HPI] LAD {lad_code} not found, using {_eng_code} aggregate")
-                    break
-        if not rows:
-            return {"avg_price": None, "yoy_pct": None}
-        latest = rows[0]
-        return {
-            "avg_price": safe_float(latest.get("average_price")),
-            "yoy_pct":   safe_float(latest.get("price_change_pct")),
-        }
-    except Exception as e:
-        print(f"[WARN] Regional price benchmark failed for {lad_code}: {e}")
+    if not supabase:
         return {"avg_price": None, "yoy_pct": None}
+
+    def _rpc_lookup(code: str):
+        try:
+            res = supabase.rpc("get_hpi_benchmark", {"p_area_code": code}).execute()
+            rows = res.data if hasattr(res, "data") and isinstance(res.data, list) else []
+            if rows:
+                r = rows[0]
+                return {
+                    "avg_price": safe_float(r.get("average_price")),
+                    "yoy_pct":   safe_float(r.get("annual_change")),
+                }
+        except Exception as e:
+            print(f"[WARN] HPI RPC lookup failed for {code}: {e}")
+        return None
+
+    result = _rpc_lookup(lad_code)
+    if result and result.get("avg_price"):
+        return result
+
+    print(f"[HPI] LAD {lad_code} not found via RPC — trying England aggregate")
+    for eng_code in ("E92000001", "K02000001"):
+        result = _rpc_lookup(eng_code)
+        if result and result.get("avg_price"):
+            print(f"[HPI] Using {eng_code} aggregate for {lad_code}")
+            return result
+
+    return {"avg_price": None, "yoy_pct": None}
 
 
 def _get_regional_rental_benchmark(lad_code: str) -> Dict[str, Any]:
@@ -6851,25 +6852,23 @@ def ceiling_endpoint():
                         except Exception as _f4e:
                             print(f"[ceiling] Fallback 4 failed: {_f4e}")
 
-                    # Fallback 5: England aggregate HPI average price — absolute last resort
-                    # This fires when: no comps, no guide price, no LAD-level HPI match
-                    # UK national average provides a floor from which discounts are applied
-                    if not merged.get("comps_avg_value"):
+                    # Fallback 5: England aggregate via get_hpi_benchmark RPC
+                    # Uses SECURITY DEFINER RPC — proven to bypass REST table query failure.
+                    # supabase_data_query REST path silently returns [] for uk_hpi_monthly.
+                    if not merged.get("comps_avg_value") and supabase:
                         try:
-                            for _fb5_code in ("E92000001", "England", "United Kingdom", "K02000001"):
-                                _fb5_rows = supabase_data_query(
-                                    "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
-                                    (_fb5_code,)
-                                )
+                            for _fb5_code in ("E92000001", "K02000001"):
+                                _fb5_res = supabase.rpc("get_hpi_benchmark", {"p_area_code": _fb5_code}).execute()
+                                _fb5_rows = _fb5_res.data if hasattr(_fb5_res, "data") and isinstance(_fb5_res.data, list) else []
                                 if _fb5_rows:
                                     _fb5_avg = safe_float(_fb5_rows[0].get("average_price"))
                                     if _fb5_avg and _fb5_avg > 5000:
                                         merged["comps_avg_value"] = int(_fb5_avg)
                                         merged["comps_source"] = "hpi_england_aggregate_proxy"
-                                        print(f"[ceiling] Fallback 5: using England avg £{int(_fb5_avg):,} for {deal_id}")
+                                        print(f"[ceiling] Fallback 5 (RPC): using {_fb5_code} avg £{int(_fb5_avg):,} for {deal_id}")
                                         break
                         except Exception as _f5e:
-                            print(f"[ceiling] Fallback 5 failed: {_f5e}")
+                            print(f"[ceiling] Fallback 5 (RPC) failed: {_f5e}")
 
                     financial_inputs = merged
 
