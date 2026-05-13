@@ -8142,5 +8142,411 @@ def diag_deal_trace(deal_id: str):
     return jsonify({"ok": True, "trace": out, "generated_at": now_iso()}), 200
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# AUCTION INTELLIGENCE — PHASE 1 ROUTES
+# Additive only. Zero modification to any route above this block.
+# Append this block at the end of app.py, before the if __name__ == "__main__"
+# guard.
+#
+# Routes:
+#   GET  /api/auction/sources              — list active auction sources
+#   GET  /api/auction/listings             — paginated listing feed
+#   GET  /api/auction/listings/<id>        — single listing detail
+#   POST /api/auction/listings/<id>/convert — convert listing to deal
+#   POST /api/auction/scan                 — admin-only manual scan trigger
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+AUCTION_SCAN_SECRET = os.environ.get("AUCTION_SCAN_SECRET", "").strip()
+
+
+@app.route("/api/auction/sources", methods=["GET", "OPTIONS"])
+@require_auth
+def auction_sources_list():
+    """Return all active auction source records (name, slug, last_scanned_at)."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        res = supabase.table("auction_sources") \
+            .select("id,name,slug,listings_url,scrape_method,active,last_scanned_at") \
+            .eq("active", True) \
+            .order("name") \
+            .execute()
+        return jsonify({"ok": True, "sources": res.data or []}), 200
+    except Exception as e:
+        app.logger.exception("auction_sources_list failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/auction/listings", methods=["GET", "OPTIONS"])
+@require_auth
+def auction_listings_list():
+    """
+    Paginated listing feed.
+
+    Query params:
+      page     int  — 1-indexed, default 1
+      per_page int  — default 24, max 100
+      source   str  — filter by auction_sources.slug
+      status   str  — filter by status (default: active)
+      min_price, max_price — guide_price range filter
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    try:
+        page     = max(1, int(request.args.get("page", 1)))
+        per_page = min(100, max(1, int(request.args.get("per_page", 24))))
+        status   = request.args.get("status", "active")
+        source_slug = request.args.get("source", "").strip()
+        min_price   = safe_float(request.args.get("min_price"))
+        max_price   = safe_float(request.args.get("max_price"))
+
+        offset = (page - 1) * per_page
+
+        q = supabase.table("auction_listings") \
+            .select(
+                "id,source_id,auction_house,lot_number,address,postcode,"
+                "guide_price,auction_date,property_type,legal_pack_url,"
+                "status,converted_deal_id,first_seen_at,last_seen_at,"
+                "auction_sources!auction_listings_source_id_fkey(slug,name)",
+                count="exact"
+            ) \
+            .eq("status", status) \
+            .order("auction_date", desc=False, nullsfirst=False) \
+            .order("first_seen_at", desc=True) \
+            .range(offset, offset + per_page - 1)
+
+        if source_slug:
+            # Filter via join — get source_id first
+            src = supabase.table("auction_sources") \
+                .select("id").eq("slug", source_slug).maybe_single().execute()
+            if src.data:
+                q = q.eq("source_id", src.data["id"])
+
+        if min_price is not None:
+            q = q.gte("guide_price", min_price)
+        if max_price is not None:
+            q = q.lte("guide_price", max_price)
+
+        res = q.execute()
+        listings = res.data or []
+        total    = res.count or 0
+
+        return jsonify({
+            "ok":        True,
+            "listings":  listings,
+            "total":     total,
+            "page":      page,
+            "per_page":  per_page,
+            "pages":     max(1, -(-total // per_page)),  # ceiling division
+        }), 200
+
+    except Exception as e:
+        app.logger.exception("auction_listings_list failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/auction/listings/<listing_id>", methods=["GET", "OPTIONS"])
+@require_auth
+def auction_listing_detail(listing_id: str):
+    """Return a single listing with full detail."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        res = supabase.table("auction_listings") \
+            .select("*,auction_sources!auction_listings_source_id_fkey(slug,name)") \
+            .eq("id", listing_id) \
+            .single() \
+            .execute()
+        if not res.data:
+            return jsonify({"error": "Listing not found"}), 404
+        return jsonify({"ok": True, "listing": res.data}), 200
+    except Exception as e:
+        app.logger.exception("auction_listing_detail failed for %s", listing_id)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/auction/listings/<listing_id>/convert", methods=["POST", "OPTIONS"])
+@require_auth
+def auction_listing_convert(listing_id: str):
+    """
+    Convert an auction listing to a deal in the existing pipeline.
+
+    Idempotent: if the listing is already converted, returns the existing
+    deal_id without creating a duplicate.
+
+    Flow:
+      1. Load listing
+      2. Check not already converted (idempotency gate)
+      3. POST to existing deal creation logic (reuse inline, avoid HTTP self-call)
+      4. Mark listing as converted
+      5. Return {deal_id} — frontend redirects to upload page
+
+    Does NOT:
+      - Upload a legal pack
+      - Run LLM analysis
+      - Modify any existing deal
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    try:
+        # ── Load listing ─────────────────────────────────────────────────
+        listing_res = supabase.table("auction_listings") \
+            .select("id,status,converted_deal_id,address,postcode,lot_number,"
+                    "guide_price,auction_date,property_type,auction_house,source_url") \
+            .eq("id", listing_id) \
+            .single() \
+            .execute()
+
+        if not listing_res.data:
+            return jsonify({"error": "Listing not found"}), 404
+
+        listing = listing_res.data
+
+        # ── Idempotency gate ─────────────────────────────────────────────
+        if listing.get("converted_deal_id"):
+            app.logger.info(
+                "[auction/convert] Listing %s already converted → deal %s",
+                listing_id, listing["converted_deal_id"]
+            )
+            return jsonify({
+                "ok":               True,
+                "deal_id":          listing["converted_deal_id"],
+                "already_converted": True,
+            }), 200
+
+        # ── Build deal name ───────────────────────────────────────────────
+        address = listing.get("address") or ""
+        lot_num = listing.get("lot_number") or ""
+        house   = listing.get("auction_house") or ""
+
+        if address:
+            deal_name = address
+            if lot_num:
+                deal_name = f"Lot {lot_num} — {address}"
+        elif lot_num:
+            deal_name = f"{house} Lot {lot_num}" if house else f"Lot {lot_num}"
+        else:
+            deal_name = f"{house} listing" if house else "Auction listing"
+
+        # Truncate to reasonable length
+        deal_name = deal_name[:120]
+
+        # ── Create deal (reuse Supabase insert directly) ──────────────────
+        deal_row = {
+            "user_id":            request.user_id,
+            "deal_name":          deal_name,
+            "title":              deal_name,
+            "address":            listing.get("address"),
+            "postcode":           listing.get("postcode"),
+            "lot_number":         listing.get("lot_number"),
+            "guide_price":        listing.get("guide_price"),
+            "deal_type":          None,   # user sets after upload
+            "auction_date":       listing.get("auction_date"),
+            "status":             "active",
+            "source_listing_id":  listing_id,
+        }
+
+        deal_res = supabase.table("deals").insert(deal_row).execute()
+
+        if not deal_res.data or not deal_res.data[0].get("id"):
+            app.logger.error("[auction/convert] Deal insert returned no id for listing %s", listing_id)
+            return jsonify({"error": "Deal creation failed"}), 500
+
+        deal_id = deal_res.data[0]["id"]
+
+        # ── Mark listing as converted ─────────────────────────────────────
+        try:
+            supabase.table("auction_listings").update({
+                "status":             "converted",
+                "converted_deal_id":  deal_id,
+            }).eq("id", listing_id).execute()
+        except Exception as mark_e:
+            # Non-fatal: deal was created successfully. Log the marking failure.
+            app.logger.warning(
+                "[auction/convert] Deal %s created but could not mark listing %s as converted: %s",
+                deal_id, listing_id, mark_e
+            )
+
+        app.logger.info(
+            "[auction/convert] Listing %s → deal %s (user %s)",
+            listing_id, deal_id, request.user_id
+        )
+
+        return jsonify({
+            "ok":               True,
+            "deal_id":          deal_id,
+            "already_converted": False,
+        }), 201
+
+    except Exception as e:
+        app.logger.exception("auction_listing_convert failed for listing %s", listing_id)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/auction/scan", methods=["POST", "OPTIONS"])
+@require_auth
+def auction_manual_scan():
+    """
+    Admin-only: trigger a scan of one or all auction sources.
+    Requires X-Scan-Secret header matching AUCTION_SCAN_SECRET env var.
+
+    Body (optional): {"slug": "allsop"}  — omit to scan all active sources.
+
+    Note: this runs synchronously in the request thread.
+    For large source sets, the cron job is preferred.
+    Use this for testing and one-off manual refreshes only.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    # Admin gate — shared secret check
+    if not AUCTION_SCAN_SECRET:
+        return jsonify({"error": "Manual scan not configured — set AUCTION_SCAN_SECRET env var"}), 503
+
+    provided = request.headers.get("X-Scan-Secret", "").strip()
+    if provided != AUCTION_SCAN_SECRET:
+        app.logger.warning("[auction/scan] Unauthorised scan attempt by user %s", request.user_id)
+        return jsonify({"error": "Forbidden"}), 403
+
+    try:
+        from services.auction_scraper import scrape_source as _scrape
+    except ImportError as e:
+        return jsonify({"error": f"Scraper not available: {e}"}), 503
+
+    data = request.get_json(silent=True) or {}
+    target_slug = (data.get("slug") or "").strip()
+
+    # Load sources
+    q = supabase.table("auction_sources") \
+        .select("id,name,slug,listings_url,scrape_method,selectors") \
+        .eq("active", True)
+    if target_slug:
+        q = q.eq("slug", target_slug)
+
+    sources_res = q.execute()
+    sources = sources_res.data or []
+
+    if not sources:
+        return jsonify({"error": f"No active source found{' for slug: ' + target_slug if target_slug else ''}"}), 404
+
+    results = []
+    total_new = 0
+    total_updated = 0
+
+    for source in sources:
+        slug       = source.get("slug", "unknown")
+        t0         = time.time()
+        status     = "ok"
+        error_msg  = None
+        listings   = []
+        new_c = updated_c = 0
+
+        try:
+            listings = _scrape(source)
+            new_c, updated_c = _upsert_auction_listings(supabase, listings)
+        except Exception as exc:
+            status    = "failed"
+            error_msg = str(exc)[:500]
+            app.logger.error("[auction/scan:%s] %s", slug, exc, exc_info=True)
+
+        duration = round(time.time() - t0, 2)
+
+        try:
+            supabase.table("auction_scan_log").insert({
+                "source_id":        source["id"],
+                "source_slug":      slug,
+                "status":           status,
+                "duration_s":       duration,
+                "listings_found":   len(listings),
+                "listings_new":     new_c,
+                "listings_updated": updated_c,
+                "error_msg":        error_msg,
+            }).execute()
+        except Exception as log_e:
+            app.logger.warning("[auction/scan] Log write failed for %s: %s", slug, log_e)
+
+        try:
+            supabase.table("auction_sources").update({
+                "last_scanned_at": now_iso()
+            }).eq("id", source["id"]).execute()
+        except Exception:
+            pass
+
+        total_new     += new_c
+        total_updated += updated_c
+        results.append({
+            "slug":     slug,
+            "status":   status,
+            "found":    len(listings),
+            "new":      new_c,
+            "updated":  updated_c,
+            "duration_s": duration,
+            "error":    error_msg,
+        })
+
+    return jsonify({
+        "ok":           True,
+        "sources_scanned": len(results),
+        "total_new":    total_new,
+        "total_updated": total_updated,
+        "results":      results,
+    }), 200
+
+
+def _upsert_auction_listings(supabase_client, listings: list) -> tuple:
+    """
+    Shared upsert logic used by both manual scan and (future) async paths.
+    Returns (new_count, updated_count).
+    """
+    if not listings:
+        return 0, 0
+
+    source_urls = [l["source_url"] for l in listings]
+    try:
+        existing_res = supabase_client.table("auction_listings") \
+            .select("source_url") \
+            .in_("source_url", source_urls) \
+            .execute()
+        existing = {r["source_url"] for r in (existing_res.data or [])}
+    except Exception:
+        existing = set()
+
+    from datetime import datetime, timezone
+    now_ts = datetime.now(timezone.utc).isoformat()
+    new_c = updated_c = 0
+
+    for listing in listings:
+        is_new = listing["source_url"] not in existing
+        row = {k: v for k, v in listing.items() if not k.startswith("_")}
+        row["last_seen_at"] = now_ts
+        if is_new:
+            row["first_seen_at"] = now_ts
+
+        try:
+            supabase_client.table("auction_listings").upsert(
+                row, on_conflict="source_url", ignore_duplicates=False
+            ).execute()
+            if is_new:
+                new_c += 1
+            else:
+                updated_c += 1
+        except Exception as e:
+            app.logger.warning("[auction/upsert] Failed for %s: %s", listing.get("source_url"), e)
+
+    return new_c, updated_c
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5050)

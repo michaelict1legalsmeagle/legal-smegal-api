@@ -13,6 +13,22 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
 
+  # Daily auction discovery scan — 07:00 UTC
+  - type: cron
+    name: legal-smegal-auction-scan
+    env: python
+    schedule: "0 7 * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scan_auctions.py
+    plan: free
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+
   # Backend API (Python)
   - type: web
     name: legal-smegal-api

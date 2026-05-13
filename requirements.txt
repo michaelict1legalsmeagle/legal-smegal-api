@@ -8,3 +8,4 @@ pymupdf==1.25.5
 PyJWT==2.8.0
 anthropic
 psycopg[binary]==3.2.10
+beautifulsoup4==4.12.3
