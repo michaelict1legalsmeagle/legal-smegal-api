@@ -7698,5 +7698,450 @@ def auction_triangulation():
     return jsonify(result.data)
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# FORENSIC DIAGNOSTIC ENDPOINTS — TEMPORARY OBSERVABILITY LAYER
+# Purpose: runtime evidence only. No business logic. No side effects. No masking.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@app.route("/api/diag/runtime-health", methods=["GET", "OPTIONS"])
+def diag_runtime_health():
+    """
+    Forensic runtime health check. NO AUTH — read-only, no PII, no deal data.
+    Tests every database path independently with timing. Reports exact failure text.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    import socket as _socket
+
+    out = {"runtime": {}, "connectivity": {}, "tables": {}, "rpc": {}}
+
+    # ── RUNTIME IDENTITY ───────────────────────────────────────────────────
+    try:
+        out["runtime"]["hostname"] = _socket.gethostname()
+    except Exception as _e:
+        out["runtime"]["hostname"] = f"ERROR: {_e}"
+    out["runtime"]["database_url_configured"]     = bool(DATA_DATABASE_URL)
+    out["runtime"]["supabase_url_configured"]      = bool(SUPABASE_URL)
+    out["runtime"]["supabase_key_configured"]      = bool(SUPABASE_KEY)
+    out["runtime"]["supabase_db_url_configured"]   = bool(SUPABASE_DB_URL)
+    out["runtime"]["supabase_client_initialised"]  = supabase is not None
+    out["runtime"]["housing_provider"]             = HOUSING_PROVIDER
+    out["runtime"]["housing_rpc_name"]             = HOUSING_RPC_NAME
+
+    # ── HETZNER CONNECTIVITY ───────────────────────────────────────────────
+    _t0 = time.time()
+    try:
+        with psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row, connect_timeout=8) as _c:
+            with _c.cursor() as _cur:
+                _cur.execute("SELECT 1 AS ping")
+                _cur.fetchone()
+        out["connectivity"]["hetzner"] = {"ok": True, "latency_ms": round((time.time()-_t0)*1000,1), "error": None}
+    except Exception as _e:
+        out["connectivity"]["hetzner"] = {"ok": False, "latency_ms": round((time.time()-_t0)*1000,1), "error": str(_e)}
+
+    # ── SUPABASE DIRECT POSTGRES (SUPABASE_DB_URL) ────────────────────────
+    if SUPABASE_DB_URL:
+        _t0 = time.time()
+        try:
+            with psycopg.connect(SUPABASE_DB_URL, row_factory=dict_row, connect_timeout=8) as _c:
+                with _c.cursor() as _cur:
+                    _cur.execute("SELECT 1 AS ping")
+                    _cur.fetchone()
+            out["connectivity"]["supabase_direct_postgres"] = {"ok": True, "latency_ms": round((time.time()-_t0)*1000,1), "error": None}
+        except Exception as _e:
+            out["connectivity"]["supabase_direct_postgres"] = {"ok": False, "latency_ms": round((time.time()-_t0)*1000,1), "error": str(_e)}
+    else:
+        out["connectivity"]["supabase_direct_postgres"] = {"ok": False, "latency_ms": None, "error": "SUPABASE_DB_URL not set"}
+
+    # ── SUPABASE REST (PostgREST via supabase-py) ─────────────────────────
+    if supabase:
+        _t0 = time.time()
+        try:
+            supabase.table("deals").select("id").limit(1).execute()
+            out["connectivity"]["supabase_rest"] = {"ok": True, "latency_ms": round((time.time()-_t0)*1000,1), "error": None}
+        except Exception as _e:
+            out["connectivity"]["supabase_rest"] = {"ok": False, "latency_ms": round((time.time()-_t0)*1000,1), "error": str(_e)}
+    else:
+        out["connectivity"]["supabase_rest"] = {"ok": False, "latency_ms": None, "error": "Supabase client not initialised"}
+
+    # ── HETZNER TABLES ────────────────────────────────────────────────────
+    for _tbl in ("price_paid_raw_2025", "epc_certificates", "nspl_postcodes"):
+        try:
+            _r = data_query(f"SELECT COUNT(*) AS cnt FROM public.{_tbl}")
+            out["tables"][_tbl] = {"database": "hetzner", "exists": True, "row_count": int((_r[0].get("cnt") or 0)) if _r else 0, "error": None}
+        except Exception as _e:
+            out["tables"][_tbl] = {"database": "hetzner", "exists": False, "row_count": None, "error": str(_e)}
+
+    # ── SUPABASE TABLES ───────────────────────────────────────────────────
+    for _tbl, _sql in [
+        ("uk_hpi_monthly",  "SELECT COUNT(*) AS cnt FROM public.uk_hpi_monthly"),
+        ("uk_prms_monthly", "SELECT COUNT(*) AS cnt FROM public.uk_prms_monthly"),
+    ]:
+        try:
+            _r = supabase_data_query(_sql) if supabase else []
+            _cnt = int((_r[0].get("cnt") or 0)) if _r else 0
+            out["tables"][_tbl] = {
+                "database": "supabase",
+                "exists": bool(_r),
+                "row_count": _cnt,
+                "error": None if _r else "Empty result — GRANT missing or table empty",
+            }
+        except Exception as _e:
+            out["tables"][_tbl] = {"database": "supabase", "exists": False, "row_count": None, "error": str(_e)}
+
+    # ── CRITICAL CHECK: does price_paid_raw_2025 exist on Supabase? ───────
+    # If not, housing_comps_v1 will always return [].
+    if supabase:
+        try:
+            _pp_sb = supabase.table("price_paid_raw_2025").select("paon").limit(1).execute()
+            _found = len(_pp_sb.data or []) > 0
+            out["tables"]["price_paid_raw_2025_on_supabase"] = {
+                "database": "supabase", "sample_row_found": _found,
+                "error": None,
+                "diagnosis": "OK — housing_comps_v1 has data" if _found else "0 rows — housing_comps_v1 always returns []",
+            }
+        except Exception as _e:
+            out["tables"]["price_paid_raw_2025_on_supabase"] = {
+                "database": "supabase", "sample_row_found": False,
+                "error": str(_e),
+                "diagnosis": "Not accessible on Supabase — housing_comps_v1 has no data source",
+            }
+
+    # ── HPI ENGLAND SPOT CHECK ────────────────────────────────────────────
+    try:
+        _er = supabase_data_query(
+            "SELECT average_price, annual_change FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+            ("E92000001",)
+        ) if supabase else []
+        out["tables"]["uk_hpi_monthly_england_spot"] = {
+            "area_code": "E92000001", "value": _er[0] if _er else None, "queryable": bool(_er),
+        }
+    except Exception as _e:
+        out["tables"]["uk_hpi_monthly_england_spot"] = {"area_code": "E92000001", "value": None, "queryable": False, "error": str(_e)}
+
+    # ── HOUSING_COMPS_V1 LIVE PROBE ───────────────────────────────────────
+    if supabase:
+        _t0 = time.time()
+        try:
+            _rpc_res = supabase.rpc(HOUSING_RPC_NAME, {"in_postcode": "DL3 0PL", "in_radius_miles": 3.0, "in_limit": 5}).execute()
+            _rows = _rpc_res.data if hasattr(_rpc_res, "data") and isinstance(_rpc_res.data, list) else None
+            out["rpc"][HOUSING_RPC_NAME] = {
+                "test_postcode": "DL3 0PL", "latency_ms": round((time.time()-_t0)*1000,1),
+                "rows_returned": len(_rows) if _rows is not None else None,
+                "sample": (_rows[:2] if _rows else []),
+                "diagnosis": (
+                    "RPC returned rows — price_paid present on Supabase" if _rows
+                    else "RPC returned 0 rows — price_paid absent on Supabase" if _rows is not None
+                    else "RPC returned unexpected non-list result"
+                ),
+            }
+        except Exception as _e:
+            out["rpc"][HOUSING_RPC_NAME] = {
+                "test_postcode": "DL3 0PL", "latency_ms": round((time.time()-_t0)*1000,1),
+                "rows_returned": None, "sample": [], "error": str(_e),
+                "diagnosis": f"RPC threw exception: {_e}",
+            }
+    else:
+        out["rpc"][HOUSING_RPC_NAME] = {"rows_returned": None, "error": "Supabase client not initialised"}
+
+    return jsonify({"ok": True, "diag": out, "generated_at": now_iso()}), 200
+
+
+@app.route("/api/diag/deal-trace/<deal_id>", methods=["GET", "OPTIONS"])
+@require_auth
+def diag_deal_trace(deal_id: str):
+    """
+    Forensic valuation trace for a specific deal. AUTH REQUIRED.
+    Dry-runs the ceiling fallback chain + probes comparables + checks HPI benchmarks.
+    No mutations. Reports exact value and failure reason at every step.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    if not supabase:
+        return jsonify({"error": "Supabase client not initialised"}), 503
+
+    # ── LOAD DEAL ─────────────────────────────────────────────────────────
+    try:
+        _dr = supabase.table("deals").select(
+            "id,address,postcode,guide_price,deal_type,bid_ceiling,updated_at,"
+            "financials_json,area_json,summary_json"
+        ).eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+    except Exception as _e:
+        return jsonify({"error": f"Deal load failed: {_e}"}), 500
+
+    if not _dr.data:
+        return jsonify({"error": "Deal not found"}), 404
+
+    d        = _dr.data
+    area     = d.get("area_json") or {}
+    fins_inp = (d.get("financials_json") or {}).get("inputs") or (d.get("financials_json") or {})
+    housing  = area.get("housing") or {}
+    inf      = area.get("inference") or {}
+    b_price  = (inf.get("benchmarks") or {}).get("price") or {}
+    b_rental = (inf.get("benchmarks") or {}).get("rental") or {}
+    summary  = d.get("summary_json") or {}
+
+    out = {
+        "deal_id": deal_id,
+        "valuation_state": {
+            "address":                 d.get("address"),
+            "postcode":                d.get("postcode"),
+            "guide_price":             d.get("guide_price"),
+            "deal_type":               d.get("deal_type"),
+            "stored_bid_ceiling":      d.get("bid_ceiling"),
+            "area_json_present":       bool(area),
+            "area_fetch_status":       area.get("fetch_status"),
+            "area_fetched_at":         area.get("fetched_at"),
+            "area_code":               area.get("area_code"),
+            "inference_present":       bool(inf),
+            "benchmarks_present":      bool(inf.get("benchmarks")),
+            "financials_present":      bool(fins_inp),
+            "monthly_rent_input":      fins_inp.get("monthly_rent"),
+            "target_yield_input":      fins_inp.get("target_yield") or fins_inp.get("target_gross_yield"),
+            "updated_at":              d.get("updated_at"),
+        },
+        "ceiling_trace": {},
+        "comparables":   {},
+        "hpi_benchmarks":{},
+        "scenario_modelling": {},
+        "architectural_findings": [],
+    }
+
+    # ── CEILING FALLBACK CHAIN — DRY RUN (mirrors app.py:6785-6865 exactly) ──
+    _base = None
+
+    # Step 0: soldComps
+    comps = housing.get("soldComps") or housing.get("value") or []
+    _cprices = []
+    for _c in comps:
+        for _k in ("price_normalised", "hpi_adjusted_price", "price"):
+            _v = _c.get(_k)
+            if _v:
+                try:
+                    _vi = int(float(_v))
+                    if _vi > 5000:
+                        _cprices.append(_vi)
+                        break
+                except (TypeError, ValueError):
+                    pass
+    if _cprices:
+        _s = sorted(_cprices)
+        _n = len(_s)
+        _base = _s[_n//2] if _n % 2 else (_s[_n//2-1] + _s[_n//2]) // 2
+    out["ceiling_trace"]["step_0_sold_comps"] = {
+        "comp_count": len(comps), "usable_prices": len(_cprices), "value": _base, "fired": _base is not None,
+        "failure_reason": None if _base else (
+            "soldComps empty — housing_comps_v1 returned 0 rows" if not comps else "no valid prices in comps"
+        ),
+    }
+
+    # Fallback 1: housing.metrics.median_price
+    _f1 = None
+    if _base is None:
+        _mp = (housing.get("metrics") or {}).get("median_price")
+        if _mp:
+            try:
+                _f1v = float(_mp)
+                if _f1v > 5000:
+                    _f1 = int(_f1v)
+                    _base = _f1
+            except (TypeError, ValueError):
+                pass
+    out["ceiling_trace"]["fallback_1_median_price"] = {
+        "raw_value": (housing.get("metrics") or {}).get("median_price"),
+        "value": _f1, "fired": _f1 is not None,
+        "failure_reason": None if _f1 else "median_price null — derives from comps which are empty",
+    }
+
+    # Fallback 2: summary_json avg_sold_price
+    _f2 = None
+    if _base is None:
+        _sp = (summary.get("property") or {}).get("avg_sold_price") or (summary.get("area") or {}).get("avg_sold_price")
+        if _sp:
+            try:
+                _f2v = float(_sp)
+                if _f2v > 5000:
+                    _f2 = int(_f2v)
+                    _base = _f2
+            except (TypeError, ValueError):
+                pass
+    out["ceiling_trace"]["fallback_2_summary_avg_sold"] = {
+        "raw_value": (summary.get("property") or {}).get("avg_sold_price"),
+        "value": _f2, "fired": _f2 is not None,
+        "failure_reason": None if _f2 else "avg_sold_price not in summary_json",
+    }
+
+    # Fallback 3: guide_price × 1.15
+    _f3 = None
+    if _base is None:
+        _gp = d.get("guide_price")
+        if _gp:
+            try:
+                _gpv = float(_gp)
+                if _gpv > 5000:
+                    _f3 = round(_gpv * 1.15)
+                    _base = _f3
+            except (TypeError, ValueError):
+                pass
+    out["ceiling_trace"]["fallback_3_guide_price"] = {
+        "guide_price_raw": d.get("guide_price"),
+        "value": _f3, "fired": _f3 is not None,
+        "failure_reason": None if _f3 else "guide_price null or not extracted",
+    }
+
+    # Fallback 4: inference.benchmarks.price
+    _f4, _f4_key = None, None
+    if _base is None:
+        for _pk in ("regional", "national", "local"):
+            _pv = b_price.get(_pk)
+            if _pv and isinstance(_pv, (int, float)) and float(_pv) > 5000:
+                _f4 = int(float(_pv))
+                _f4_key = _pk
+                _base = _f4
+                break
+    out["ceiling_trace"]["fallback_4_hpi_benchmark"] = {
+        "available": {"regional": b_price.get("regional"), "national": b_price.get("national"), "local": b_price.get("local")},
+        "key_used": _f4_key, "value": _f4, "fired": _f4 is not None,
+        "failure_reason": None if _f4 else (
+            "no area_json inference — not fetched or pre-GRANT build" if not inf
+            else "all benchmark price keys are null/zero"
+        ),
+    }
+
+    # Fallback 5: live supabase_data_query
+    _f5, _f5_code, _f5_err = None, None, None
+    if _base is None and supabase:
+        for _code in ("E92000001", "England", "United Kingdom", "K02000001"):
+            try:
+                _r = supabase_data_query(
+                    "SELECT average_price FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+                    (_code,)
+                )
+                if _r:
+                    _v = safe_float(_r[0].get("average_price"))
+                    if _v and _v > 5000:
+                        _f5 = int(_v)
+                        _f5_code = _code
+                        _base = _f5
+                        break
+            except Exception as _fe:
+                _f5_err = str(_fe)
+                break
+    out["ceiling_trace"]["fallback_5_hpi_live"] = {
+        "area_code_used": _f5_code, "value": _f5, "fired": _f5 is not None,
+        "error": _f5_err,
+        "failure_reason": None if _f5 else (
+            _f5_err or "supabase_data_query returned [] for all England codes — GRANT missing or table empty"
+        ),
+    }
+
+    out["ceiling_trace"]["resolved"] = {
+        "base_valuation": _base,
+        "ceiling_will_compute": _base is not None and _base > 5000,
+        "failure_reason": None if _base else "All fallbacks exhausted — no base valuation",
+    }
+
+    # ── LIVE COMPARABLES PROBE ────────────────────────────────────────────
+    _pc = d.get("postcode") or ""
+    if supabase and _pc:
+        _t0 = time.time()
+        try:
+            _rr = supabase.rpc(HOUSING_RPC_NAME, {"in_postcode": _pc, "in_radius_miles": 3.0, "in_limit": 10}).execute()
+            _rows = _rr.data if hasattr(_rr, "data") and isinstance(_rr.data, list) else None
+            _rprices = [safe_float(r.get("price")) for r in (_rows or []) if safe_float(r.get("price")) and safe_float(r.get("price")) > 5000]  # type: ignore
+            out["comparables"] = {
+                "rpc": HOUSING_RPC_NAME, "postcode": _pc, "radius_miles": 3.0,
+                "latency_ms": round((time.time()-_t0)*1000,1),
+                "rows_returned": len(_rows) if _rows is not None else None,
+                "prices_found": len(_rprices),
+                "median_price": sorted(_rprices)[len(_rprices)//2] if _rprices else None,
+                "avg_price": round(sum(_rprices)/len(_rprices)) if _rprices else None,
+                "sample": (_rows[:3] if _rows else []),
+                "diagnosis": (
+                    f"{len(_rows)} rows — comparables available" if _rows
+                    else "0 rows — price_paid absent on Supabase" if _rows is not None
+                    else "unexpected result"
+                ),
+            }
+        except Exception as _e:
+            out["comparables"] = {"rpc": HOUSING_RPC_NAME, "postcode": _pc, "error": str(_e)}
+    else:
+        out["comparables"] = {"rpc": HOUSING_RPC_NAME, "error": "No postcode on deal or Supabase not available"}
+
+    # ── HPI BENCHMARKS: stored vs live ────────────────────────────────────
+    _lad = str(area.get("area_code") or "").strip()
+    out["hpi_benchmarks"] = {
+        "area_code": _lad,
+        "stored_inference": {
+            "price_regional": b_price.get("regional"),
+            "price_national": b_price.get("national"),
+            "price_local":    b_price.get("local"),
+            "rental_regional_gbp": b_rental.get("regional_rent_gbp"),
+        },
+        "live_lad_query":     None,
+        "live_england_query": None,
+    }
+    if _lad and supabase:
+        try:
+            _lr = supabase_data_query(
+                "SELECT date, average_price, annual_change FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+                (_lad,)
+            )
+            out["hpi_benchmarks"]["live_lad_query"] = _lr[0] if _lr else "empty"
+        except Exception as _e:
+            out["hpi_benchmarks"]["live_lad_query"] = f"ERROR: {_e}"
+    if supabase:
+        try:
+            _er = supabase_data_query(
+                "SELECT date, average_price, annual_change FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+                ("E92000001",)
+            )
+            out["hpi_benchmarks"]["live_england_query"] = _er[0] if _er else "empty — GRANT missing"
+        except Exception as _e:
+            out["hpi_benchmarks"]["live_england_query"] = f"ERROR: {_e}"
+
+    # ── SCENARIO MODELLING INPUTS ─────────────────────────────────────────
+    _regional_rent = b_rental.get("regional_rent_gbp")
+    _comp_avg = round(sum([safe_float(c.get("price")) for c in comps if safe_float(c.get("price")) and safe_float(c.get("price")) > 5000]) /  # type: ignore
+                      len([c for c in comps if safe_float(c.get("price")) and safe_float(c.get("price")) > 5000])) if comps else None
+    _implied_rent_from_comps = round((_comp_avg * 0.065) / 12) if _comp_avg else None
+    out["scenario_modelling"] = {
+        "implied_rent_from_comps":    _implied_rent_from_comps,
+        "regional_rent_benchmark_gbp": _regional_rent,
+        "hpi_price_available":        bool(b_price.get("regional") or b_price.get("national")),
+        "scenario_would_render":      bool(_implied_rent_from_comps or _regional_rent),
+        "frontend_fix_required":      True,  # b-scope bug + _impliedRent fallback — fix in outputs/
+        "failure_reason": (
+            None if (_implied_rent_from_comps or _regional_rent)
+            else "No implied rent source: comps empty, no rental benchmark in area_json. "
+                 "Fetch/re-fetch area for this deal after GRANT was applied."
+        ),
+    }
+
+    # ── ARCHITECTURAL FINDINGS ─────────────────────────────────────────────
+    findings = []
+    if out["comparables"].get("rows_returned") == 0:
+        findings.append({"severity": "CRITICAL", "component": "housing_comps_v1",
+            "finding": "RPC returned 0 rows — price_paid_raw_2025 absent on Supabase",
+            "impact": "Ceiling Fallbacks 0+1 permanently fail. All comp-backed valuation impossible."})
+    if not b_price.get("regional") and not b_price.get("national"):
+        findings.append({"severity": "HIGH", "component": "inference.benchmarks.price",
+            "finding": "No regional/national HPI price in stored area_json",
+            "impact": "Fallback 4 cannot fire. area_json built pre-GRANT or not yet fetched post-GRANT."})
+    if not _regional_rent:
+        findings.append({"severity": "HIGH", "component": "inference.benchmarks.rental",
+            "finding": "No regional rent benchmark in area_json",
+            "impact": "Scenario modelling has no rental input. Deploy legalsmegal-area.html fix."})
+    if not area:
+        findings.append({"severity": "CRITICAL", "component": "area_json",
+            "finding": "area_json is NULL — not yet fetched",
+            "impact": "Fallback 4 dead. No rental benchmark. Scenario blank."})
+    out["architectural_findings"] = findings
+
+    return jsonify({"ok": True, "trace": out, "generated_at": now_iso()}), 200
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5050)
