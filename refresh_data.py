@@ -105,7 +105,14 @@ def refresh_hpi():
             area_code  = (row.get("AreaCode") or row.get("RegionName") or "").strip()
             date_str   = (row.get("Date") or "").strip()
             avg_price  = row.get("AveragePrice") or row.get("Average price") or None
-            pct_change = row.get("AnnualChange") or row.get("12m % change") or None
+            # Land Registry HPI CSV column name varies by year:
+            # 2024+ format: "Annual % Change"
+            # Older format:  "AnnualChange" or "12m % change"
+            pct_change = (row.get("Annual % Change")
+                          or row.get("AnnualChange")
+                          or row.get("12m % change")
+                          or row.get("Annual Percentage Change")
+                          or None)
             if not area_code or not date_str:
                 continue
             if "/" in date_str:
