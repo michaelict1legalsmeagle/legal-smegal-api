@@ -96,6 +96,8 @@ def scrape_source(source: dict) -> list[dict]:
     try:
         if method == "firecrawl":
             results = _scrape_firecrawl(source)
+        elif method == "http_seed":
+            results = _scrape_http_seed(source)
         else:
             results = _scrape_http(source)
     except Exception as exc:
@@ -161,28 +163,48 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
             price_match = re.search(r"£([\d,]+(?:\.\d+)?)", text)
         guide_price_raw = price_match.group(1).replace(",", "") if price_match else None
 
-        # Extract address — handles 5 Auction House text format variations:
-        # A: "Property for Auction in REGION - ADDRESS Lot N *Guide..."
-        # B: "Property for Auction in REGION ADDRESS Lot N *Guide..."  (no dash)
-        # C: "ADDRESS Lot N *Guide..."  (no region prefix)
-        # D: "Lot N ADDRESS *Guide..."  (lot-first, address after)
-        # E: postcode-fallback when no other pattern matches
+        # Extract address — handles 6 format variations:
+        # A: "Property for Auction in REGION - ADDRESS Lot N..."   (national search)
+        # B: "Property for Auction in REGION ADDRESS Lot N..."     (no dash)
+        # C: "ADDRESS Lot N..."                                    (no prefix)
+        # D: "Lot N *Guide | £X (plus fees) TYPE ADDRESS"          (event pages)
+        # E: "Lot N TYPE ADDRESS"                                   (some regional)
+        # F: postcode-bounded fallback
         address = None
 
         if lot_match:
             lot_start = text.find(lot_match.group(0))
             before_lot = text[:lot_start]
-            # Strip region prefix (handles both " - " and space-only separators)
+            after_lot  = text[lot_start + len(lot_match.group(0)):].strip()
+
+            # Try before_lot path (national search: address before lot number)
             before_lot = re.sub(
                 r"^Property\s+(?:for\s+)?(?:Auction|Sale)\s+in\s+[A-Za-z,\s&']+?"
                 r"(?:\s*-\s*|\s{2,}|\s+(?=[A-Z]\d|[A-Z]{2}\d|\d))",
                 "", before_lot, flags=re.IGNORECASE
             ).strip()
             before_lot = re.sub(r"\s*[-\u2013]\s*$", "", before_lot).strip()
+
             if len(before_lot) > 8:
                 address = _clean_text(before_lot)
+            else:
+                # Event page path: address is AFTER lot number
+                # Strip "*Guide | £X - £Y (plus fees)" price prefix
+                after_lot = re.sub(
+                    r"^\*?Guide\s*\|\s*£[\d,]+(?:\s*[–\-]\s*£[\d,]+)?\s*(?:\(plus fees\))?\s*",
+                    "", after_lot, flags=re.IGNORECASE
+                ).strip()
+                # Strip leading property type descriptor
+                after_lot = re.sub(
+                    r"^(?:\d+\s+(?:Bed|Bedroom)\s+)?(?:Terraced|Semi-Detached|Detached|"
+                    r"End-Terraced|Flat|Apartment|Bungalow|Land|Commercial|Mixed Use|"
+                    r"Studio|HMO|Maisonette)(?:\s+House|\s+Flat|\s+Bungalow)?\s+",
+                    "", after_lot, flags=re.IGNORECASE
+                ).strip()
+                if len(after_lot) > 8:
+                    address = _clean_text(after_lot[:200])
 
-        # Postcode-bounded fallback (Lot-first or no prefix match)
+        # Postcode-bounded fallback
         if not address:
             pc_m = re.search(r"([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})", text)
             if pc_m:
@@ -190,6 +212,11 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
                 candidate = re.sub(
                     r"^Property\s+(?:for\s+)?(?:Auction|Sale)\s+in\s+[A-Za-z,\s&']+?"
                     r"(?:\s*-\s*|\s{2,}|\s+(?=[A-Z]\d|[A-Z]{2}\d|\d))",
+                    "", candidate, flags=re.IGNORECASE
+                ).strip()
+                # Also strip guide prefix from postcode candidate
+                candidate = re.sub(
+                    r"^\*?Guide\s*\|\s*£[\d,]+(?:\s*[–\-]\s*£[\d,]+)?\s*(?:\(plus fees\))?\s*",
                     "", candidate, flags=re.IGNORECASE
                 ).strip()
                 if len(candidate) > 8:
@@ -221,6 +248,111 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
         })
 
     return results
+
+
+
+
+def _scrape_http_seed(source: dict) -> list[dict]:
+    """
+    Two-step scraper for Auction House future-auction-dates approach.
+    Step 1: Scrape the diary page (listings_url) — extract future event lot URLs + dates.
+    Step 2: For each future event URL, scrape lots using text_parse.
+    Guarantees ONLY upcoming lots are returned (diary only lists future events).
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        log.error("[SCAN] beautifulsoup4 not installed")
+        return []
+
+    slug     = source.get("slug", "unknown")
+    base_url = "https://www.auctionhouse.co.uk"
+    diary_url = source.get("listings_url", "")
+    session  = _get_session()
+    today    = datetime.now(timezone.utc).date()
+
+    # ── Step 1: Fetch diary and extract future event lot URLs ────────────
+    try:
+        resp = session.get(diary_url, timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+    except Exception as e:
+        log.error("[SCAN:%s] Diary fetch failed: %s", slug, e)
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Diary table rows: each row has date text + "View Lots" link
+    # Link pattern: /{region}/auction/lots/{id} or /online/auction/{year}/{m}/{d}
+    event_entries: list[dict] = []
+    for link in soup.select("a[href*='/auction/lots/'], a[href*='/online/auction/']"):
+        href = link.get("href", "")
+        if not href:
+            continue
+        full_url = href if href.startswith("http") else base_url + href
+
+        # Extract date from the surrounding table row
+        row = link.find_parent("tr")
+        row_text = row.get_text(separator=" ", strip=True) if row else ""
+
+        # Parse date from row: formats "12/05/2026" or "Tue 12/05/2026"
+        date_match = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", row_text)
+        event_date = None
+        if date_match:
+            try:
+                d, m, y = int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))
+                event_date = date(y, m, d)
+            except (ValueError, TypeError):
+                pass
+
+        # Skip events in the past (keep today and future)
+        if event_date and event_date < today:
+            continue
+
+        # Extract auctioneer name from row
+        auctioneer = ""
+        td_cells = row.select("td") if row else []
+        if len(td_cells) >= 3:
+            auctioneer = td_cells[2].get_text(strip=True)
+
+        event_entries.append({
+            "url":         full_url,
+            "event_date":  event_date.isoformat() if event_date else None,
+            "auctioneer":  auctioneer or source.get("name", "Auction House"),
+        })
+
+    log.info("[SCAN:%s] Found %d future auction events on diary", slug, len(event_entries))
+
+    # ── Step 2: Scrape each event lot page ───────────────────────────────
+    all_results: list[dict] = []
+    selectors = source.get("selectors") or {}
+
+    for event in event_entries[:MAX_PAGES]:  # cap at MAX_PAGES events per run
+        time.sleep(PAGE_DELAY_S)
+        try:
+            eresp = session.get(event["url"], timeout=HTTP_TIMEOUT)
+            eresp.raise_for_status()
+        except Exception as e:
+            log.warning("[SCAN:%s] Event page failed %s: %s", slug, event["url"], e)
+            continue
+
+        esoup = BeautifulSoup(eresp.text, "html.parser")
+
+        # Use existing text_parse extraction on event page
+        raw_lots = _extract_listings_from_text(esoup, {
+            **source,
+            "listings_url": event["url"],
+            "name": event.get("auctioneer") or source.get("name", "Auction House"),
+        })
+
+        # Inject auction_date from diary (more reliable than extracting from lot text)
+        for lot in raw_lots:
+            if event.get("event_date"):
+                lot["_raw_auction_date"] = event["event_date"]
+
+        all_results.extend(raw_lots)
+        log.info("[SCAN:%s] Event %s: %d lots", slug, event["url"][-30:], len(raw_lots))
+
+    return all_results
 
 
 # ── HTTP SCRAPER ─────────────────────────────────────────────────────────────
