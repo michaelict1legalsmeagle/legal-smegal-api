@@ -118,15 +118,16 @@ def scrape_source(source: dict) -> list[dict]:
 
 def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
     """
-    Special parser for pages where all lot data is in anchor text (Auction House UK).
-    Finds all <a title="View property details"> links and parses their text content.
+    Parser for Auction House UK pages.
+    National search page: all data is inside the <a> link text.
+    Regional pages: lot number is in the <a> link; address/price are in sibling elements.
+    Solution: use the PARENT element text (which contains both link + siblings).
     """
     page_url = source.get("listings_url", "")
     results = []
 
     containers = soup.select('a[title="View property details"]')
     if not containers:
-        # Fallback: any lot-looking links
         containers = soup.select('a[href*="/auction/lot/"]')
 
     for el in containers:
@@ -134,7 +135,14 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
         if not href:
             continue
         detail_url = urljoin(page_url, href)
-        text = el.get_text(separator=" ", strip=True)
+
+        # Use parent element text — captures address/price from sibling elements
+        # on regional pages where the <a> only contains the lot number.
+        link_text   = el.get_text(separator=" ", strip=True)
+        parent      = el.parent
+        parent_text = parent.get_text(separator=" ", strip=True) if parent else link_text
+        # Use parent text if it's meaningfully richer (has address/price data)
+        text = parent_text if len(parent_text) > len(link_text) + 8 else link_text
 
         # Extract lot number: "Lot 42" or "Lot 1"
         lot_match = re.search(r"\bLot\s+(\d+)", text, re.IGNORECASE)
