@@ -146,30 +146,43 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
             price_match = re.search(r"£([\d,]+(?:\.\d+)?)", text)
         guide_price_raw = price_match.group(1).replace(",", "") if price_match else None
 
-        # Extract address: remove the "Property for Auction in [REGION]" prefix,
-        # then take text up to "Lot N".
-        # Handles both " - " delimited and prefix-only formats.
+        # Extract address — handles 5 Auction House text format variations:
+        # A: "Property for Auction in REGION - ADDRESS Lot N *Guide..."
+        # B: "Property for Auction in REGION ADDRESS Lot N *Guide..."  (no dash)
+        # C: "ADDRESS Lot N *Guide..."  (no region prefix)
+        # D: "Lot N ADDRESS *Guide..."  (lot-first, address after)
+        # E: postcode-fallback when no other pattern matches
         address = None
-        # Strip "Property for Auction in ... -" or "Property for Sale in ... -" prefix
-        clean_text = re.sub(
-            r"^Property (?:for Auction|for Sale|Auction) in[^\-]+-\s*", "", text, flags=re.IGNORECASE
-        ).strip()
-        # Also try without " - ": just remove "Property for Auction in [REGION]"
-        if clean_text == text.strip():
-            clean_text = re.sub(
-                r"^Property (?:for Auction|for Sale|Auction) in\s+[A-Z][^\n]+?(?=\d|[A-Z]{2}\d)", "",
-                text, flags=re.IGNORECASE
-            ).strip()
-        # Now take everything before "Lot N"
+
         if lot_match:
-            lot_pos = clean_text.upper().find("LOT ")
-            if lot_pos > 5:  # sanity: at least 5 chars before Lot
-                address = _clean_text(clean_text[:lot_pos])
-        # Fallback: take up to "Guide Price" marker
+            lot_start = text.find(lot_match.group(0))
+            before_lot = text[:lot_start]
+            # Strip region prefix (handles both " - " and space-only separators)
+            before_lot = re.sub(
+                r"^Property\s+(?:for\s+)?(?:Auction|Sale)\s+in\s+[A-Za-z,\s&']+?"
+                r"(?:\s*-\s*|\s{2,}|\s+(?=[A-Z]\d|[A-Z]{2}\d|\d))",
+                "", before_lot, flags=re.IGNORECASE
+            ).strip()
+            before_lot = re.sub(r"\s*[-\u2013]\s*$", "", before_lot).strip()
+            if len(before_lot) > 8:
+                address = _clean_text(before_lot)
+
+        # Postcode-bounded fallback (Lot-first or no prefix match)
         if not address:
-            gp_pos = clean_text.upper().find("*GUIDE")
-            if gp_pos > 5:
-                address = _clean_text(clean_text[:gp_pos])
+            pc_m = re.search(r"([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})", text)
+            if pc_m:
+                candidate = text[:pc_m.end()]
+                candidate = re.sub(
+                    r"^Property\s+(?:for\s+)?(?:Auction|Sale)\s+in\s+[A-Za-z,\s&']+?"
+                    r"(?:\s*-\s*|\s{2,}|\s+(?=[A-Z]\d|[A-Z]{2}\d|\d))",
+                    "", candidate, flags=re.IGNORECASE
+                ).strip()
+                if len(candidate) > 8:
+                    address = _clean_text(candidate)
+
+        # Strip leading "Lot N" that may have leaked into address
+        if address and lot_match:
+            address = re.sub(r"^Lot\s+\d+\s*", "", address, flags=re.IGNORECASE).strip() or None
 
         # Extract property type
         type_match = re.search(
