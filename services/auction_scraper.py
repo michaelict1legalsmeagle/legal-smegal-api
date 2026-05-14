@@ -114,6 +114,70 @@ def scrape_source(source: dict) -> list[dict]:
     return normalised
 
 
+
+
+def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
+    """
+    Special parser for pages where all lot data is in anchor text (Auction House UK).
+    Finds all <a title="View property details"> links and parses their text content.
+    """
+    page_url = source.get("listings_url", "")
+    results = []
+
+    containers = soup.select('a[title="View property details"]')
+    if not containers:
+        # Fallback: any lot-looking links
+        containers = soup.select('a[href*="/auction/lot/"]')
+
+    for el in containers:
+        href = el.get("href", "")
+        if not href:
+            continue
+        detail_url = urljoin(page_url, href)
+        text = el.get_text(separator=" ", strip=True)
+
+        # Extract lot number: "Lot 42" or "Lot 1"
+        lot_match = re.search(r"\bLot\s+(\d+)", text, re.IGNORECASE)
+        lot_number = f"Lot {lot_match.group(1)}" if lot_match else None
+
+        # Extract guide price: "*Guide | £35,000" or "£35,000 - £40,000"
+        price_match = re.search(r"[£*]\s*Guide\s*\|?\s*£?([\d,]+(?:\.\d+)?)", text, re.IGNORECASE)
+        if not price_match:
+            price_match = re.search(r"£([\d,]+(?:\.\d+)?)", text)
+        guide_price_raw = price_match.group(1).replace(",", "") if price_match else None
+
+        # Extract address: text before "Lot N" — take the part after " - " if present
+        address = None
+        if " - " in text:
+            addr_part = text.split(" - ", 1)[1]
+            # Remove everything from "Lot N" onward
+            if lot_match:
+                addr_part = addr_part[:addr_part.upper().find("LOT ")].strip()
+            address = _clean_text(addr_part) if addr_part else None
+
+        # Extract property type
+        type_match = re.search(
+            r"\b(\d+\s+Bed\s+)?(Terraced House|Detached House|Semi-Detached House|"
+            r"Bungalow|Flat|Apartment|Land|Commercial|Mixed Use|HMO|Other)\b",
+            text, re.IGNORECASE
+        )
+        property_type = type_match.group(0).strip() if type_match else None
+
+        results.append({
+            "_raw_source_url":     detail_url,
+            "_raw_lot_number":     lot_number,
+            "_raw_address":        address,
+            "_raw_guide_price":    guide_price_raw,
+            "_raw_auction_date":   None,  # not in list view — on detail page
+            "_raw_property_type":  property_type,
+            "_raw_legal_pack_url": None,
+            "_source_id":          source.get("id"),
+            "_auction_house":      source.get("name"),
+        })
+
+    return results
+
+
 # ── HTTP SCRAPER ─────────────────────────────────────────────────────────────
 
 def _scrape_http(source: dict) -> list[dict]:
@@ -154,6 +218,15 @@ def _scrape_http(source: dict) -> list[dict]:
             break
 
         soup = BeautifulSoup(resp.text, "html.parser")
+        # Check for text_parse mode (Auction House style — data in link text)
+        if selectors.get("text_parse"):
+            page_listings = _extract_listings_from_text(soup, source)
+            all_listings.extend(page_listings)
+            log.info("[SCAN:%s] Page %d (text_parse): %d extracted", slug, pages_fetched + 1, len(page_listings))
+            pages_fetched += 1
+            current_url = None  # no pagination in text_parse mode for now
+            continue
+
         containers = soup.select(container_sel)
 
         if not containers:
