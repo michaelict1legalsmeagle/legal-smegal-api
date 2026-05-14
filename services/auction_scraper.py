@@ -144,6 +144,13 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
         # Use parent text if it's meaningfully richer (has address/price data)
         text = parent_text if len(parent_text) > len(link_text) + 8 else link_text
 
+        # Detect past/sold lots (AH regional pages mix past results with upcoming)
+        # These start with "Sold", "Postponed", "Withdrawn" in the parent text
+        _is_sold = bool(re.match(
+            r'^(?:Sold|Postponed|Withdrawn|Withheld)',
+            text.strip(), re.IGNORECASE
+        ))
+
         # Extract lot number: "Lot 42" or "Lot 1"
         lot_match = re.search(r"\bLot\s+(\d+)", text, re.IGNORECASE)
         lot_number = f"Lot {lot_match.group(1)}" if lot_match else None
@@ -210,6 +217,7 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
             "_raw_legal_pack_url": None,
             "_source_id":          source.get("id"),
             "_auction_house":      source.get("name"),
+            "_is_sold":            _is_sold,
         })
 
     return results
@@ -446,12 +454,30 @@ def _normalise_listing(raw: dict, source: dict) -> Optional[dict]:
         log.debug("[SCRAPER] Skipping off-domain URL: %s (source domain: %s)", source_url, source_domain)
         return None
 
+    # Skip sold/postponed lots from Auction House regional pages
+    # These are past results and not useful for discovery
+    if raw.get("_is_sold"):
+        return None
+
+    # Clean address — strip "Sold £X", "Postponed", "Sold Prior" prefixes
+    raw_addr = raw.get("_raw_address") or ""
+    clean_addr = re.sub(
+        r"^(?:Sold\s+(?:Prior\s+)?(?:£[\d,]+\+?\s*)?|Postponed\s+|Withdrawn\s+|Withheld\s+)",
+        "", raw_addr, flags=re.IGNORECASE
+    ).strip()
+    # Also strip leading property type descriptors (e.g. "2 Bed Semi-Detached House ")
+    clean_addr = re.sub(
+        r"^(?:\d+\s+(?:Bed|Bedroom)?\s+)?(?:Terraced|Semi-Detached|Detached|End-Terraced|"
+        r"Flat|Apartment|Bungalow|Land|Commercial|Mixed Use|Studio|HMO)(?:\s+House|\s+Bungalow)?\s+",
+        "", clean_addr, flags=re.IGNORECASE
+    ).strip()
+
     return {
         "source_id":       raw.get("_source_id"),
         "source_url":      source_url,
         "auction_house":   raw.get("_auction_house"),
         "lot_number":      _clean_text(raw.get("_raw_lot_number")),
-        "address":         _clean_text(raw.get("_raw_address")),
+        "address":         _clean_text(clean_addr) if clean_addr else _clean_text(raw_addr),
         "postcode":        _extract_postcode(raw.get("_raw_address")),
         "guide_price":     _parse_price(raw.get("_raw_guide_price")),
         "auction_date":    _parse_date(raw.get("_raw_auction_date")) if _is_valid_date(_parse_date(raw.get("_raw_auction_date"))) else None,
