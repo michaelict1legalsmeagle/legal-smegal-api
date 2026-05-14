@@ -146,14 +146,30 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
             price_match = re.search(r"£([\d,]+(?:\.\d+)?)", text)
         guide_price_raw = price_match.group(1).replace(",", "") if price_match else None
 
-        # Extract address: text before "Lot N" — take the part after " - " if present
+        # Extract address: remove the "Property for Auction in [REGION]" prefix,
+        # then take text up to "Lot N".
+        # Handles both " - " delimited and prefix-only formats.
         address = None
-        if " - " in text:
-            addr_part = text.split(" - ", 1)[1]
-            # Remove everything from "Lot N" onward
-            if lot_match:
-                addr_part = addr_part[:addr_part.upper().find("LOT ")].strip()
-            address = _clean_text(addr_part) if addr_part else None
+        # Strip "Property for Auction in ... -" or "Property for Sale in ... -" prefix
+        clean_text = re.sub(
+            r"^Property (?:for Auction|for Sale|Auction) in[^\-]+-\s*", "", text, flags=re.IGNORECASE
+        ).strip()
+        # Also try without " - ": just remove "Property for Auction in [REGION]"
+        if clean_text == text.strip():
+            clean_text = re.sub(
+                r"^Property (?:for Auction|for Sale|Auction) in\s+[A-Z][^\n]+?(?=\d|[A-Z]{2}\d)", "",
+                text, flags=re.IGNORECASE
+            ).strip()
+        # Now take everything before "Lot N"
+        if lot_match:
+            lot_pos = clean_text.upper().find("LOT ")
+            if lot_pos > 5:  # sanity: at least 5 chars before Lot
+                address = _clean_text(clean_text[:lot_pos])
+        # Fallback: take up to "Guide Price" marker
+        if not address:
+            gp_pos = clean_text.upper().find("*GUIDE")
+            if gp_pos > 5:
+                address = _clean_text(clean_text[:gp_pos])
 
         # Extract property type
         type_match = re.search(
@@ -473,6 +489,9 @@ def _parse_price(v: Any) -> Optional[float]:
     # Take the first number if a range is given
     s = s.split("-")[0].split("–")[0].strip()
 
+    # Strip trailing annotations: "(plus fees)", "plus fees", "guide price", etc.
+    s = re.sub(r"\s*\(.*?\).*$", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"\s*(plus fees|guide|plus|fees).*$", "", s, flags=re.IGNORECASE).strip()
     # Remove currency symbols, commas, spaces
     s = re.sub(r"[£$,\s]", "", s)
 
