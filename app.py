@@ -8534,13 +8534,16 @@ def _upsert_auction_listings(supabase_client, listings: list) -> tuple:
         if is_new:
             row["first_seen_at"] = now_ts
 
+        _preserve = {"guide_price", "legal_pack_url", "auction_date",
+                     "address", "postcode", "property_type", "tenure", "lot_number"}
         try:
-            supabase_client.table("auction_listings").upsert(
-                row, on_conflict="source_url", ignore_duplicates=False
-            ).execute()
             if is_new:
+                supabase_client.table("auction_listings").insert(row).execute()
                 new_c += 1
             else:
+                _update = {k: v for k, v in row.items()
+                           if v is not None or k not in _preserve}
+                supabase_client.table("auction_listings")                     .update(_update)                     .eq("source_url", listing.get("source_url"))                     .execute()
                 updated_c += 1
         except Exception as e:
             app.logger.warning("[auction/upsert] Failed for %s: %s", listing.get("source_url"), e)

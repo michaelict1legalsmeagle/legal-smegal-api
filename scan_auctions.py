@@ -116,15 +116,24 @@ def _upsert_listings(supabase: Client, listings: list[dict]) -> tuple[int, int]:
         if is_new:
             row["first_seen_at"] = row["last_seen_at"]
 
+        # Fields that hold persistent value — never overwrite with null.
+        # guide_price, legal_pack_url etc. may become null on a rescan when
+        # an auction has passed (page structure changes) but the original value
+        # remains correct and useful for investors.
+        _preserve = {"guide_price", "legal_pack_url", "auction_date",
+                     "address", "postcode", "property_type", "tenure", "lot_number"}
+
         try:
-            supabase.table("auction_listings").upsert(
-                row,
-                on_conflict="source_url",
-                ignore_duplicates=False,
-            ).execute()
             if is_new:
+                supabase.table("auction_listings").insert(row).execute()
                 new_count += 1
             else:
+                # Only send fields that are non-null, PLUS always-update fields
+                _update_row = {
+                    k: v for k, v in row.items()
+                    if v is not None or k not in _preserve
+                }
+                supabase.table("auction_listings")                     .update(_update_row)                     .eq("source_url", listing["source_url"])                     .execute()
                 updated_count += 1
         except Exception as e:
             log.warning("Upsert failed for %s: %s", listing["source_url"], e)
