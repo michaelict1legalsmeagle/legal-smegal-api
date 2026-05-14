@@ -8209,7 +8209,7 @@ def auction_listings_list():
 
         q = supabase.table("auction_listings") \
             .select(
-                "id,source_id,auction_house,lot_number,address,postcode,"
+                "id,source_id,source_url,auction_house,lot_number,address,postcode,"
                 "guide_price,auction_date,property_type,legal_pack_url,"
                 "status,converted_deal_id,first_seen_at,last_seen_at,"
                 "auction_sources!auction_listings_source_id_fkey(slug,name)",
