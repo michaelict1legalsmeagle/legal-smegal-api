@@ -8454,8 +8454,12 @@ def auction_manual_scan():
         new_c = updated_c = 0
 
         try:
-            listings = _scrape(source)
+            _meta: dict = {}
+            listings = _scrape(source, meta=_meta)
             new_c, updated_c = _upsert_auction_listings(supabase, listings)
+            if not listings and status == "ok":
+                status = "partial"
+                error_msg = _meta.get("partial_reason", "zero_listings")
         except Exception as exc:
             status    = "failed"
             error_msg = str(exc)[:500]
