@@ -344,7 +344,7 @@ def _normalise_listing(raw: dict, source: dict) -> Optional[dict]:
         "address":         _clean_text(raw.get("_raw_address")),
         "postcode":        _extract_postcode(raw.get("_raw_address")),
         "guide_price":     _parse_price(raw.get("_raw_guide_price")),
-        "auction_date":    _parse_date(raw.get("_raw_auction_date")),
+        "auction_date":    _parse_date(raw.get("_raw_auction_date")) if _is_valid_date(_parse_date(raw.get("_raw_auction_date"))) else None,
         "property_type":   _clean_text(raw.get("_raw_property_type")),
         "legal_pack_url":  _clean_url(raw.get("_raw_legal_pack_url")),
         "status":          "active",
@@ -464,3 +464,14 @@ def _parse_date(v: Any) -> Optional[str]:
             return f"{y}-{m:02d}-01"
 
     return None
+
+
+def _is_valid_date(date_str: Optional[str]) -> bool:
+    """Reject dates outside the plausible auction window (2024-2028)."""
+    if not date_str:
+        return False
+    try:
+        yr = int(date_str[:4])
+        return 2024 <= yr <= 2028
+    except (ValueError, TypeError):
+        return False
