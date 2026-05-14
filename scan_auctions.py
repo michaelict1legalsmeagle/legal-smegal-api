@@ -63,6 +63,37 @@ def _get_supabase() -> Client:
         raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
     return create_client(url, key)
 
+# ── Circuit breaker ──────────────────────────────────────────────────────────
+# Prevent chronic partial-failure sources from burning Firecrawl credits.
+# A source whose last N scans were ALL non-ok gets skipped for that run.
+# The circuit is re-checked every run — it auto-closes if a scan succeeds.
+
+CIRCUIT_BREAKER_SLUGS     = {"allsop"}  # extend as needed
+CIRCUIT_BREAKER_THRESHOLD = 5           # consecutive non-ok runs to open
+
+
+def _check_circuit_open(supabase: Client, slug: str, threshold: int) -> bool:
+    """Return True if slug has had `threshold` consecutive non-ok scans.
+    Fails open on error — allows the scrape if the check itself errors.
+    """
+    try:
+        res = (
+            supabase.table("auction_scan_log")
+            .select("status")
+            .eq("source_slug", slug)
+            .order("scanned_at", desc=True)
+            .limit(threshold)
+            .execute()
+        )
+        rows = res.data or []
+        if len(rows) < threshold:
+            return False  # not enough history to be confident — allow
+        return all(r["status"] != "ok" for r in rows)
+    except Exception as e:
+        log.warning("[SCAN:%s] Circuit breaker check failed: %s", slug, e)
+        return False  # fail open
+
+
 
 # ── Upsert listings ──────────────────────────────────────────────────────────
 
@@ -152,9 +183,13 @@ def _log_scan(
     listings_new: int,
     listings_updated: int,
     error_msg: str | None = None,
+    partial_reason: str | None = None,
+    seed_urls_found: int | None = None,
+    firecrawl_status_code: int | None = None,
+    listings_skipped: int = 0,
 ) -> None:
     try:
-        supabase.table("auction_scan_log").insert({
+        row: dict = {
             "source_id":        source.get("id"),
             "source_slug":      source.get("slug", "unknown"),
             "status":           status,
@@ -162,8 +197,19 @@ def _log_scan(
             "listings_found":   listings_found,
             "listings_new":     listings_new,
             "listings_updated": listings_updated,
+            "listings_skipped": listings_skipped,
             "error_msg":        error_msg,
-        }).execute()
+        }
+        # New observability columns — only included when set.
+        # Migration must be run before deployment; omitting here is safe
+        # because Postgres INSERT ignores columns not in the statement.
+        if partial_reason is not None:
+            row["partial_reason"] = partial_reason
+        if seed_urls_found is not None:
+            row["seed_urls_found"] = seed_urls_found
+        if firecrawl_status_code is not None:
+            row["firecrawl_status_code"] = firecrawl_status_code
+        supabase.table("auction_scan_log").insert(row).execute()
     except Exception as e:
         # Non-fatal: if logging fails, we continue
         log.warning("Failed to write scan log for %s: %s", source.get("slug"), e)
@@ -225,14 +271,34 @@ def main() -> None:
         error_msg   = None
         listings    = []
         new_c = updated_c = 0
+        _meta: dict = {}  # observability data from scraper
+
+        # ── Circuit breaker ──────────────────────────────────────────────
+        if slug in CIRCUIT_BREAKER_SLUGS and _check_circuit_open(supabase, slug, CIRCUIT_BREAKER_THRESHOLD):
+            log.warning(
+                "[SCAN:%s] Circuit open — %d consecutive non-ok runs — skipping",
+                slug, CIRCUIT_BREAKER_THRESHOLD,
+            )
+            _log_scan(
+                supabase=supabase, source=source, status="partial",
+                duration_s=0.0, listings_found=0, listings_new=0, listings_updated=0,
+                error_msg=f"circuit_open after {CIRCUIT_BREAKER_THRESHOLD} consecutive failures",
+                partial_reason="circuit_open",
+            )
+            _touch_source(supabase, source["id"])
+            source_results.append({"slug": slug, "status": "partial"})
+            continue
+        # ────────────────────────────────────────────────────────────────
 
         try:
             # ── SCRAPE ──────────────────────────────────────────────────
-            listings = scrape_source(source)
+            listings = scrape_source(source, meta=_meta)
 
             if not listings:
                 log.warning("[SCAN:%s] WARN: 0 listings found — check selectors or source health", slug)
                 status = "partial"
+                if not error_msg:
+                    error_msg = _meta.get("partial_reason", "zero_listings")
 
             # ── UPSERT ──────────────────────────────────────────────────
             new_c, updated_c = _upsert_listings(supabase, listings)
@@ -254,6 +320,10 @@ def main() -> None:
             listings_new=new_c,
             listings_updated=updated_c,
             error_msg=error_msg,
+            partial_reason=_meta.get("partial_reason"),
+            seed_urls_found=_meta.get("seed_urls_found"),
+            firecrawl_status_code=_meta.get("firecrawl_status_code"),
+            listings_skipped=_meta.get("listings_skipped", 0),
         )
         _touch_source(supabase, source["id"])
 
