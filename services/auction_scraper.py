@@ -36,7 +36,7 @@ import os
 import re
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, date, timezone
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -76,7 +76,7 @@ def _get_session() -> requests.Session:
 
 # ── PUBLIC ENTRY POINT ───────────────────────────────────────────────────────
 
-def scrape_source(source: dict) -> list[dict]:
+def scrape_source(source: dict, meta: dict | None = None) -> list[dict]:
     """
     Scrape all listings for one auction_sources row.
 
@@ -93,15 +93,19 @@ def scrape_source(source: dict) -> list[dict]:
 
     log.info("[SCAN:%s] Starting %s scrape — url: %s", slug, method, source.get("listings_url"))
 
+    _meta: dict = {}  # accumulates observability data from sub-scrapers
+
     try:
         if method == "firecrawl":
-            results = _scrape_firecrawl(source)
+            results = _scrape_firecrawl(source, _meta)
         elif method == "http_seed":
-            results = _scrape_http_seed(source)
+            results = _scrape_http_seed(source, _meta)
         else:
             results = _scrape_http(source)
     except Exception as exc:
         log.error("[SCAN:%s] Unhandled exception in scraper: %s", slug, exc, exc_info=True)
+        if meta is not None:
+            meta["partial_reason"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         return []
 
     log.info("[SCAN:%s] Raw extraction complete — %d listings before normalisation", slug, len(results))
@@ -112,7 +116,13 @@ def scrape_source(source: dict) -> list[dict]:
         if item:
             normalised.append(item)
 
+    _meta["listings_skipped"] = len(results) - len(normalised)
+    if not normalised and "partial_reason" not in _meta:
+        _meta["partial_reason"] = "parse_zero"
+
     log.info("[SCAN:%s] Normalised: %d usable listings", slug, len(normalised))
+    if meta is not None:
+        meta.update(_meta)
     return normalised
 
 
@@ -252,7 +262,7 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
 
 
 
-def _scrape_http_seed(source: dict) -> list[dict]:
+def _scrape_http_seed(source: dict, meta: dict | None = None) -> list[dict]:
     """
     Two-step scraper for Auction House future-auction-dates approach.
     Step 1: Scrape the diary page (listings_url) — extract future event lot URLs + dates.
@@ -277,6 +287,9 @@ def _scrape_http_seed(source: dict) -> list[dict]:
         resp.raise_for_status()
     except Exception as e:
         log.error("[SCAN:%s] Diary fetch failed: %s", slug, e)
+        if meta is not None:
+            meta["partial_reason"] = "seed_fetch_error"
+            meta["seed_urls_found"] = 0
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -321,6 +334,13 @@ def _scrape_http_seed(source: dict) -> list[dict]:
         })
 
     log.info("[SCAN:%s] Found %d future auction events on diary", slug, len(event_entries))
+    if meta is not None:
+        meta["seed_urls_found"] = len(event_entries)
+    if not event_entries:
+        log.warning("[SCAN:%s] Diary returned 0 future events — no lots to scrape", slug)
+        if meta is not None:
+            meta["partial_reason"] = "seed_empty"
+        return []
 
     # ── Step 2: Scrape each event lot page ───────────────────────────────
     all_results: list[dict] = []
@@ -473,7 +493,7 @@ def _extract_listing_from_element(el: Any, selectors: dict, page_url: str, sourc
 
 # ── FIRECRAWL SCRAPER ─────────────────────────────────────────────────────────
 
-def _scrape_firecrawl(source: dict) -> list[dict]:
+def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
     """
     Use Firecrawl Extract API to scrape JS-rendered pages.
     Returns raw listing dicts using the same _raw_ key convention.
@@ -529,12 +549,27 @@ def _scrape_firecrawl(source: dict) -> list[dict]:
             },
             timeout=60,
         )
+        if meta is not None:
+            meta["firecrawl_status_code"] = resp.status_code
         resp.raise_for_status()
         data = resp.json()
+    except requests.exceptions.HTTPError as e:
+        code = getattr(e.response, "status_code", None)
+        if meta is not None:
+            meta["firecrawl_status_code"] = code
+            meta["partial_reason"] = (
+                "firecrawl_rate_limit" if code == 429 else f"firecrawl_http_{code}"
+            )
+        log.error("[SCAN:%s] Firecrawl HTTP error %s: %s", slug, code, e)
+        return []
     except requests.exceptions.RequestException as e:
+        if meta is not None:
+            meta["partial_reason"] = "firecrawl_network_error"
         log.error("[SCAN:%s] Firecrawl request failed: %s", slug, e)
         return []
     except Exception as e:
+        if meta is not None:
+            meta["partial_reason"] = "firecrawl_parse_error"
         log.error("[SCAN:%s] Firecrawl response parse failed: %s", slug, e)
         return []
 
@@ -544,8 +579,13 @@ def _scrape_firecrawl(source: dict) -> list[dict]:
         .get("listings", [])
     )
 
-    if not isinstance(raw_listings, list):
-        log.warning("[SCAN:%s] Firecrawl returned unexpected shape: %s", slug, type(raw_listings))
+    if not isinstance(raw_listings, list) or not raw_listings:
+        if not isinstance(raw_listings, list):
+            log.warning("[SCAN:%s] Firecrawl returned unexpected shape: %s", slug, type(raw_listings))
+        else:
+            log.warning("[SCAN:%s] Firecrawl returned 0 listings — possible extraction failure", slug)
+        if meta is not None and "partial_reason" not in meta:
+            meta["partial_reason"] = "firecrawl_empty"
         return []
 
     # Remap to _raw_ convention for consistent normalisation
