@@ -32,7 +32,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 
 from supabase import create_client, Client
 
@@ -386,6 +386,59 @@ def main() -> None:
             log.warning("[ENRICH] DATA_DATABASE_URL not set — enrichment skipped")
     else:
         log.info("[ENRICH] Enrichment module not available — skipped")
+
+    # ── EXPIRY PASS ──────────────────────────────────────────────────────────
+    # Runs after scan + enrichment. Marks past-date listings as expired so
+    # the discovery feed only shows upcoming / live opportunities.
+    try:
+        expire_result = _expire_stale_listings(supabase)
+        if expire_result["expired"]:
+            log.info("[EXPIRE] Pass complete — %d lots marked expired", expire_result["expired"])
+    except Exception as expire_exc:
+        log.error("[EXPIRE] Expiry pass raised: %s", expire_exc, exc_info=True)
+
+
+# ── Stale listing expiry ─────────────────────────────────────────────────────
+
+def _expire_stale_listings(supabase: Client) -> dict:
+    """
+    Mark auction_listings as 'expired' when their auction date has passed.
+
+    Traditional sources: auction_date < today → expired.
+      PostgreSQL NULL handling: lt() filter excludes NULL rows, so null-date
+      listings (iamsold) are not touched by this branch.
+
+    iamsold (null auction_date): expire after 30 days from first_seen_at.
+      iamsold uses Modern Method of Auction with rolling bid deadlines;
+      we have no reliable auction_date, so time-based expiry is used.
+
+    Returns count of expired rows across both branches.
+    """
+    today      = date.today().isoformat()
+    cutoff_mma = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    expired    = 0
+
+    # Branch 1: any source with a past auction_date
+    try:
+        res = supabase.table("auction_listings")             .update({"status": "expired"})             .eq("status", "active")             .lt("auction_date", today)             .execute()
+        n = len(res.data or [])
+        expired += n
+        if n:
+            log.info("[EXPIRE] %d lots expired (past auction_date < %s)", n, today)
+    except Exception as e:
+        log.warning("[EXPIRE] Traditional expiry failed: %s", e)
+
+    # Branch 2: iamsold — null auction_date, expire after 30 days
+    try:
+        res2 = supabase.table("auction_listings")             .update({"status": "expired"})             .eq("status", "active")             .eq("auction_house", "iamsold")             .lt("first_seen_at", cutoff_mma)             .execute()
+        n2 = len(res2.data or [])
+        expired += n2
+        if n2:
+            log.info("[EXPIRE] %d iamsold lots expired (first_seen_at > 30 days)", n2)
+    except Exception as e:
+        log.warning("[EXPIRE] iamsold expiry failed: %s", e)
+
+    return {"expired": expired}
 
 
 if __name__ == "__main__":
