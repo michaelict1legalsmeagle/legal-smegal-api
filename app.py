@@ -8273,6 +8273,67 @@ def auction_listing_detail(listing_id: str):
         return jsonify({"error": str(e)}), 500
 
 
+
+@app.route("/api/auction/enrichment/debug/<listing_id>", methods=["GET", "OPTIONS"])
+@require_auth
+def enrichment_debug(listing_id):
+    """
+    GET /api/auction/enrichment/debug/<listing_id>
+    Returns enrichment state for one listing — step results, timing,
+    populated fields, errors. Temporary observability endpoint.
+    Remove once enrichment pipeline is confirmed stable.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        res = supabase.table("auction_listings")             .select(
+                "id,address,postcode,guide_price,auction_house,"
+                "enrichment_status,enrichment_confidence,enriched_at,"
+                "investment_json,enrichment_error"
+            )             .eq("id", listing_id)             .maybe_single()             .execute()
+        if not res.data:
+            return jsonify({"error": "listing_not_found"}), 404
+
+        l   = res.data
+        inv = l.get("investment_json") or {}
+
+        return jsonify({
+            "listing_id":          listing_id,
+            "address":             l.get("address"),
+            "postcode":            l.get("postcode"),
+            "guide_price":         l.get("guide_price"),
+            "auction_house":       l.get("auction_house"),
+            "enrichment_status":   l.get("enrichment_status"),
+            "enrichment_confidence": l.get("enrichment_confidence"),
+            "enriched_at":         l.get("enriched_at"),
+            "steps_completed":     inv.get("steps_completed", []),
+            "steps_failed":        inv.get("steps_failed", []),
+            "step_timing":         inv.get("step_timing", {}),
+            "duration_s":          inv.get("duration_s"),
+            "populated_fields": {
+                "postcode_lad":    bool((inv.get("postcode") or {}).get("lad_code")),
+                "hpi_avg_price":   bool((inv.get("hpi") or {}).get("regional_avg_price")),
+                "rental_avg":      bool((inv.get("rental") or {}).get("avg_rent_gbp")),
+                "comps_count":     bool((inv.get("comps") or {}).get("count")),
+                "epc_rating":      bool((inv.get("epc") or {}).get("rating")),
+                "yield_pct":       bool((inv.get("yield_estimate") or {}).get("gross_yield_pct")),
+                "inference_summary": bool((inv.get("inference") or {}).get("summary")),
+                "inference_signals": len((inv.get("inference") or {}).get("signals", [])),
+            },
+            "step_errors": {
+                s: (inv.get(s) or {}).get("error")
+                for s in ["postcode", "hpi", "rental", "comps", "epc", "yield_estimate"]
+                if (inv.get(s) or {}).get("error")
+            },
+            "enrichment_error":    l.get("enrichment_error"),
+        }), 200
+    except Exception as e:
+        app.logger.exception("enrichment_debug failed for %s", listing_id)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/auction/listings/<listing_id>/convert", methods=["POST", "OPTIONS"])
 @require_auth
 def auction_listing_convert(listing_id: str):
