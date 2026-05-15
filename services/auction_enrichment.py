@@ -145,14 +145,51 @@ def _hetzner_query(hetzner_url: str, sql: str, params=()) -> list[dict]:
 
 def _step_postcode(postcode: str, hetzner_url: str) -> dict:
     """
-    Resolve postcode to LAD code + LSOA via Hetzner postcode_to_lsoa.
-    Returns partial result on failure — callers check 'lad_code' presence.
+    Resolve postcode to LAD code + LSOA.
+
+    Strategy (in order):
+      1. postcodes.io — free public API, no credentials, full UK coverage.
+         Returns LAD E-codes in the correct format for uk_hpi_monthly queries.
+      2. Hetzner postcode_to_lsoa — fallback when DATA_DATABASE_URL is set.
+
+    Upstream callers only need 'lad_code'. All other fields are supplementary.
     """
     result: dict = {"ok": False}
     pc = _norm_postcode(postcode)
     if not pc:
         result["error"] = "no_postcode"
         return result
+
+    # ── Primary: postcodes.io (zero credentials, ~100ms) ─────────────────────
+    try:
+        import requests as _req
+        pc_nospace = re.sub(r"\s+", "", pc)
+        resp = _req.get(
+            f"https://api.postcodes.io/postcodes/{pc_nospace}",
+            timeout=6,
+        )
+        if resp.status_code == 200:
+            data = resp.json().get("result") or {}
+            codes = data.get("codes") or {}
+            lad_code = codes.get("admin_district") or ""
+            if lad_code.startswith(("E", "W", "S", "N")):   # valid ONS E/W/S/N code
+                return {
+                    "ok":        True,
+                    "lad_code":  lad_code,
+                    "lad_name":  data.get("admin_district") or None,
+                    "lsoa_code": codes.get("lsoa") or None,
+                    "lsoa_name": None,
+                    "source":    "postcodes.io",
+                }
+        elif resp.status_code == 404:
+            # Postcode genuinely not found — don't fall through to Hetzner
+            return {"ok": False, "error": "postcode_not_found"}
+    except Exception as e:
+        log.debug("[ENRICH] postcodes.io failed for %s: %s", pc, e)
+
+    # ── Fallback: Hetzner postcode_to_lsoa ───────────────────────────────────
+    if not hetzner_url:
+        return {"ok": False, "error": "postcode_not_resolved"}
     try:
         rows = _hetzner_query(
             hetzner_url,
@@ -162,18 +199,17 @@ def _step_postcode(postcode: str, hetzner_url: str) -> dict:
         )
         if rows:
             r = rows[0]
-            result.update({
+            return {
                 "ok":        True,
                 "lad_code":  str(r.get("ladcd") or "").strip() or None,
                 "lad_name":  str(r.get("ladnm") or "").strip() or None,
                 "lsoa_code": str(r.get("lsoa11cd") or "").strip() or None,
                 "lsoa_name": str(r.get("lsoa11nm") or "").strip() or None,
-            })
-        else:
-            result["error"] = "postcode_not_found"
+                "source":    "hetzner",
+            }
+        return {"ok": False, "error": "postcode_not_found"}
     except Exception as e:
-        result["error"] = f"query_error: {type(e).__name__}"
-    return result
+        return {"ok": False, "error": f"hetzner_error: {type(e).__name__}"}
 
 
 # ── Step 2: HPI benchmark ─────────────────────────────────────────────────────
