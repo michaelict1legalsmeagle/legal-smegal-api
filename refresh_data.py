@@ -90,8 +90,9 @@ def refresh_hpi():
         log.error(f"HPI download failed: {e}")
         return
 
-    content       = r.content.decode("utf-8", errors="replace")
-    reader        = csv.DictReader(io.StringIO(content))
+    # Stream line-by-line — never loads full file into memory.
+    # Full HPI file is 200-400MB uncompressed; r.content would OOM at 512Mi.
+    reader        = csv.DictReader(r.iter_lines(decode_unicode=True))
     monthly_batch = []
     by_type_batch = []
     monthly_count = 0
@@ -210,8 +211,8 @@ def refresh_prms():
         return
 
     log.info(f"PRMS: downloaded from {used_url}")
-    content = r.content.decode("utf-8", errors="replace")
-    reader = csv.DictReader(io.StringIO(content))
+    # Stream line-by-line — avoids loading full CSV into memory
+    reader = csv.DictReader(r.iter_lines(decode_unicode=True))
 
     batch = []
     count = 0
@@ -346,63 +347,75 @@ def get_latest_pp_url() -> str:
     return ""
 
 
-def _upsert_pp_rows_from_csv(content_str: str, label: str):
-    """Parse PP CSV and upsert into price_paid_raw_2025 on Hetzner. Returns (count, skipped)."""
-    reader  = csv.reader(io.StringIO(content_str))
+def _upsert_pp_rows_from_csv(lines_iter, label: str):
+    """
+    Stream PP CSV lines and upsert into price_paid_raw_2025 on Hetzner.
+    Accepts any line iterator — never loads full CSV into memory.
+    Uses a single Hetzner connection for the entire run (not one per batch).
+    Returns (count, skipped).
+    """
+    reader  = csv.reader(lines_iter)
     batch   = []
     count   = 0
     skipped = 0
 
-    for row in reader:
-        if len(row) < 15:
-            continue
-        try:
-            raw_pc = row[3].strip().upper()
-            if not raw_pc.replace(" ", ""):
+    try:
+        conn = _get_hetzner_conn()
+    except Exception as e:
+        log.error(f"PP [{label}]: Hetzner connection failed: {e}")
+        return 0, 0
+
+    try:
+        for row in reader:
+            if len(row) < 15:
                 continue
-            record = {
-                "transaction_unique_identifier": row[0].strip("{}"),
-                "price":             int(row[1]) if row[1].strip().isdigit() else None,
-                "date_of_transfer":  row[2][:10] if row[2] else None,
-                "postcode":          raw_pc,
-                "property_type":     row[4].strip(),
-                "old_new":           row[5].strip(),
-                "duration":          row[6].strip(),
-                "paon":              row[7].strip() or None,
-                "saon":              row[8].strip() or None,
-                "street":            row[9].strip() or None,
-                "locality":          row[10].strip() or None,
-                "town_city":         row[11].strip().title() if row[11] else None,
-                "district":          row[12].strip().title() if row[12] else None,
-                "county":            row[13].strip().title() if row[13] else None,
-                "ppd_category_type": row[14].strip() if len(row) > 14 else None,
-                "record_status":     row[15].strip() if len(row) > 15 else None,
-            }
-            if not record["transaction_unique_identifier"] or not record["price"]:
-                skipped += 1
-                continue
-            batch.append(record)
-            if len(batch) >= BATCH_SIZE:
-                with _get_hetzner_conn() as conn:
+            try:
+                raw_pc = row[3].strip().upper()
+                if not raw_pc.replace(" ", ""):
+                    continue
+                record = {
+                    "transaction_unique_identifier": row[0].strip("{}"),
+                    "price":             int(row[1]) if row[1].strip().isdigit() else None,
+                    "date_of_transfer":  row[2][:10] if row[2] else None,
+                    "postcode":          raw_pc,
+                    "property_type":     row[4].strip(),
+                    "old_new":           row[5].strip(),
+                    "duration":          row[6].strip(),
+                    "paon":              row[7].strip() or None,
+                    "saon":              row[8].strip() or None,
+                    "street":            row[9].strip() or None,
+                    "locality":          row[10].strip() or None,
+                    "town_city":         row[11].strip().title() if row[11] else None,
+                    "district":          row[12].strip().title() if row[12] else None,
+                    "county":            row[13].strip().title() if row[13] else None,
+                    "ppd_category_type": row[14].strip() if len(row) > 14 else None,
+                    "record_status":     row[15].strip() if len(row) > 15 else None,
+                }
+                if not record["transaction_unique_identifier"] or not record["price"]:
+                    skipped += 1
+                    continue
+                batch.append(record)
+                if len(batch) >= BATCH_SIZE:
                     with conn.cursor() as cur:
                         cur.executemany(PP_UPSERT_SQL, batch)
                     conn.commit()
-                count += len(batch)
-                batch = []
-                log.info(f"price_paid_raw_2025 [{label}]: {count} rows upserted")
-        except Exception as e:
-            log.warning(f"PP geo row error [{label}]: {e}")
-            continue
+                    count += len(batch)
+                    batch = []
+                    log.info(f"price_paid_raw_2025 [{label}]: {count} rows upserted")
+            except Exception as e:
+                log.warning(f"PP row error [{label}]: {e}")
+                skipped += 1
+                continue
 
-    if batch:
-        try:
-            with _get_hetzner_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.executemany(PP_UPSERT_SQL, batch)
-                conn.commit()
+        # Flush remaining batch
+        if batch:
+            with conn.cursor() as cur:
+                cur.executemany(PP_UPSERT_SQL, batch)
+            conn.commit()
             count += len(batch)
-        except Exception as e:
-            log.warning(f"PP geo row error [{label}] (final batch): {e}")
+
+    finally:
+        conn.close()
 
     return count, skipped
 
@@ -422,8 +435,9 @@ def refresh_price_paid():
     except Exception as e:
         log.error(f"Price paid download failed: {e}")
         return
+    # Stream directly — never decode full response into memory
     count, skipped = _upsert_pp_rows_from_csv(
-        r.content.decode("utf-8", errors="replace"), label="monthly"
+        r.iter_lines(decode_unicode=True), label="monthly"
     )
     log.info(f"price_paid_raw_2025 monthly refresh complete: {count} rows upserted, {skipped} skipped")
 
@@ -445,8 +459,9 @@ def backfill_price_paid(years: list):
         except Exception as e:
             log.error(f"Backfill {year}: download failed: {e}")
             continue
+        # Stream directly — annual PP files can be 300MB+
         count, skipped = _upsert_pp_rows_from_csv(
-            r.content.decode("utf-8", errors="replace"), label=str(year)
+            r.iter_lines(decode_unicode=True), label=str(year)
         )
         log.info(f"Backfill {year} complete: {count} rows upserted, {skipped} skipped")
     log.info("Backfill complete — running materialized view refresh")
