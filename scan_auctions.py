@@ -53,6 +53,14 @@ except ImportError as e:
     log.error("Failed to import auction_scraper: %s", e)
     sys.exit(1)
 
+try:
+    from services.auction_enrichment import enrich_pass
+    _enrichment_available = True
+except ImportError as e:
+    log.warning("auction_enrichment not available — enrichment skipped: %s", e)
+    enrich_pass = None
+    _enrichment_available = False
+
 
 # ── Supabase connection ──────────────────────────────────────────────────────
 
@@ -352,6 +360,32 @@ def main() -> None:
 
     if not all_ok:
         log.warning("[SCAN] Source statuses: %s", {r["slug"]: r["status"] for r in source_results})
+
+    # ── ENRICHMENT PASS ──────────────────────────────────────────────────────
+    # Runs after all sources complete. Processes pending listings up to limit.
+    # Enrichment failure is non-fatal — scan exit code is unaffected.
+    if _enrichment_available and enrich_pass is not None:
+        hetzner_url = os.environ.get("DATA_DATABASE_URL", "").strip()
+        if hetzner_url:
+            log.info("[ENRICH] Starting enrichment pass")
+            try:
+                enrich_summary = enrich_pass(
+                    supabase_client=supabase,
+                    hetzner_url=hetzner_url,
+                    limit=100,
+                )
+                log.info(
+                    "[ENRICH] Pass complete — enriched: %d failed: %d duration: %.1fs",
+                    enrich_summary.get("enriched", 0),
+                    enrich_summary.get("failed", 0),
+                    enrich_summary.get("duration_s", 0.0),
+                )
+            except Exception as enrich_exc:
+                log.error("[ENRICH] Enrichment pass raised: %s", enrich_exc, exc_info=True)
+        else:
+            log.warning("[ENRICH] DATA_DATABASE_URL not set — enrichment skipped")
+    else:
+        log.info("[ENRICH] Enrichment module not available — skipped")
 
 
 if __name__ == "__main__":
