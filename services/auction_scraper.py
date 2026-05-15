@@ -244,6 +244,28 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
         )
         property_type = type_match.group(0).strip() if type_match else None
 
+        # ── Legal pack link extraction (zero extra requests) ────────────────
+        # Check lot container for any link to a legal/document download.
+        # AH event pages sometimes include a "Legal Pack" button per lot;
+        # if absent, _raw_legal_pack_url remains None — non-blocking.
+        legal_pack_raw = None
+        if parent:
+            lp_keywords_href = ['legal', 'document', 'pack', '.pdf']
+            lp_keywords_text = ['legal pack', 'legal document', 'download pack',
+                                 'view pack', 'legal docs']
+            for a_el in parent.find_all('a', href=True):
+                a_href  = (a_el.get('href') or '').lower()
+                a_text  = a_el.get_text(strip=True).lower()
+                a_title = (a_el.get('title') or '').lower()
+                href_abs = urljoin(page_url, a_el.get('href', ''))
+                # Skip if it's the same as the lot detail link
+                if href_abs == detail_url:
+                    continue
+                if (any(kw in a_href for kw in lp_keywords_href) or
+                        any(kw in a_text or kw in a_title for kw in lp_keywords_text)):
+                    legal_pack_raw = href_abs
+                    break
+
         results.append({
             "_raw_source_url":     detail_url,
             "_raw_lot_number":     lot_number,
@@ -251,7 +273,7 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
             "_raw_guide_price":    guide_price_raw,
             "_raw_auction_date":   None,  # not in list view — on detail page
             "_raw_property_type":  property_type,
-            "_raw_legal_pack_url": None,
+            "_raw_legal_pack_url": legal_pack_raw,
             "_source_id":          source.get("id"),
             "_auction_house":      source.get("name"),
             "_is_sold":            _is_sold,
