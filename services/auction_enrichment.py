@@ -432,7 +432,7 @@ def _step_inference(
     _yld_ok  = yield_est.get("gross_yield_pct") is not None
     _hpi_ok  = bool(hpi.get("regional_avg_price"))
     _rent_ok = bool(rental.get("avg_rent_gbp"))
-    _comp_ok = bool(comp.get("avg_price"))
+    _comp_ok = bool(comps.get("avg_price"))
     _epc_ok  = bool(epc.get("rating"))
 
     if _yld_ok and _hpi_ok and _rent_ok:
@@ -564,7 +564,7 @@ def _step_inference(
             })
 
     # ── Thin comp market warning ──────────────────────────────────────────────
-    if _comp_ok and comp["count"] < COMPS_MIN_USEFUL:
+    if _comp_ok and comps["count"] < COMPS_MIN_USEFUL:
         signals.append({
             "id":         "thin_comp_market",
             "direction":  "negative",
@@ -581,7 +581,7 @@ def _step_inference(
         hpi_ok=_hpi_ok,
         rental_ok=_rent_ok,
         comps_ok=_comp_ok,
-        comps_count=comp.get("count") if _comp_ok else None,
+        comps_count=comps.get("count") if _comp_ok else None,
         epc_ok=_epc_ok,
         has_guide_price=bool(guide_price),
     )
