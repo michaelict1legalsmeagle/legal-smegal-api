@@ -685,6 +685,121 @@ def _compute_confidence(
 
 # ── Core enrichment function ───────────────────────────────────────────────────
 
+
+# ── Step 8: Ceiling engine wrapper ────────────────────────────────────────────
+def _step_ceiling(guide_price: Optional[float], comps: dict, rental: dict,
+                  strategy: str = "BTL") -> dict:
+    """
+    Additive wrapper around ceiling_engine.calculate_ceiling.
+    At discovery stage there are no legal flags — the ceiling reflects
+    structural auction discount applied to comps-anchored base only.
+    Result is stored as a quick-reference bid ceiling range for the card.
+    Full ceiling (with legal flags) runs separately after legal pack analysis.
+    """
+    result: dict = {"ok": False}
+    try:
+        from services.ceiling_engine import calculate_ceiling as _calc_ceiling
+    except ImportError:
+        result["error"] = "ceiling_engine_unavailable"
+        return result
+
+    fins: dict = {}
+    if comps and comps.get("avg_price") and float(comps["avg_price"]) > 5_000:
+        fins["comps_avg_value"] = float(comps["avg_price"])
+    if rental and rental.get("avg_rent_gbp") and float(rental["avg_rent_gbp"]) > 0:
+        fins["monthly_rent"] = float(rental["avg_rent_gbp"])
+
+    if not fins:
+        result["error"] = "insufficient_inputs"
+        return result
+
+    try:
+        out = _calc_ceiling(
+            legal_flags      = [],          # no flags at discovery stage
+            financial_inputs = fins,
+            base_valuation   = None,
+            strategy         = strategy,
+        )
+        if out.get("error"):
+            result["error"] = out["error"]
+            return result
+
+        cr = out.get("ceiling_range", {})
+        result.update({
+            "ok":               True,
+            "ceiling_low":      cr.get("low"),
+            "ceiling_high":     cr.get("high"),
+            "base_valuation":   out.get("base_valuation"),
+            "base_method":      out.get("base_method"),
+            "strategy":         out.get("strategy_used"),
+            "risk_discount_pct": out.get("risk_discount_pct"),
+            "confidence":       out.get("confidence"),
+            "note":             "No legal flags applied — discovery ceiling only.",
+        })
+    except Exception as e:
+        result["error"] = f"ceiling_error: {type(e).__name__}: {str(e)[:120]}"
+    return result
+
+
+# ── Step 9: Planning context ────────────────────────────────────────────────
+def _step_planning(postcode: str) -> dict:
+    """
+    Queries planning.data.gov.uk for planning constraints near the postcode.
+    No credentials required. Compressed output only — no raw payloads.
+
+    Datasets queried:
+      - article-4-direction : HMO and development restrictions
+      - conservation-area   : affects alterations, extensions
+    """
+    result: dict = {"ok": False}
+    pc = _norm_postcode(postcode)
+    if not pc:
+        result["error"] = "no_postcode"
+        return result
+
+    pc_q = re.sub(r"\s+", "%20", pc)   # URL-safe postcode
+
+    BASE = "https://www.planning.data.gov.uk/entity.json"
+    DATASETS = [
+        ("article-4-direction", "article_4"),
+        ("conservation-area",   "conservation_area"),
+    ]
+
+    try:
+        import requests as _req
+        planning: dict = {"source": "planning.data.gov.uk"}
+
+        for dataset, key in DATASETS:
+            try:
+                r = _req.get(
+                    f"{BASE}?postcode={pc_q}&dataset={dataset}&limit=5",
+                    timeout=8,
+                )
+                if r.status_code == 200:
+                    entities = r.json().get("entities", [])
+                    planning[key] = len(entities) > 0
+                    if planning[key] and dataset == "article-4-direction":
+                        # Store first article 4 name for context
+                        names = [e.get("name") or e.get("reference", "")
+                                 for e in entities if e.get("name") or e.get("reference")]
+                        if names:
+                            planning["article_4_ref"] = names[0]
+                else:
+                    planning[key] = None   # API unavailable for this dataset
+            except Exception:
+                planning[key] = None
+
+        result.update(planning)
+        result["ok"] = any(
+            planning.get(k) is not None for _, k in DATASETS
+        )
+
+    except Exception as e:
+        result["error"] = f"planning_api_error: {type(e).__name__}"
+
+    return result
+
+
 def enrich_listing(
     listing: dict,
     supabase_client,
@@ -862,6 +977,58 @@ def enrich_listing(
     else:
         steps_failed.append("inference")
         result["inference"] = {"error": "inference_failed"}
+
+    # Step 8 — Ceiling engine (discovery-mode: no legal flags)
+    _t = time.time()
+    step8 = _step_ceiling(
+        guide_price = guide_price,
+        comps       = result.get("comps", {}),
+        rental      = result.get("rental", {}),
+    )
+    step_timing["ceiling"] = round(time.time() - _t, 2)
+    if step8.get("ok"):
+        steps_completed.append("ceiling")
+        result["ceiling"] = {
+            "ceiling_low":      step8["ceiling_low"],
+            "ceiling_high":     step8["ceiling_high"],
+            "base_valuation":   step8["base_valuation"],
+            "base_method":      step8["base_method"],
+            "strategy":         step8["strategy"],
+            "risk_discount_pct": step8["risk_discount_pct"],
+            "confidence":       step8["confidence"],
+            "note":             step8["note"],
+        }
+        log.info("[ENRICH:%s] step:ceiling ok low=%s high=%s t=%.2fs",
+                 listing_id, step8["ceiling_low"], step8["ceiling_high"],
+                 step_timing["ceiling"])
+    else:
+        steps_failed.append("ceiling")
+        result["ceiling"] = {"error": step8.get("error")}
+        log.warning("[ENRICH:%s] step:ceiling FAIL err=%s t=%.2fs",
+                    listing_id, step8.get("error"), step_timing["ceiling"])
+
+    # Step 9 — Planning context (article 4, conservation area)
+    if postcode:
+        _t = time.time()
+        step9 = _step_planning(postcode)
+        step_timing["planning"] = round(time.time() - _t, 2)
+        if step9.get("ok"):
+            steps_completed.append("planning")
+            result["planning"] = {
+                k: v for k, v in step9.items()
+                if k not in ("ok",)
+            }
+            log.info("[ENRICH:%s] step:planning ok a4=%s ca=%s t=%.2fs",
+                     listing_id, step9.get("article_4"), step9.get("conservation_area"),
+                     step_timing["planning"])
+        else:
+            steps_failed.append("planning")
+            result["planning"] = {"error": step9.get("error")}
+            log.warning("[ENRICH:%s] step:planning FAIL err=%s t=%.2fs",
+                        listing_id, step9.get("error"), step_timing.get("planning", 0))
+    else:
+        steps_failed.append("planning")
+        result["planning"] = {"error": "no_postcode"}
 
     # ── Determine final status and confidence ─────────────────────────────────
     if not steps_failed:
