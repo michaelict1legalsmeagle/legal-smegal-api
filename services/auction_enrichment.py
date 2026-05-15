@@ -894,10 +894,12 @@ def enrich_pass(
 
     # Fetch listings needing enrichment
     try:
+        # Include 'enriching': listing was being processed when job was killed.
+        # Picked up on next run for clean retry.
         res = supabase_client.table("auction_listings") \
             .select("id,postcode,guide_price,auction_house") \
             .eq("status", "active") \
-            .in_("enrichment_status", ["pending", "failed"]) \
+            .in_("enrichment_status", ["pending", "failed", "enriching"]) \
             .order("first_seen_at", desc=True) \
             .limit(limit) \
             .execute()
