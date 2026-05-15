@@ -429,10 +429,16 @@ def _step_inference(
     signals: list[dict] = []
 
     # ── Yield vs regional benchmark ──────────────────────────────────────────
-    if yield_est.get("ok") and hpi.get("ok"):
+    _yld_ok  = yield_est.get("gross_yield_pct") is not None
+    _hpi_ok  = bool(hpi.get("regional_avg_price"))
+    _rent_ok = bool(rental.get("avg_rent_gbp"))
+    _comp_ok = bool(comp.get("avg_price"))
+    _epc_ok  = bool(epc.get("rating"))
+
+    if _yld_ok and _hpi_ok and _rent_ok:
         gross = yield_est["gross_yield_pct"]
         # Derive benchmark yield from HPI price + rental avg
-        rental_gbp = _safe_float(rental.get("avg_rent_gbp")) if rental.get("ok") else None
+        rental_gbp = _safe_float(rental.get("avg_rent_gbp"))
         hpi_price  = _safe_float(hpi.get("regional_avg_price"))
         if rental_gbp and hpi_price and hpi_price > 0:
             bench_yield = round((rental_gbp * 12) / hpi_price * 100, 2)
@@ -464,7 +470,7 @@ def _step_inference(
                 })
 
     # ── Price vs sold comps ───────────────────────────────────────────────────
-    if comps.get("ok") and guide_price:
+    if _comp_ok and guide_price:
         comp_avg = comps["avg_price"]
         ratio = guide_price / comp_avg if comp_avg > 0 else None
         if ratio is not None:
@@ -497,7 +503,7 @@ def _step_inference(
                 })
 
     # ── Price vs HPI deep discount ────────────────────────────────────────────
-    if hpi.get("ok") and guide_price and not comps.get("ok"):
+    if _hpi_ok and guide_price and not _comp_ok:
         # Only fire this if we don't have comps (would be redundant)
         hpi_price = _safe_float(hpi.get("regional_avg_price"))
         if hpi_price and guide_price < hpi_price * PRICE_DEEP_DISCOUNT_HPI:
@@ -515,7 +521,7 @@ def _step_inference(
             })
 
     # ── EPC MEES risk ─────────────────────────────────────────────────────────
-    if epc.get("ok") and epc.get("rating"):
+    if _epc_ok:
         rating = epc["rating"]
         if rating in ("F", "G"):
             signals.append({
@@ -542,7 +548,7 @@ def _step_inference(
             })
 
     # ── Rental growth signal ──────────────────────────────────────────────────
-    if rental.get("ok") and rental.get("latest_yoy_pct") is not None:
+    if _rent_ok and rental.get("latest_yoy_pct") is not None:
         yoy = rental["latest_yoy_pct"]
         if yoy > RENTAL_GROWTH_STRONG:
             signals.append({
@@ -558,7 +564,7 @@ def _step_inference(
             })
 
     # ── Thin comp market warning ──────────────────────────────────────────────
-    if comps.get("ok") and comps["count"] < COMPS_MIN_USEFUL:
+    if _comp_ok and comp["count"] < COMPS_MIN_USEFUL:
         signals.append({
             "id":         "thin_comp_market",
             "direction":  "negative",
@@ -572,11 +578,11 @@ def _step_inference(
 
     # ── Confidence score ──────────────────────────────────────────────────────
     conf = _compute_confidence(
-        hpi_ok=hpi.get("ok", False),
-        rental_ok=rental.get("ok", False),
-        comps_ok=comps.get("ok", False),
-        comps_count=comps.get("count") if comps.get("ok") else None,
-        epc_ok=epc.get("ok", False),
+        hpi_ok=_hpi_ok,
+        rental_ok=_rent_ok,
+        comps_ok=_comp_ok,
+        comps_count=comp.get("count") if _comp_ok else None,
+        epc_ok=_epc_ok,
         has_guide_price=bool(guide_price),
     )
     band = (
@@ -669,14 +675,18 @@ def enrich_listing(
     postcode    = str(listing.get("postcode") or "").strip()
     guide_price = _safe_float(listing.get("guide_price"))
 
-    log.info("[ENRICH:%s] Starting — postcode: %s guide: %s", listing_id, postcode, guide_price)
+    _t_start = time.time()
+    log.info("[ENRICH:%s] ── Start ─── postcode:%s guide:%s", listing_id, postcode, guide_price)
 
     steps_completed: list[str] = []
     steps_failed:    list[str] = []
+    step_timing:     dict = {}
     result: dict = {}
 
     # Step 1 — Postcode resolve (prerequisite for all Hetzner+benchmark steps)
+    _t = time.time()
     step1 = _step_postcode(postcode, hetzner_url)
+    step_timing["postcode"] = round(time.time() - _t, 2)
     if step1.get("ok"):
         steps_completed.append("postcode")
         lad_code = step1["lad_code"]
@@ -689,11 +699,13 @@ def enrich_listing(
         steps_failed.append("postcode")
         lad_code = None
         result["postcode"] = {"error": step1.get("error")}
-        log.warning("[ENRICH:%s] Postcode resolve failed: %s", listing_id, step1.get("error"))
+        log.warning("[ENRICH:%s] step:postcode FAIL err=%s t=%.2fs", listing_id, step1.get("error"), step_timing.get("postcode",0))
 
     # Step 2 — HPI benchmark
     if lad_code:
+        _t = time.time()
         step2 = _step_hpi(lad_code, supabase_client, lad_cache)
+        step_timing["hpi"] = round(time.time() - _t, 2)
         if step2.get("ok"):
             steps_completed.append("hpi")
             result["hpi"] = {
@@ -711,7 +723,9 @@ def enrich_listing(
 
     # Step 3 — Rental benchmark
     if lad_code:
+        _t = time.time()
         step3 = _step_rental(lad_code, supabase_client, lad_cache)
+        step_timing["rental"] = round(time.time() - _t, 2)
         if step3.get("ok"):
             steps_completed.append("rental")
             result["rental"] = {
@@ -730,7 +744,9 @@ def enrich_listing(
 
     # Step 4 — Sold comps (Hetzner, tiered)
     if postcode and hetzner_url:
+        _t = time.time()
         step4 = _step_comps(postcode, hetzner_url)
+        step_timing["comps"] = round(time.time() - _t, 2)
         if step4.get("ok"):
             steps_completed.append("comps")
             result["comps"] = {
@@ -752,7 +768,9 @@ def enrich_listing(
 
     # Step 5 — EPC lookup
     if postcode and hetzner_url:
+        _t = time.time()
         step5 = _step_epc(postcode, hetzner_url)
+        step_timing["epc"] = round(time.time() - _t, 2)
         if step5.get("ok"):
             steps_completed.append("epc")
             result["epc"] = {
@@ -771,7 +789,9 @@ def enrich_listing(
         step5 = {}
 
     # Step 6 — Yield estimate
+    _t = time.time()
     step6 = _step_yield(guide_price, step3)
+    step_timing["yield"] = round(time.time() - _t, 3)
     if step6.get("ok"):
         steps_completed.append("yield")
         result["yield_estimate"] = {
@@ -785,6 +805,7 @@ def enrich_listing(
         result["yield_estimate"] = {"error": step6.get("error")}
 
     # Step 7 — Contextual inference
+    _t = time.time()
     step7 = _step_inference(
         guide_price = guide_price,
         hpi         = result.get("hpi", {}),
@@ -793,6 +814,7 @@ def enrich_listing(
         epc         = result.get("epc", {}),
         yield_est   = result.get("yield_estimate", {}),
     )
+    step_timing["inference"] = round(time.time() - _t, 3)
     if step7.get("ok"):
         steps_completed.append("inference")
         result["inference"] = {
@@ -816,12 +838,24 @@ def enrich_listing(
     confidence = step7.get("confidence") if step7.get("ok") else None
 
     # ── Assemble investment_json ───────────────────────────────────────────────
+    _total_s = round(time.time() - _t_start, 1)
+
     investment_json = {
         "enriched_at":       _now_iso(),
         "steps_completed":   steps_completed,
         "steps_failed":      steps_failed,
+        "step_timing":       step_timing,
+        "duration_s":        _total_s,
         **result,
     }
+
+    enrichment_error = None
+    if steps_failed:
+        enrichment_error = {
+            "failed_steps": steps_failed,
+            "step_errors": {s: result.get(s, {}).get("error") for s in steps_failed if result.get(s, {}).get("error")},
+            "recorded_at": _now_iso(),
+        }
 
     log.info(
         "[ENRICH:%s] %s — steps_ok: %s steps_fail: %s confidence: %s",
@@ -829,11 +863,16 @@ def enrich_listing(
         steps_completed, steps_failed, confidence,
     )
 
+    log.info("[ENRICH:%s] ── Done %s ─── ok:%s fail:%s conf:%s dur:%.1fs",
+             listing_id, enrichment_status.upper(),
+             steps_completed, steps_failed, confidence, _total_s)
+
     return {
-        "listing_id":          listing_id,
-        "investment_json":     investment_json,
-        "enrichment_status":   enrichment_status,
+        "listing_id":            listing_id,
+        "investment_json":       investment_json,
+        "enrichment_status":     enrichment_status,
         "enrichment_confidence": confidence,
+        "enrichment_error":      enrichment_error,
     }
 
 
@@ -880,6 +919,11 @@ def enrich_pass(
     for listing in listings:
         listing_id = listing.get("id", "unknown")
         try:
+            try:
+                supabase_client.table("auction_listings").update({"enrichment_status":"enriching"}).eq("id", listing_id).execute()
+            except Exception as _se:
+                log.warning("[ENRICH:%s] Could not set enriching: %s", listing_id, _se)
+
             enrich_result = enrich_listing(
                 listing        = listing,
                 supabase_client = supabase_client,
@@ -887,15 +931,22 @@ def enrich_pass(
                 lad_cache      = lad_cache,
             )
 
-            # Write results back to auction_listings
-            supabase_client.table("auction_listings").update({
+            update_res = supabase_client.table("auction_listings").update({
                 "investment_json":       enrich_result["investment_json"],
                 "enrichment_status":     enrich_result["enrichment_status"],
                 "enrichment_confidence": enrich_result["enrichment_confidence"],
                 "enriched_at":           enrich_result["investment_json"]["enriched_at"],
+                "enrichment_error":      enrich_result.get("enrichment_error"),
             }).eq("id", listing_id).execute()
-
-            enriched += 1
+            rows_written = len(update_res.data or [])
+            if not rows_written:
+                log.error("[ENRICH:%s] DB write returned 0 rows — RLS or ID mismatch", listing_id)
+                failed += 1
+            else:
+                log.info("[ENRICH:%s] Persisted status:%s conf:%s rows:%d",
+                         listing_id, enrich_result["enrichment_status"],
+                         enrich_result["enrichment_confidence"], rows_written)
+                enriched += 1
 
         except Exception as e:
             log.error("[ENRICH:%s] Unexpected error: %s", listing_id, e, exc_info=True)
@@ -904,6 +955,7 @@ def enrich_pass(
                 supabase_client.table("auction_listings").update({
                     "enrichment_status": "failed",
                     "investment_json":   {"error": str(e)[:200], "enriched_at": _now_iso()},
+                    "enrichment_error":  {"exception": str(e)[:500], "recorded_at": _now_iso()},
                 }).eq("id", listing_id).execute()
             except Exception:
                 pass
