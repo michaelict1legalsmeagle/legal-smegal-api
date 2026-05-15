@@ -8212,6 +8212,7 @@ def auction_listings_list():
                 "id,source_id,source_url,auction_house,lot_number,address,postcode,"
                 "guide_price,auction_date,property_type,legal_pack_url,"
                 "status,converted_deal_id,first_seen_at,last_seen_at,"
+                "investment_json,enrichment_status,enrichment_confidence,"
                 "auction_sources!auction_listings_source_id_fkey(slug,name)",
                 count="exact"
             ) \
