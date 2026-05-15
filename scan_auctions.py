@@ -53,11 +53,35 @@ except ImportError as e:
     log.error("Failed to import auction_scraper: %s", e)
     sys.exit(1)
 
+# ── Enrichment module import ─────────────────────────────────────────────────
+_enrichment_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "services", "auction_enrichment.py")
+log.info("[ENRICH] Expecting module at: %s", _enrichment_path)
+log.info("[ENRICH] Module file on disk: %s", os.path.exists(_enrichment_path))
+
 try:
     from services.auction_enrichment import enrich_pass
     _enrichment_available = True
+    log.info("[ENRICH] Module loaded successfully")
 except ImportError as e:
-    log.warning("auction_enrichment not available — enrichment skipped: %s", e)
+    log.error("[ENRICH] Import failed (ImportError): %s", e)
+    # Fallback: load directly by file path — bypasses package resolution issues
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("auction_enrichment", _enrichment_path)
+        if _spec and _spec.loader:
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)  # type: ignore[attr-defined]
+            enrich_pass = _mod.enrich_pass
+            _enrichment_available = True
+            log.info("[ENRICH] Module loaded via direct file path (fallback)")
+        else:
+            raise ImportError(f"Could not create module spec from {_enrichment_path}")
+    except Exception as e2:
+        log.error("[ENRICH] Direct file import also failed: %s: %s", type(e2).__name__, e2)
+        enrich_pass = None
+        _enrichment_available = False
+except Exception as e:
+    log.error("[ENRICH] Import failed (%s): %s", type(e).__name__, e)
     enrich_pass = None
     _enrichment_available = False
 
@@ -365,27 +389,29 @@ def main() -> None:
     # Runs after all sources complete. Processes pending listings up to limit.
     # Enrichment failure is non-fatal — scan exit code is unaffected.
     if _enrichment_available and enrich_pass is not None:
+        # Pass DATA_DATABASE_URL to enrichment — empty string is safe:
+        # Hetzner steps (postcode, comps, EPC) are skipped gracefully when
+        # hetzner_url is empty. HPI + rental (Supabase) still run.
         hetzner_url = os.environ.get("DATA_DATABASE_URL", "").strip()
-        if hetzner_url:
-            log.info("[ENRICH] Starting enrichment pass")
-            try:
-                enrich_summary = enrich_pass(
-                    supabase_client=supabase,
-                    hetzner_url=hetzner_url,
-                    limit=100,
-                )
-                log.info(
-                    "[ENRICH] Pass complete — enriched: %d failed: %d duration: %.1fs",
-                    enrich_summary.get("enriched", 0),
-                    enrich_summary.get("failed", 0),
-                    enrich_summary.get("duration_s", 0.0),
-                )
-            except Exception as enrich_exc:
-                log.error("[ENRICH] Enrichment pass raised: %s", enrich_exc, exc_info=True)
-        else:
-            log.warning("[ENRICH] DATA_DATABASE_URL not set — enrichment skipped")
+        if not hetzner_url:
+            log.warning("[ENRICH] DATA_DATABASE_URL not set — Hetzner steps (postcode/comps/EPC) will be skipped. HPI + rental will still run.")
+        log.info("[ENRICH] Starting enrichment pass (hetzner=%s)", bool(hetzner_url))
+        try:
+            enrich_summary = enrich_pass(
+                supabase_client=supabase,
+                hetzner_url=hetzner_url,
+                limit=100,
+            )
+            log.info(
+                "[ENRICH] Pass complete — enriched: %d failed: %d duration: %.1fs",
+                enrich_summary.get("enriched", 0),
+                enrich_summary.get("failed", 0),
+                enrich_summary.get("duration_s", 0.0),
+            )
+        except Exception as enrich_exc:
+            log.error("[ENRICH] Enrichment pass raised: %s", enrich_exc, exc_info=True)
     else:
-        log.info("[ENRICH] Enrichment module not available — skipped")
+        log.error("[ENRICH] Module not available — enrichment skipped. Check import errors above.")
 
     # ── EXPIRY PASS ──────────────────────────────────────────────────────────
     # Runs after scan + enrichment. Marks past-date listings as expired so
