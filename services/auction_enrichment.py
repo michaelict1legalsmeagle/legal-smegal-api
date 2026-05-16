@@ -800,6 +800,42 @@ def _step_planning(postcode: str) -> dict:
     return result
 
 
+def _fetch_lot_image(source_url: str) -> "str | None":
+    """Fetch og:image from a lot detail page. Called once when image_url is null."""
+    if not source_url:
+        return None
+    try:
+        import requests as _req
+        r = _req.get(source_url, timeout=5,
+                     headers={"User-Agent": "Mozilla/5.0 (compatible; LegalSmegal/1.0)"},
+                     allow_redirects=True)
+        if r.status_code != 200:
+            return None
+        text = r.text
+        for prop in ('property="og:image"', 'name="og:image"', "property='og:image'"):
+            idx = text.find(prop)
+            if idx == -1:
+                continue
+            tag_start = text.rfind("<meta", 0, idx)
+            if tag_start == -1:
+                continue
+            tag_end = text.find(">", idx)
+            meta_html = text[tag_start:tag_end + 1]
+            for prefix in ('content="', "content='"):
+                ci = meta_html.find(prefix)
+                if ci == -1:
+                    continue
+                ci += len(prefix)
+                quote = prefix[-1]
+                end = meta_html.find(quote, ci)
+                url = meta_html[ci:end].strip()
+                if url.startswith("http"):
+                    return url
+    except Exception:
+        pass
+    return None
+
+
 def enrich_listing(
     listing: dict,
     supabase_client,
@@ -827,6 +863,11 @@ def enrich_listing(
     guide_price = _safe_float(listing.get("guide_price"))
 
     _t_start = time.time()
+    _image_url = listing.get("image_url") or None
+    if not _image_url:
+        _image_url = _fetch_lot_image(listing.get("source_url") or "")
+        if _image_url:
+            log.info("[ENRICH:%s] lot image fetched from detail page", listing_id)
     log.info("[ENRICH:%s] ── Start ─── postcode:%s guide:%s", listing_id, postcode, guide_price)
 
     steps_completed: list[str] = []
@@ -1072,6 +1113,7 @@ def enrich_listing(
 
     return {
         "listing_id":            listing_id,
+        "image_url":             _image_url,
         "investment_json":       investment_json,
         "enrichment_status":     enrichment_status,
         "enrichment_confidence": confidence,
@@ -1100,7 +1142,7 @@ def enrich_pass(
         # Include 'enriching': listing was being processed when job was killed.
         # Picked up on next run for clean retry.
         res = supabase_client.table("auction_listings") \
-            .select("id,postcode,guide_price,auction_house") \
+            .select("id,postcode,guide_price,auction_house,source_url,image_url") \
             .eq("status", "active") \
             .in_("enrichment_status", ["pending", "failed", "enriching"]) \
             .order("first_seen_at", desc=True) \
@@ -1136,13 +1178,16 @@ def enrich_pass(
                 lad_cache      = lad_cache,
             )
 
-            update_res = supabase_client.table("auction_listings").update({
+            _upd = {
                 "investment_json":       enrich_result["investment_json"],
                 "enrichment_status":     enrich_result["enrichment_status"],
                 "enrichment_confidence": enrich_result["enrichment_confidence"],
                 "enriched_at":           enrich_result["investment_json"]["enriched_at"],
                 "enrichment_error":      enrich_result.get("enrichment_error"),
-            }).eq("id", listing_id).execute()
+            }
+            if enrich_result.get("image_url"):
+                _upd["image_url"] = enrich_result["image_url"]
+            update_res = supabase_client.table("auction_listings").update(_upd).eq("id", listing_id).execute()
             rows_written = len(update_res.data or [])
             if not rows_written:
                 log.error("[ENRICH:%s] DB write returned 0 rows — RLS or ID mismatch", listing_id)
