@@ -100,6 +100,8 @@ def scrape_source(source: dict, meta: dict | None = None) -> list[dict]:
             results = _scrape_firecrawl(source, _meta)
         elif method == "http_seed":
             results = _scrape_http_seed(source, _meta)
+        elif method == "savills":
+            results = _scrape_savills(source, _meta)
         else:
             results = _scrape_http(source)
     except Exception as exc:
@@ -350,6 +352,86 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
     return results
 
 
+
+
+def _scrape_savills(source: dict, meta: dict | None = None) -> list:
+    """
+    Savills auction scraper.
+
+    Step 1 — HTTP GET the seed URL (upcoming-auctions page) to find the
+             current active catalogue URL. Savills auction IDs rotate monthly;
+             the seed page always lists the next available 'View catalogue'.
+
+    Step 2 — Append /quantity-100 to get 100 lots per page, then call
+             _scrape_firecrawl() which renders JS and extracts lot data
+             via the firecrawl_prompt stored in source.selectors.
+
+    The source.listings_url stores the seed URL:
+      https://auctions.savills.co.uk/upcoming-auctions
+    """
+    import re as _re
+    slug = source.get("slug", "savills")
+    seed = source.get("listings_url") or "https://auctions.savills.co.uk/upcoming-auctions"
+
+    # ── Step 1: resolve active catalogue URL from seed ─────────────────────
+    catalogue_url = None
+    try:
+        import requests as _req
+        from bs4 import BeautifulSoup as _BS
+
+        r = _req.get(seed, timeout=15,
+                     headers={"User-Agent": "Mozilla/5.0 (compatible; LegalSmegal/1.0)"})
+        r.raise_for_status()
+        soup = _BS(r.text, "html.parser")
+
+        # Find <a> with href matching /auctions/DD-MONTH-YYYY-NNN
+        _pat = _re.compile(r"/auctions/\d+-\w+-\d{4}-\d+$")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if _pat.search(href):
+                txt = a.get_text(strip=True).lower()
+                if "catalogue" in txt or "lot" in txt:
+                    catalogue_url = href
+                    if not catalogue_url.startswith("http"):
+                        catalogue_url = "https://auctions.savills.co.uk" + catalogue_url
+                    break
+
+        if not catalogue_url:
+            log.warning("[SCAN:%s] No active catalogue found on Savills seed page", slug)
+            if meta is not None:
+                meta["partial_reason"] = "no_savills_catalogue"
+            return []
+
+        log.info("[SCAN:%s] Savills catalogue resolved: %s", slug, catalogue_url)
+
+    except Exception as exc:
+        log.error("[SCAN:%s] Savills seed fetch failed: %s", slug, exc)
+        if meta is not None:
+            meta["partial_reason"] = f"savills_seed_error: {exc}"
+        return []
+
+    # ── Step 2: Firecrawl the catalogue (100 lots per page) ────────────────
+    # Append /quantity-100 so Firecrawl sees a full page of lots
+    firecrawl_url = catalogue_url.rstrip("/") + "/quantity-100"
+    source_override = {**source, "listings_url": firecrawl_url}
+
+    results = _scrape_firecrawl(source_override, meta=meta)
+
+    # Post-process: inject auction_date from catalogue URL slug if missing
+    # URL pattern: /auctions/20-may-2026-223 → "2026-05-20"
+    _date_m = _re.search(r"/(\d+)-(\w+)-(\d{4})-\d+", catalogue_url)
+    if _date_m:
+        _day, _mon_str, _yr = _date_m.group(1), _date_m.group(2).lower(), _date_m.group(3)
+        _MONTHS = {"jan":"01","feb":"02","mar":"03","apr":"04","may":"05","jun":"06",
+                   "jul":"07","aug":"08","sep":"09","oct":"10","nov":"11","dec":"12"}
+        _mon = _MONTHS.get(_mon_str[:3])
+        if _mon:
+            _auction_date = f"{_yr}-{_mon}-{_day.zfill(2)}"
+            for lot in results:
+                if not lot.get("_raw_auction_date"):
+                    lot["_raw_auction_date"] = _auction_date
+
+    return results
 
 
 def _scrape_http_seed(source: dict, meta: dict | None = None) -> list[dict]:
