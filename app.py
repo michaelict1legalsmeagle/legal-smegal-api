@@ -8274,6 +8274,74 @@ def auction_listing_detail(listing_id: str):
 
 
 
+
+@app.route("/api/auction/listings/<listing_id>/infer", methods=["POST", "OPTIONS"])
+@require_auth
+def auction_listing_infer(listing_id):
+    """
+    POST /api/auction/listings/<listing_id>/infer
+    On-demand Phase 9 LLM inference for a single discovery listing.
+    Result cached in investment_json.llm_inference.
+    Pass ?force=true to bypass cache and regenerate.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    force = request.args.get("force", "").lower() in ("1", "true", "yes")
+
+    try:
+        # Fetch listing
+        res = supabase.table("auction_listings")             .select(
+                "id,address,postcode,guide_price,property_type,auction_date,"
+                "auction_house,source_url,investment_json,enrichment_status"
+            )             .eq("id", listing_id)             .maybe_single()             .execute()
+
+        if not res.data:
+            return jsonify({"error": "listing_not_found"}), 404
+
+        listing = res.data
+        inv     = listing.get("investment_json") or {}
+
+        # Return cached inference unless force=true
+        if not force and inv.get("llm_inference") and not inv["llm_inference"].get("error"):
+            return jsonify({
+                "listing_id":    listing_id,
+                "llm_inference": inv["llm_inference"],
+                "cached":        True,
+            }), 200
+
+        # Require basic enrichment before running LLM
+        if listing.get("enrichment_status") not in ("complete", "partial"):
+            return jsonify({
+                "error":  "listing_not_enriched",
+                "status": listing.get("enrichment_status"),
+            }), 422
+
+        # Run LLM inference
+        from services.auction_inference import run_inference
+        result = run_inference(listing=listing, inv=inv)
+
+        if result.get("error"):
+            app.logger.error("[LLM_INFER] %s: %s", listing_id, result["error"])
+            return jsonify({"error": result["error"]}), 500
+
+        # Cache result in investment_json.llm_inference
+        inv["llm_inference"] = result
+        supabase.table("auction_listings")             .update({"investment_json": inv})             .eq("id", listing_id)             .execute()
+
+        return jsonify({
+            "listing_id":    listing_id,
+            "llm_inference": result,
+            "cached":        False,
+        }), 200
+
+    except Exception as e:
+        app.logger.exception("[LLM_INFER] endpoint error for %s", listing_id)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/auction/enrichment/debug/<listing_id>", methods=["GET", "OPTIONS"])
 @require_auth
 def enrichment_debug(listing_id):
