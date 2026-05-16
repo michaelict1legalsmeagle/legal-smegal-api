@@ -128,6 +128,32 @@ def scrape_source(source: dict, meta: dict | None = None) -> list[dict]:
 
 
 
+def _extract_lot_image(container) -> "str | None":
+    """
+    Extract primary property image URL from a BeautifulSoup lot container.
+    Tries og:image meta first, then first meaningful img[src]. Never raises.
+    """
+    if container is None:
+        return None
+    try:
+        og = (container.find("meta", property="og:image")
+              or container.find("meta", attrs={"name": "og:image"}))
+        if og and og.get("content", "").strip().startswith("http"):
+            return og["content"].strip()
+        SKIP = ("data:", ".svg", "logo", "icon", "placeholder", "blank", "spacer", "1x1")
+        for img in container.find_all("img", src=True):
+            val = img["src"].strip()
+            if not val or any(s in val.lower() for s in SKIP):
+                continue
+            if val.startswith("//"):
+                val = "https:" + val
+            if val.startswith("http"):
+                return val
+    except Exception:
+        pass
+    return None
+
+
 def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
     """
     Parser for Auction House UK pages.
@@ -274,6 +300,7 @@ def _extract_listings_from_text(soup: Any, source: dict) -> list[dict]:
             "_raw_auction_date":   None,  # not in list view — on detail page
             "_raw_property_type":  property_type,
             "_raw_legal_pack_url": legal_pack_raw,
+            "_raw_image_url":      _extract_lot_image(parent),
             "_source_id":          source.get("id"),
             "_auction_house":      source.get("name"),
             "_is_sold":            _is_sold,
@@ -508,6 +535,7 @@ def _extract_listing_from_element(el: Any, selectors: dict, page_url: str, sourc
         "_raw_auction_date":   _text(selectors.get("auction_date")),
         "_raw_property_type":  _text(selectors.get("property_type")),
         "_raw_legal_pack_url": _href(selectors.get("legal_pack_link")),
+        "_raw_image_url":      _extract_lot_image(element),
         "_source_id":          source.get("id"),
         "_auction_house":      source.get("name"),
     }
@@ -623,6 +651,7 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
             "_raw_auction_date":   item.get("auction_date"),
             "_raw_property_type":  item.get("property_type"),
             "_raw_legal_pack_url": item.get("legal_pack_url"),
+            "_raw_image_url":      item.get("image_url"),
             "_source_id":          source.get("id"),
             "_auction_house":      source.get("name"),
         })
@@ -677,6 +706,7 @@ def _normalise_listing(raw: dict, source: dict) -> Optional[dict]:
         "auction_date":    _parse_date(raw.get("_raw_auction_date")) if _is_valid_date(_parse_date(raw.get("_raw_auction_date"))) else None,
         "property_type":   _clean_text(raw.get("_raw_property_type")),
         "legal_pack_url":  _clean_url(raw.get("_raw_legal_pack_url")),
+        "image_url":       _clean_url(raw.get("_raw_image_url")),
         "status":          "active",
     }
 
