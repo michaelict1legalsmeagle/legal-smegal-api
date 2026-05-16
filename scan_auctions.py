@@ -172,6 +172,7 @@ def _upsert_listings(supabase: Client, listings: list[dict]) -> tuple[int, int]:
             "auction_date":    listing.get("auction_date"),
             "property_type":   listing.get("property_type"),
             "legal_pack_url":  listing.get("legal_pack_url"),
+            "image_url":       listing.get("image_url") or None,
             "status":          "active",
             "last_seen_at":    datetime.now(timezone.utc).isoformat(),
         }
@@ -183,7 +184,7 @@ def _upsert_listings(supabase: Client, listings: list[dict]) -> tuple[int, int]:
         # guide_price, legal_pack_url etc. may become null on a rescan when
         # an auction has passed (page structure changes) but the original value
         # remains correct and useful for investors.
-        _preserve = {"guide_price", "legal_pack_url", "auction_date",
+        _preserve = {"guide_price", "legal_pack_url", "image_url", "auction_date",
                      "address", "postcode", "property_type", "tenure", "lot_number"}
 
         try:
