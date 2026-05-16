@@ -131,24 +131,65 @@ def scrape_source(source: dict, meta: dict | None = None) -> list[dict]:
 def _extract_lot_image(container) -> "str | None":
     """
     Extract primary property image URL from a BeautifulSoup lot container.
-    Tries og:image meta first, then first meaningful img[src]. Never raises.
+    Handles standard src, lazy-load (data-src / data-original / data-lazy),
+    og:image meta, and srcset. Never raises.
     """
     if container is None:
         return None
+    SKIP = ("data:", ".svg", ".gif", "logo", "icon", "placeholder",
+            "blank", "spacer", "1x1", "nophoto", "noimage", "default")
+    # Attributes to check in priority order (covers lazy-load patterns)
+    SRC_ATTRS = ("data-src", "data-original", "data-lazy", "data-lazy-src",
+                 "data-url", "data-image", "src")
     try:
+        # 1. og:image meta inside container (rare but covers full-page passes)
         og = (container.find("meta", property="og:image")
               or container.find("meta", attrs={"name": "og:image"}))
         if og and og.get("content", "").strip().startswith("http"):
             return og["content"].strip()
-        SKIP = ("data:", ".svg", "logo", "icon", "placeholder", "blank", "spacer", "1x1")
-        for img in container.find_all("img", src=True):
-            val = img["src"].strip()
-            if not val or any(s in val.lower() for s in SKIP):
-                continue
-            if val.startswith("//"):
-                val = "https:" + val
-            if val.startswith("http"):
+
+        # 2. img tag — check all lazy-load attributes before falling to src
+        for img in container.find_all("img"):
+            for attr in SRC_ATTRS:
+                val = (img.get(attr) or "").strip()
+                if not val:
+                    continue
+                if val.startswith("//"):
+                    val = "https:" + val
+                if not val.startswith("http"):
+                    continue
+                if any(s in val.lower() for s in SKIP):
+                    continue
                 return val
+
+        # 3. srcset — take first entry (smallest, still the real image)
+        for img in container.find_all("img", srcset=True):
+            first = img["srcset"].split(",")[0].strip().split()[0]
+            if first.startswith("http") and not any(s in first.lower() for s in SKIP):
+                return first
+
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_detail_og_image(source_url: str, session) -> "str | None":
+    """
+    Fetch og:image from a lot detail page as a fallback.
+    Only called when container extraction fails.
+    Uses a short timeout — non-blocking on failure.
+    """
+    if not source_url:
+        return None
+    try:
+        r = session.get(source_url, timeout=8)
+        if r.status_code != 200:
+            return None
+        from bs4 import BeautifulSoup as _BS
+        soup = _BS(r.text, "html.parser")
+        og = soup.find("meta", property="og:image")
+        if og and og.get("content", "").strip().startswith("http"):
+            return og["content"].strip()
     except Exception:
         pass
     return None
@@ -638,11 +679,20 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
             meta["partial_reason"] = "firecrawl_empty"
         return []
 
+    # Page-level og:image from Firecrawl metadata (reliable fallback per source page)
+    page_og_image = (
+        (data.get("data") or {})
+        .get("metadata", {})
+        .get("og:image") or None
+    )
+
     # Remap to _raw_ convention for consistent normalisation
     results = []
     for item in raw_listings:
         if not isinstance(item, dict):
             continue
+        # Per-lot image preferred; fall back to page og:image (same for all lots)
+        img = item.get("image_url") or page_og_image or None
         results.append({
             "_raw_source_url":     item.get("detail_url"),
             "_raw_lot_number":     item.get("lot_number"),
@@ -651,7 +701,7 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
             "_raw_auction_date":   item.get("auction_date"),
             "_raw_property_type":  item.get("property_type"),
             "_raw_legal_pack_url": item.get("legal_pack_url"),
-            "_raw_image_url":      item.get("image_url"),
+            "_raw_image_url":      img,
             "_source_id":          source.get("id"),
             "_auction_house":      source.get("name"),
         })
