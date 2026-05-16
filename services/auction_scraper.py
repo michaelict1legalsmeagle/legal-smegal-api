@@ -412,7 +412,7 @@ def _scrape_savills(source: dict, meta: dict | None = None) -> list:
 
     # ── Step 2: Firecrawl the catalogue (100 lots per page) ────────────────
     # Append /quantity-100 so Firecrawl sees a full page of lots
-    firecrawl_url = catalogue_url.rstrip("/") + "/quantity-100"
+    firecrawl_url = catalogue_url.rstrip("/") + "/page-1/quantity-100"
     source_override = {**source, "listings_url": firecrawl_url}
 
     results = _scrape_firecrawl(source_override, meta=meta)
@@ -774,7 +774,12 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
         if not isinstance(item, dict):
             continue
         # Per-lot image preferred; fall back to page og:image (same for all lots)
-        img = item.get("image_url") or page_og_image or None
+        _img_raw = item.get("image_url") or None
+        # Reject logos/placeholders — fall back to page og:image only if it looks like a property photo
+        if not _is_property_image(_img_raw):
+            _img_raw = None
+        _page_img = page_og_image if _is_property_image(page_og_image) else None
+        img = _img_raw or _page_img or None
         results.append({
             "_raw_source_url":     item.get("detail_url"),
             "_raw_lot_number":     item.get("lot_number"),
@@ -792,6 +797,29 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
 
 
 # ── NORMALISATION ─────────────────────────────────────────────────────────────
+
+
+_LOGO_PATTERNS = (
+    "/build/assets/",      # Vite-built static assets (BTG Eddisons, SDL)
+    "/assets/company-logo", # Savills logo
+    "/assets/images/auctions/archived",  # Savills generic archive placeholder
+    "og-share",            # Generic og:image share assets
+    "company-logo",
+    "logo.svg",
+    "brand-",
+    "/logo/",
+    "placeholder",
+    "noimage",
+    "default-property",
+)
+
+def _is_property_image(url: "str | None") -> bool:
+    """Return True if url looks like a real property photo, not a logo or placeholder."""
+    if not url:
+        return False
+    lower = url.lower()
+    return not any(p in lower for p in _LOGO_PATTERNS)
+
 
 def _normalise_listing(raw: dict, source: dict) -> Optional[dict]:
     """
@@ -838,7 +866,7 @@ def _normalise_listing(raw: dict, source: dict) -> Optional[dict]:
         "auction_date":    _parse_date(raw.get("_raw_auction_date")) if _is_valid_date(_parse_date(raw.get("_raw_auction_date"))) else None,
         "property_type":   _clean_text(raw.get("_raw_property_type")),
         "legal_pack_url":  _clean_url(raw.get("_raw_legal_pack_url")),
-        "image_url":       _clean_url(raw.get("_raw_image_url")),
+        "image_url":       _clean_url(raw.get("_raw_image_url")) if _is_property_image(raw.get("_raw_image_url")) else None,
         "status":          "active",
     }
 
