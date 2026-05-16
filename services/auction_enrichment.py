@@ -611,6 +611,14 @@ def _step_inference(
             ),
             "source":     f"price_paid_raw_2025 ({comps['tier']} level)",
         })
+    elif not _comp_ok and not _hpi_ok:
+        signals.append({
+            "id":         "insufficient_evidence",
+            "direction":  "negative",
+            "label":      "Insufficient market data",
+            "text":       "Insufficient market data for pricing assessment in this postcode.",
+            "source":     "enrichment",
+        })
 
     # ── Confidence score ──────────────────────────────────────────────────────
     conf = _compute_confidence(
