@@ -4517,6 +4517,13 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
         summary = ". ".join(_summary_parts) + f". Median: {'£{:,}'.format(med) if med else 'n/a'}. Types: {pt_str}."
 
+        # latlng enrichment metadata: no lat/lng enrichment step exists in this
+        # function, so this is an inert placeholder. Defined here to prevent a
+        # NameError at the out["metrics"] assignment below (was previously
+        # referenced as `enrich_meta` without ever being defined, which caused
+        # get_housing_data to discard valid comps via the except handler).
+        enrich_meta = None
+
         out = metric_ok(summary, rows, sources, retrieved, HOUSING_CONFIDENCE_VALUE)
         out["metrics"] = {
             "provider":                    "supabase_rpc",
