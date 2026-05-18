@@ -6949,6 +6949,88 @@ def get_area(deal_id: str):
         return jsonify({"error": str(e)}), 500
 
 
+def _recompute_deal_ceiling(deal_id: str, area_data: dict):
+    """
+    D1 — recompute summary_json.ceiling from area_json comps and persist it.
+
+    The ceiling is normally computed during /api/analyze, which runs before
+    area_json exists; it therefore persists no_base_valuation and is never
+    refreshed. This helper recomputes the ceiling once area_json.housing
+    comps are available and re-persists ONLY the summary_json.ceiling key.
+
+    `area_data` is the area_json dict (freshly fetched or cached). Returns the
+    new ceiling dict, or None if it could not be computed / was not persisted.
+    Safe to call from any flow; a no-op when there are no comps. No formula
+    change — this calls the same _calc_ceiling used by /api/analyze.
+    """
+    if not (_ceiling_engine_available and _calc_ceiling and supabase):
+        return None
+    try:
+        _housing = (area_data or {}).get("housing") or {}
+        _comps = _housing.get("soldComps") or _housing.get("value") or []
+        _comp_prices = [c.get("price") for c in _comps
+                        if isinstance(c, dict) and c.get("price")]
+        if not _comp_prices:
+            return None  # nothing to recompute from — leave summary_json untouched
+
+        # Fresh read so the field-merge and optimistic lock use current state.
+        _row = supabase.table("deals").select(
+            "summary_json, financials_json, deal_type, updated_at"
+        ).eq("id", deal_id).single().execute()
+        _d = _row.data or {}
+        _summary = _d.get("summary_json")
+        if not isinstance(_summary, dict):
+            return None
+
+        _fins = _d.get("financials_json") or {}
+        _fins_inputs = dict(_fins.get("inputs") or _fins or {})
+        if not _fins_inputs.get("comps_avg_value"):
+            _fins_inputs["comps_avg_value"] = round(
+                sum(_comp_prices) / len(_comp_prices)
+            )
+
+        _strategy_map = {
+            "hmo": "HMO", "btl": "BTL", "flip": "Flip",
+            "brrr": "BRRR", "sa": "Serviced Accommodation",
+            "serviced": "Serviced Accommodation",
+        }
+        _strategy = (
+            _fins_inputs.get("strategy")
+            or _d.get("deal_type")
+            or (_summary.get("property") or {}).get("type")
+            or "BTL"
+        )
+        _strategy = _strategy_map.get(str(_strategy).lower(), str(_strategy))
+
+        _ceiling = _calc_ceiling(
+            legal_flags=_summary.get("flags") or [],
+            financial_inputs=_fins_inputs,
+            base_valuation=None,
+            strategy=_strategy,
+        )
+
+        # Merge: replace ONLY the ceiling key, preserve every other field.
+        _new_summary = dict(_summary)
+        _new_summary["ceiling"] = _ceiling
+
+        # Optimistic-lock write — reject if the row changed since our read.
+        _res = supabase.table("deals").update({
+            "summary_json": _new_summary,
+            "updated_at":   now_iso(),
+        }).eq("id", deal_id).eq("updated_at", _d.get("updated_at")).execute()
+
+        if not _res.data:
+            print(f"[ceiling-recompute STALE_WRITE_REJECTED] {deal_id} — newer update existed")
+            return None
+        print(f"[ceiling-recompute OK] {deal_id} "
+              f"base_method={_ceiling.get('base_method')} "
+              f"range={_ceiling.get('ceiling_range')}")
+        return _ceiling
+    except Exception as _e:
+        print(f"[ceiling-recompute ERROR] {deal_id}: {_e}")
+        return None
+
+
 @app.route("/api/deals/<deal_id>/area", methods=["POST"])
 @require_auth
 def save_area(deal_id: str):
@@ -6982,6 +7064,28 @@ def save_area(deal_id: str):
         cached = deal.data["area_json"]
         # Don't return error-marker cache as valid data
         if cached.get("fetch_status") != "error":
+            # D1 — heal a stale/missing summary_json.ceiling when the cached
+            # area_json already carries comps. Backgrounded so this cache
+            # response still returns immediately.
+            _sj_cached   = deal.data.get("summary_json") or {}
+            _ceil_cached = _sj_cached.get("ceiling")
+            _ceil_stale  = (
+                not _ceil_cached
+                or not isinstance(_ceil_cached, dict)
+                or _ceil_cached.get("error") == "no_base_valuation"
+                or (_ceil_cached.get("ceiling_range") or {}).get("low") is None
+            )
+            _housing_cached = (cached or {}).get("housing") or {}
+            _has_comps_cached = bool(
+                _housing_cached.get("soldComps") or _housing_cached.get("value")
+            )
+            if _ceil_stale and _has_comps_cached:
+                import threading as _tc
+                _tc.Thread(
+                    target=_recompute_deal_ceiling,
+                    args=(deal_id, cached),
+                    daemon=True,
+                ).start()
             # If cached data is missing inference, patch it in a background thread
             if not cached.get("inference") and cached.get("postcode"):
                 _cached_ref  = cached
@@ -7113,6 +7217,10 @@ def save_area(deal_id: str):
                 "area_json":  area_data,
                 "updated_at": now_iso(),
             }).eq("id", _deal_id).execute()
+
+            # D1 — area_json now carries fresh comps; recompute & persist the
+            # ceiling that /api/analyze could not compute before area existed.
+            _recompute_deal_ceiling(_deal_id, area_data)
 
             print(f"✅ Area data fetched and stored for deal {_deal_id} ({_postcode})")
 
