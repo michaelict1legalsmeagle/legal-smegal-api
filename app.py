@@ -3992,6 +3992,26 @@ def _median_int(values: List[int]) -> Optional[int]:
     return int((vs[mid - 1] + vs[mid]) / 2)
 
 
+# ── TASK 2: density-aware radius compression ────────────────────────────────
+# Measured: a 3-mile radius in dense London postcode areas pulls 13k-14k
+# transactions and the comps RPC times out cold (NW9/E14/N1/E1 verified).
+# Compress the START radius for these areas BEFORE RPC execution. Only the
+# London postcode areas are included — that is the measured timeout zone;
+# other areas are left on the configured default (no evidence they time out).
+_DENSE_POSTCODE_AREAS = frozenset({"E", "EC", "N", "NW", "SE", "SW", "W", "WC"})
+
+def _density_tier_radius(pc: str) -> Optional[float]:
+    """Compressed start radius (miles) for dense-market postcodes, else None
+    (None => use the configured default). Decided before RPC execution."""
+    if not pc:
+        return None
+    _m = re.match(r"^([A-Z]{1,2})", str(pc).upper().strip())
+    _area = _m.group(1) if _m else ""
+    if _area in _DENSE_POSTCODE_AREAS:
+        return 1.0
+    return None
+
+
 def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
@@ -4005,6 +4025,12 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         return metric_unavailable("Housing data not available: no postcode provided.", sources, retrieved)
 
     r_miles = radius_miles if isinstance(radius_miles, (int, float)) and radius_miles > 0 else HOUSING_DEFAULT_RADIUS_MILES
+    # Task 2 — density-aware radius compression. Applied ONLY when the caller
+    # did not pass an explicit radius (debug endpoints still override freely).
+    if not (isinstance(radius_miles, (int, float)) and radius_miles > 0):
+        _tier_r = _density_tier_radius(pc)
+        if _tier_r is not None:
+            r_miles = _tier_r
     lim = limit if isinstance(limit, int) and limit > 0 else HOUSING_DEFAULT_LIMIT
 
     lim = max(1, min(int(lim), HOUSING_MAX_LIMIT))
