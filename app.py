@@ -3998,7 +3998,12 @@ def _median_int(values: List[int]) -> Optional[int]:
 # Compress the START radius for these areas BEFORE RPC execution. Only the
 # London postcode areas are included — that is the measured timeout zone;
 # other areas are left on the configured default (no evidence they time out).
+#
+# Radius set to 0.5 mile (805 m) per cold-cache measurement: 1.0 mile still
+# returned 2.3-3.3 s for E14/N1/E1 (above the sub-2s bar); 0.5 mile delivers
+# NW9 676 ms, N1 820 ms, E14 1,535 ms (cold reads present) — all sub-2s.
 _DENSE_POSTCODE_AREAS = frozenset({"E", "EC", "N", "NW", "SE", "SW", "W", "WC"})
+_DENSE_RADIUS_MILES = 0.5
 
 def _density_tier_radius(pc: str) -> Optional[float]:
     """Compressed start radius (miles) for dense-market postcodes, else None
@@ -4008,7 +4013,7 @@ def _density_tier_radius(pc: str) -> Optional[float]:
     _m = re.match(r"^([A-Z]{1,2})", str(pc).upper().strip())
     _area = _m.group(1) if _m else ""
     if _area in _DENSE_POSTCODE_AREAS:
-        return 1.0
+        return _DENSE_RADIUS_MILES
     return None
 
 
