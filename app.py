@@ -6796,6 +6796,56 @@ def test_hpi_endpoint():
 
 
 # ── CEILING ENGINE — live endpoint for Flag Workbench ────────────────────────
+def _apply_audit_confidence_cap(ceiling: dict, area_data: dict) -> dict:
+    """T-4 — mechanical confidence cap shared by Path A (_recompute_deal_ceiling)
+    and Path B (/api/ceiling). Caps ceiling.confidence at 0.4 when the engine's
+    own area audit declares any of:
+      - insufficient_evidence
+      - a tenure-filter skip
+      - price_variance_pct > 50
+    Mutates `ceiling` in place and returns it. Safe on legacy `area_data`
+    without an audit block (returns unchanged). Never raises."""
+    if not isinstance(ceiling, dict):
+        return ceiling
+    try:
+        _m = ((area_data or {}).get("housing") or {}).get("metrics") or {}
+        _a = _m.get("audit") if isinstance(_m.get("audit"), dict) else None
+        _ins = bool(
+            (_a or {}).get("insufficient_evidence") if _a is not None
+            else _m.get("insufficient_evidence")
+        )
+        _skips_raw = (_a or {}).get("filters_skipped") if _a is not None else None
+        _skips = _skips_raw if isinstance(_skips_raw, list) else []
+        _tenure_skipped = any(
+            isinstance(s, str) and s.startswith("tenure:") for s in _skips
+        )
+        _var_raw = _m.get("price_variance_pct")
+        try:
+            _var = float(_var_raw) if _var_raw is not None else None
+        except (TypeError, ValueError):
+            _var = None
+        _high_var = _var is not None and _var > 50.0
+
+        if _ins or _tenure_skipped or _high_var:
+            _cap = 0.4
+            _cur_raw = ceiling.get("confidence")
+            try:
+                _cur = float(_cur_raw) if _cur_raw is not None else None
+            except (TypeError, ValueError):
+                _cur = None
+            if _cur is None or _cur > _cap:
+                ceiling["confidence"] = _cap
+                _reasons = []
+                if _ins:            _reasons.append("insufficient_evidence")
+                if _tenure_skipped: _reasons.append("tenure_filter_skipped")
+                if _high_var:       _reasons.append(f"price_variance_pct={_var:.1f}")
+                ceiling["confidence_capped_reasons"] = _reasons
+                ceiling["confidence_capped_at"] = _cap
+    except Exception as _err:
+        print(f"[ceiling-cap skipped] {_err}")
+    return ceiling
+
+
 @app.route("/api/ceiling", methods=["POST", "OPTIONS"])
 @require_auth
 def ceiling_endpoint():
@@ -6826,6 +6876,10 @@ def ceiling_endpoint():
         strategy         = body.get("strategy", "BTL")
         deal_id          = body.get("deal_id")
 
+        # D4 — captured during DB enrichment for the shared T-4 confidence cap.
+        # None when no deal_id or no DB row (cap is then a no-op).
+        _area_data_for_cap = None
+
         # If deal_id provided, enrich financial_inputs from DB
         if deal_id and supabase:
             try:
@@ -6853,95 +6907,46 @@ def ceiling_endpoint():
                             except (TypeError, ValueError):
                                 pass
 
-                    # Pull comps avg from area_json — multiple fallback paths
+                    # ── D4 CANONICALIZATION ─────────────────────────────────
+                    # /api/ceiling no longer derives its own comps_avg_value.
+                    # The canonical base lives in summary_json.ceiling, written
+                    # by _recompute_deal_ceiling (Path A) from the persisted
+                    # soldComps. Path B (this endpoint, Workbench live) reads
+                    # that canonical base and varies ONLY legal_flags.
+                    #
+                    # No fallback cascade. The pre-D4 cascade computed five
+                    # different bases (median-normalised soldComps, housing
+                    # metrics.median_price, summary_json avg_sold_price,
+                    # guide × 1.15, HPI regional/national/local, England RPC)
+                    # — that cascade is exactly what produced the Verdict /
+                    # Workbench valuation divergence on b724a3ee.
+                    #
+                    # If canonical base is missing, financial_inputs is left
+                    # without comps_avg_value; _calc_ceiling then returns the
+                    # same base_method=none degraded ceiling that Path A
+                    # produces in the same state. Structurally identical.
                     area = d.get("area_json") or {}
-                    housing = area.get("housing") or {}
-                    comps = housing.get("soldComps") or housing.get("value") or []
-                    print(f"[ceiling] deal={deal_id} area_json={'present' if area else 'MISSING'} "
-                          f"inference={'present' if area.get('inference') else 'MISSING'} "
-                          f"comps={len(comps)} guide={d.get('guide_price')} "
-                          f"strategy={strategy}")
-                    # Use the most-adjusted price available per comp, in order:
-                    # price_normalised (area+HPI) > hpi_adjusted_price > nominal price
-                    # This ensures ceiling_engine receives the normalised comparable value
-                    def _best_comp_price(c: dict) -> int | None:
-                        for k in ("price_normalised", "hpi_adjusted_price", "price"):
-                            v = c.get(k)
-                            if v and int(float(v)) > 5000:
-                                return int(float(v))
-                        return None
-                    comp_prices = [p for c in comps if (p := _best_comp_price(c))]
-                    if comp_prices and not merged.get("comps_avg_value"):
-                        # Use median not mean — resistant to outliers
-                        _cp_sorted = sorted(comp_prices)
-                        _n = len(_cp_sorted)
-                        _med = _cp_sorted[_n // 2] if _n % 2 else (
-                            _cp_sorted[_n//2 - 1] + _cp_sorted[_n//2]) // 2
-                        merged["comps_avg_value"] = _med
-                        merged["comps_price_basis"] = (
-                            "normalised" if any(c.get("price_normalised") for c in comps)
-                            else "hpi_adjusted" if any(c.get("hpi_adjusted_price") for c in comps)
-                            else "nominal"
-                        )
-                    # Fallback 1: median_price from housing metrics
-                    if not merged.get("comps_avg_value"):
-                        median_p = (housing.get("metrics") or {}).get("median_price")
-                        if median_p and float(median_p) > 5000:
-                            merged["comps_avg_value"] = int(float(median_p))
-                    # Fallback 2: summary_json avg_sold_price field
-                    if not merged.get("comps_avg_value"):
-                        _sj = d.get("summary_json") or {}
-                        _sp = (_sj.get("property") or {}).get("avg_sold_price") or                               (_sj.get("area") or {}).get("avg_sold_price")
-                        if _sp and float(_sp) > 5000:
-                            merged["comps_avg_value"] = int(float(_sp))
-                    # Fallback 3: guide price × 1.15 as last resort (clearly labelled)
-                    if not merged.get("comps_avg_value") and d.get("guide_price"):
-                        _gp = float(d.get("guide_price") or 0)
-                        if _gp > 5000:
-                            merged["comps_avg_value"] = round(_gp * 1.15)
-                            merged["comps_source"] = "guide_price_proxy"
+                    _area_data_for_cap = area  # capture for the shared T-4 cap below
+                    _sj = d.get("summary_json") or {}
+                    _canon_ceiling = _sj.get("ceiling") if isinstance(_sj, dict) else None
+                    _canon_ceiling = _canon_ceiling if isinstance(_canon_ceiling, dict) else {}
+                    _canon_base_raw = _canon_ceiling.get("base_valuation")
+                    try:
+                        _canon_base_f = float(_canon_base_raw) if _canon_base_raw is not None else None
+                    except (TypeError, ValueError):
+                        _canon_base_f = None
 
-                    # Fallback 4: HPI average house price from inference benchmarks
-                    # benchmarks.price structure: {local: comp_avg, regional: LAD HPI avg, national: England avg}
-                    # "local" = comp_avg (null when housing_comps_v1 returns 0 rows)
-                    # "regional" = uk_hpi_monthly average_price for this LAD (non-null when HPI data loaded)
-                    # "national" = England-wide average (always available)
-                    if not merged.get("comps_avg_value"):
-                        try:
-                            _inf = (area.get("inference") or {})
-                            _bprice = (_inf.get("benchmarks") or {}).get("price") or {}
-                            # Priority: regional LAD avg → national avg → null
-                            _hpi_avg = None
-                            for _price_key in ("regional", "national", "local"):
-                                _v = _bprice.get(_price_key)
-                                if _v and isinstance(_v, (int, float)) and float(_v) > 5000:
-                                    _hpi_avg = float(_v)
-                                    _hpi_src = _price_key
-                                    break
-                            if _hpi_avg:
-                                merged["comps_avg_value"] = int(_hpi_avg)
-                                merged["comps_source"] = f"hpi_{_hpi_src}_avg_proxy"
-                                print(f"[ceiling] Fallback 4: using HPI {_hpi_src} avg £{int(_hpi_avg):,} for {deal_id}")
-                        except Exception as _f4e:
-                            print(f"[ceiling] Fallback 4 failed: {_f4e}")
+                    if _canon_base_f and _canon_base_f > 5000 and not merged.get("comps_avg_value"):
+                        merged["comps_avg_value"]  = int(round(_canon_base_f))
+                        merged["comps_source"]     = "canonical_persisted_base"
+                        merged["comps_base_method"] = _canon_ceiling.get("base_method")
 
-                    # Fallback 5: England aggregate via get_hpi_benchmark RPC
-                    # Uses SECURITY DEFINER RPC — proven to bypass REST table query failure.
-                    # supabase_data_query REST path silently returns [] for uk_hpi_monthly.
-                    if not merged.get("comps_avg_value") and supabase:
-                        try:
-                            for _fb5_code in ("E92000001", "K02000001"):
-                                _fb5_res = supabase.rpc("get_hpi_benchmark", {"p_area_code": _fb5_code}).execute()
-                                _fb5_rows = _fb5_res.data if hasattr(_fb5_res, "data") and isinstance(_fb5_res.data, list) else []
-                                if _fb5_rows:
-                                    _fb5_avg = safe_float(_fb5_rows[0].get("average_price"))
-                                    if _fb5_avg and _fb5_avg > 5000:
-                                        merged["comps_avg_value"] = int(_fb5_avg)
-                                        merged["comps_source"] = "hpi_england_aggregate_proxy"
-                                        print(f"[ceiling] Fallback 5 (RPC): using {_fb5_code} avg £{int(_fb5_avg):,} for {deal_id}")
-                                        break
-                        except Exception as _f5e:
-                            print(f"[ceiling] Fallback 5 (RPC) failed: {_f5e}")
+                    print(
+                        f"[ceiling] deal={deal_id} "
+                        f"canonical_base={('£' + format(merged['comps_avg_value'], ',')) if merged.get('comps_avg_value') else 'MISSING'} "
+                        f"base_method={_canon_ceiling.get('base_method')} "
+                        f"strategy={strategy}"
+                    )
 
                     financial_inputs = merged
 
@@ -6963,6 +6968,12 @@ def ceiling_endpoint():
             base_valuation=float(base_val) if base_val else None,
             strategy=str(strategy),
         )
+
+        # D4 — Path B (/api/ceiling) applies the same T-4 confidence cap as
+        # Path A (_recompute_deal_ceiling). Both paths thus report identical
+        # confidence semantics derived from the same persisted audit block.
+        # _area_data_for_cap was set during DB enrichment; None otherwise.
+        result = _apply_audit_confidence_cap(result, _area_data_for_cap)
 
         # Store ceiling to DB so dashboard can show yield/cashflow
         # without requiring Financial Model to be visited first
@@ -7075,52 +7086,8 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
             strategy=_strategy,
         )
 
-        # ── T-4: mechanical confidence cap ──────────────────────────────────
-        # The engine records insufficient_evidence, tenure-filter skips, and
-        # price_variance_pct in area_json.housing.metrics.audit, but does not
-        # propagate them to ceiling.confidence. T-4 enforces propagation only:
-        # confidence is capped at 0.4 when any trigger fires. Base, range,
-        # discount, and decomposition are untouched. Backwards compatible —
-        # legacy area_json without an audit block triggers nothing.
-        if isinstance(_ceiling, dict):
-            try:
-                _metrics = ((area_data or {}).get("housing") or {}).get("metrics") or {}
-                _audit_blk = _metrics.get("audit") if isinstance(_metrics.get("audit"), dict) else None
-                _ins = bool(
-                    (_audit_blk or {}).get("insufficient_evidence")
-                    if _audit_blk is not None
-                    else _metrics.get("insufficient_evidence")
-                )
-                _skips_raw = (_audit_blk or {}).get("filters_skipped") if _audit_blk is not None else None
-                _skips = _skips_raw if isinstance(_skips_raw, list) else []
-                _tenure_skipped = any(
-                    isinstance(s, str) and s.startswith("tenure:") for s in _skips
-                )
-                _variance_raw = _metrics.get("price_variance_pct")
-                try:
-                    _variance = float(_variance_raw) if _variance_raw is not None else None
-                except (TypeError, ValueError):
-                    _variance = None
-                _high_variance = _variance is not None and _variance > 50.0
-
-                if _ins or _tenure_skipped or _high_variance:
-                    _cap = 0.4
-                    _cur_raw = _ceiling.get("confidence")
-                    try:
-                        _cur = float(_cur_raw) if _cur_raw is not None else None
-                    except (TypeError, ValueError):
-                        _cur = None
-                    if _cur is None or _cur > _cap:
-                        _ceiling["confidence"] = _cap
-                        _reasons = []
-                        if _ins:            _reasons.append("insufficient_evidence")
-                        if _tenure_skipped: _reasons.append("tenure_filter_skipped")
-                        if _high_variance:  _reasons.append(f"price_variance_pct={_variance:.1f}")
-                        _ceiling["confidence_capped_reasons"] = _reasons
-                        _ceiling["confidence_capped_at"] = _cap
-            except Exception as _t4_err:
-                # cap is advisory — never let it abort persistence
-                print(f"[ceiling-recompute T-4 cap skipped] {deal_id}: {_t4_err}")
+        # T-4 (centralised under D4) — same cap helper as /api/ceiling.
+        _apply_audit_confidence_cap(_ceiling, area_data)
 
         # Merge: replace ONLY the ceiling key, preserve every other field.
         _new_summary = dict(_summary)
