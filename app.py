@@ -4065,6 +4065,31 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         if not isinstance(rows, list):
             rows = []
 
+        # ── T-1: dedupe identical PPD entries post-RPC ──────────────────────
+        # A single conveyance can appear as multiple Price Paid Data rows
+        # (separate title entries — flat + parking, etc.) sharing identical
+        # (postcode, price, date_of_transfer). They are not two distinct
+        # transactions. Dedupe at source so every downstream statistic
+        # (mean, median, IQR, similarity, area-normalisation) operates on
+        # unique transactions only.
+        _raw_rpc_count = len(rows)
+        if rows:
+            _seen_keys: set = set()
+            _deduped: list = []
+            for _r in rows:
+                _rd = _r if isinstance(_r, dict) else {}
+                _k = (
+                    _rd.get("postcode"),
+                    _rd.get("price"),
+                    str(_rd.get("date_of_transfer") or ""),
+                )
+                if _k in _seen_keys:
+                    continue
+                _seen_keys.add(_k)
+                _deduped.append(_r)
+            rows = _deduped
+        _duplicates_removed = _raw_rpc_count - len(rows)
+
         if not rows:
             out = metric_unavailable(
                 f"No sold comparables returned within {r_miles} miles for {pc}.",
@@ -4100,6 +4125,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # Every decision recorded for lineage disclosure
         _audit: dict = {
             "postcode": pc,
+            "raw_rpc_count": _raw_rpc_count,
+            "duplicates_removed": _duplicates_removed,
             "initial_rpc_count": len(rows),
             "radius_miles": r_miles,
             "filters_applied": [],
@@ -4497,6 +4524,14 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             )
 
         med = _median_int(prices)
+        # T-3: arithmetic mean on the same price stream the median operates on.
+        # Until now metrics.average_price held the median (mis-labelled), so the
+        # two keys always returned the same value. Computing the mean here makes
+        # the two reported statistics distinct and label-honest. Same input
+        # stream, different statistic — no cross-stream mixing. The persist
+        # ceiling's base-statistic choice is unchanged (tracked as D4/D-8).
+        _mean_val = (sum(prices) / len(prices)) if prices else None
+        avg = int(round(_mean_val)) if _mean_val is not None else None
         min_m = min(miles_list) if miles_list else None
         max_m = max(miles_list) if miles_list else None
 
@@ -4564,8 +4599,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "limit":                       lim,
             "count":                       len(rows),
             "median_price":                med,
-            "avg":                         med,   # alias: inference engine + frontend avCompAvg
-            "average_price":               med,   # alias: build_area_inference comp_avg lookup
+            "avg":                         avg,   # T-3: arithmetic mean (was: median, mislabelled)
+            "average_price":               avg,   # T-3: arithmetic mean (was: median, mislabelled)
             "area_normalisation_applied":  _use_normalised,
             "area_normalisation_coverage": _area_normalised_count,
             "hpi_adjusted_count":          _hpi_adjusted_count,
@@ -7039,6 +7074,53 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
             base_valuation=None,
             strategy=_strategy,
         )
+
+        # ── T-4: mechanical confidence cap ──────────────────────────────────
+        # The engine records insufficient_evidence, tenure-filter skips, and
+        # price_variance_pct in area_json.housing.metrics.audit, but does not
+        # propagate them to ceiling.confidence. T-4 enforces propagation only:
+        # confidence is capped at 0.4 when any trigger fires. Base, range,
+        # discount, and decomposition are untouched. Backwards compatible —
+        # legacy area_json without an audit block triggers nothing.
+        if isinstance(_ceiling, dict):
+            try:
+                _metrics = ((area_data or {}).get("housing") or {}).get("metrics") or {}
+                _audit_blk = _metrics.get("audit") if isinstance(_metrics.get("audit"), dict) else None
+                _ins = bool(
+                    (_audit_blk or {}).get("insufficient_evidence")
+                    if _audit_blk is not None
+                    else _metrics.get("insufficient_evidence")
+                )
+                _skips_raw = (_audit_blk or {}).get("filters_skipped") if _audit_blk is not None else None
+                _skips = _skips_raw if isinstance(_skips_raw, list) else []
+                _tenure_skipped = any(
+                    isinstance(s, str) and s.startswith("tenure:") for s in _skips
+                )
+                _variance_raw = _metrics.get("price_variance_pct")
+                try:
+                    _variance = float(_variance_raw) if _variance_raw is not None else None
+                except (TypeError, ValueError):
+                    _variance = None
+                _high_variance = _variance is not None and _variance > 50.0
+
+                if _ins or _tenure_skipped or _high_variance:
+                    _cap = 0.4
+                    _cur_raw = _ceiling.get("confidence")
+                    try:
+                        _cur = float(_cur_raw) if _cur_raw is not None else None
+                    except (TypeError, ValueError):
+                        _cur = None
+                    if _cur is None or _cur > _cap:
+                        _ceiling["confidence"] = _cap
+                        _reasons = []
+                        if _ins:            _reasons.append("insufficient_evidence")
+                        if _tenure_skipped: _reasons.append("tenure_filter_skipped")
+                        if _high_variance:  _reasons.append(f"price_variance_pct={_variance:.1f}")
+                        _ceiling["confidence_capped_reasons"] = _reasons
+                        _ceiling["confidence_capped_at"] = _cap
+            except Exception as _t4_err:
+                # cap is advisory — never let it abort persistence
+                print(f"[ceiling-recompute T-4 cap skipped] {deal_id}: {_t4_err}")
 
         # Merge: replace ONLY the ceiling key, preserve every other field.
         _new_summary = dict(_summary)
