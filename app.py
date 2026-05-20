@@ -4090,6 +4090,28 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             rows = _deduped
         _duplicates_removed = _raw_rpc_count - len(rows)
 
+        # ── S-2: PPD Category-B exclusion ──────────────────────────────────
+        # HM Land Registry classifies Price Paid records as:
+        #   Cat-A = standard arm's-length residential sale (institutional input)
+        #   Cat-B = non-standard: repossession, BTL portfolio transfer,
+        #           sub-market sale, transfer to corporate vehicle, etc.
+        #           (NOT comparable evidence)
+        # Cat-A is the only category an institutional valuer would admit.
+        # Surfaced by S-1 (RPC now returns ppd_category_type); this patch is
+        # the first consumer of that field. Null treated as A (literal spec:
+        # drop only where ppd_category_type == 'B').
+        _cat_b_excluded_count = 0
+        if rows:
+            _cat_a_only: list = []
+            for _r in rows:
+                _rd = _r if isinstance(_r, dict) else {}
+                _cat = str(_rd.get("ppd_category_type") or "").upper()
+                if _cat == "B":
+                    _cat_b_excluded_count += 1
+                    continue
+                _cat_a_only.append(_r)
+            rows = _cat_a_only
+
         if not rows:
             out = metric_unavailable(
                 f"No sold comparables returned within {r_miles} miles for {pc}.",
@@ -4127,6 +4149,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "postcode": pc,
             "raw_rpc_count": _raw_rpc_count,
             "duplicates_removed": _duplicates_removed,
+            "cat_b_excluded_count": _cat_b_excluded_count,
             "initial_rpc_count": len(rows),
             "radius_miles": r_miles,
             "filters_applied": [],
@@ -4134,6 +4157,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "outliers_rejected": 0,
             "hpi_adjusted_count": 0,
             "area_normalised_count": 0,
+            "tenure_resolved_count": 0,
+            "new_build_resolved_count": 0,
             "final_comp_count": 0,
             "methodology_degraded": False,
             "insufficient_evidence": False,
@@ -4475,6 +4500,47 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         if not _use_normalised and _subject_area:
             _audit["warnings"].append(f"floor_area_normalisation_skipped: only {_area_normalised_count}/10 comps have floor area data")
 
+        # ── S-3: post-normalisation outlier bounds ──────────────────────────
+        # Linear £/m² area-normalisation can produce extreme synthetic prices
+        # in prime central London where comparable floor areas vary by an
+        # order of magnitude. The Step 9 IQR rejection operates on nominal
+        # prices, so a post-normalisation [0.5×, 2×] band around the
+        # normalised median protects downstream median / mean / variance
+        # statistics from arithmetic artefacts of the normalisation function.
+        # Acts on price_normalised which Step 10 guarantees is set on every
+        # row (area-normalised, HPI-adjusted, or nominal fallback).
+        _post_norm_excluded = 0
+        if rows:
+            _norm_vals: list = []
+            for _r in rows:
+                if not isinstance(_r, dict):
+                    continue
+                _pn = safe_int(_r.get("price_normalised"))
+                if isinstance(_pn, int) and _pn > 0:
+                    _norm_vals.append(_pn)
+            _norm_median = _median_int(_norm_vals)
+            if _norm_median and _norm_median > 0:
+                _lower_bound = 0.5 * _norm_median
+                _upper_bound = 2.0 * _norm_median
+                _bounded: list = []
+                for _r in rows:
+                    if not isinstance(_r, dict):
+                        _bounded.append(_r)
+                        continue
+                    _pn = safe_int(_r.get("price_normalised"))
+                    if not isinstance(_pn, int) or _pn <= 0:
+                        # Defensive: keep rows without a positive normalised
+                        # price. Step 9 IQR has already handled nominal
+                        # outliers; S-3 drops only on normalised excess.
+                        _bounded.append(_r)
+                        continue
+                    if _pn < _lower_bound or _pn > _upper_bound:
+                        _post_norm_excluded += 1
+                        continue
+                    _bounded.append(_r)
+                rows = _bounded
+        _audit["post_normalisation_excluded_count"] = _post_norm_excluded
+
         # ── STEP 11: COMPUTE PRICES FOR MEDIAN ──────────────────────────────
         prices: list = []
         ptypes: dict = {}
@@ -4501,6 +4567,27 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 miles_list.append(mi)
 
         _audit["final_comp_count"] = len(rows)
+
+        # ── S-5 (part B): tenure / new-build resolution audit counters ──────
+        # S-1 surfaced duration + old_new on every comp. Where these are
+        # non-null, the engine's Step-3 / Step-4 filters and Step-8 similarity
+        # components had real signal to operate on. Counting per-comp
+        # resolution here makes the institutional purity of the comp set
+        # auditable from area_json downstream (Verdict caveats, Workbench
+        # confidence display).
+        _tenure_resolved = 0
+        _new_build_resolved = 0
+        for _r in rows:
+            if not isinstance(_r, dict):
+                continue
+            _d = str(_r.get("duration") or "").upper()
+            if _d in ("F", "L"):
+                _tenure_resolved += 1
+            _n = str(_r.get("old_new") or "").upper()
+            if _n in ("Y", "N"):
+                _new_build_resolved += 1
+        _audit["tenure_resolved_count"] = _tenure_resolved
+        _audit["new_build_resolved_count"] = _new_build_resolved
 
         # ── STEP 12: INSUFFICIENT EVIDENCE GATE ─────────────────────────────
         # Refuse high-confidence valuation when evidence is materially inadequate
