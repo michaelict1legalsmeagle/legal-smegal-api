@@ -4017,7 +4017,7 @@ def _density_tier_radius(pc: str) -> Optional[float]:
     return None
 
 
-def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None) -> Dict[str, Any]:
+def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None, subject_tenure_hint: Optional[str] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
 
@@ -4190,20 +4190,55 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _subject_band       = str(_subject_epc.get("construction_age_band") or "").strip().upper() or None
         _subject_uprn       = str(_subject_epc.get("uprn") or "").strip() or None
 
-        # Subject: tenure from price_paid (majority vote at this postcode)
+        # ── I-1: Subject tenure resolution (authoritative hierarchy) ────────
+        # Resolution precedence:
+        #   1. Legal-pack / LLM-extracted tenure (caller-supplied hint sourced
+        #      from summary_json.property.tenure — the canonical persisted
+        #      LLM extraction from the legal pack)
+        #   2. (The brief's tier 2 — persisted summary_json.property.tenure —
+        #      is identical in source to tier 1: the caller passes either the
+        #      fresh LLM extraction OR the persisted value into the same
+        #      `subject_tenure_hint` parameter. Function consumes both
+        #      identically; precedence is the caller's concern.)
+        #   3. price_paid_raw_2025 postcode majority-vote proxy (fallback,
+        #      preserved verbatim from prior implementation)
+        #   4. Unresolved (None) — downstream Step-4 emits the canonical
+        #      "subject_tenure_unknown: tenure filter skipped" warning
+        #
+        # The legal pack is the authoritative title-document source under any
+        # RICS-aligned framework; the postcode majority-vote is a proxy that
+        # silently fails on rural / sparsely-sold postcodes where
+        # price_paid_raw_2025 has no rows for the subject postcode. This
+        # block consults the hint first so the proxy is consulted only when
+        # the legal pack provided no admissible value.
         _subject_tenure = None
-        try:
-            _tr = data_query(
-                """SELECT duration, COUNT(*) AS cnt
-                   FROM public.price_paid_raw_2025
-                   WHERE postcode = %s AND duration IN ('F','L')
-                   GROUP BY duration ORDER BY cnt DESC LIMIT 1""",
-                (_pc_norm,)
-            )
-            if _tr:
-                _subject_tenure = str(_tr[0].get("duration") or "").upper() or None
-        except Exception as _e:
-            _audit["warnings"].append(f"subject_tenure_lookup_failed: {_e}")
+        if subject_tenure_hint:
+            _h = str(subject_tenure_hint).strip().upper()
+            if _h in ("F", "FH", "FREEHOLD"):
+                _subject_tenure = "F"
+            elif _h in ("L", "LH", "LEASEHOLD"):
+                _subject_tenure = "L"
+            # Other values ("Unknown", "Mixed", "Commonhold", etc.) fall
+            # through to tier 3 — conservative posture, since the Step-4
+            # filter expects F/L only.
+        if _subject_tenure is None:
+            # Tier 3: postcode majority-vote proxy (preserved verbatim)
+            try:
+                _tr = data_query(
+                    """SELECT duration, COUNT(*) AS cnt
+                       FROM public.price_paid_raw_2025
+                       WHERE postcode = %s AND duration IN ('F','L')
+                       GROUP BY duration ORDER BY cnt DESC LIMIT 1""",
+                    (_pc_norm,)
+                )
+                if _tr:
+                    _subject_tenure = str(_tr[0].get("duration") or "").upper() or None
+            except Exception as _e:
+                _audit["warnings"].append(f"subject_tenure_lookup_failed: {_e}")
+        # Tier 4: _subject_tenure remains None → the existing Step-4 guard
+        # emits the canonical "subject_tenure_unknown: tenure filter skipped"
+        # warning and the tenure-match similarity component at Step 8 stays
+        # dormant for this deal (unchanged behaviour for unresolved cases).
 
         # Subject: new-build status from price_paid
         _subject_old_new = None
@@ -7346,7 +7381,7 @@ def save_area(deal_id: str):
                 "lat":          lat,
                 "lng":          lng,
                 "area_code":    area_code,
-                "housing":      get_housing_data(_postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp),
+                "housing":      get_housing_data(_postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp, subject_tenure_hint=_prop.get("tenure")),
                 "crime":        get_crime_data(lat, lng),
                 "transport":    get_transport_data(lat, lng),
                 "amenities":    get_amenities_data(lat, lng),
