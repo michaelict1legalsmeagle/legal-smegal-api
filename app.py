@@ -2649,6 +2649,7 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             school_rows = data_query(
                 """
                 SELECT s.urn, s.school_name, s.postcode, s.ofsted_rating,
+                       s.phase, s.school_type,
                        s.la_name,
                        ROUND(
                          ST_Distance(
@@ -2669,7 +2670,7 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             )
         else:
             school_rows = data_query(
-                """SELECT urn, school_name, postcode, ofsted_rating, la_name
+                """SELECT urn, school_name, postcode, ofsted_rating, phase, school_type, la_name
                    FROM public.schools_ofsted
                    WHERE postcode ILIKE %s
                    LIMIT 10""",
