@@ -164,6 +164,23 @@ NOMIS_TS003_CATS = os.getenv(
     "NOMIS_TS003_CATS",
     "1001,1,2,1002,1003,4,5,6,1004,7,8,9,1005,10,11,1006,12,1007,13,14"
 ).strip()
+NOMIS_TS003_DATASET = os.getenv("NOMIS_TS003_DATASET", "NM_2023_1").strip()
+
+# Census 2021 — Ethnic group (TS021). Default to 6 high-level categories.
+NOMIS_TS021_DATASET = os.getenv("NOMIS_TS021_DATASET", "NM_2041_1").strip()
+NOMIS_TS021_DIM     = os.getenv("NOMIS_TS021_DIM", "c2021_eth_8").strip()
+NOMIS_TS021_CATS    = os.getenv("NOMIS_TS021_CATS", "1,2,3,4,5,6,7,8").strip()
+
+# Census 2021 — Religion (TS030). Default to 9 categories incl. 'no religion' and 'not stated'.
+NOMIS_TS030_DATASET = os.getenv("NOMIS_TS030_DATASET", "NM_2049_1").strip()
+NOMIS_TS030_DIM     = os.getenv("NOMIS_TS030_DIM", "c2021_religion_10").strip()
+NOMIS_TS030_CATS    = os.getenv("NOMIS_TS030_CATS", "1,2,3,4,5,6,7,8,9").strip()
+
+# Census 2021 — Age by broad band (TS007A). Default to 5-year/broad bands.
+NOMIS_TS007_DATASET = os.getenv("NOMIS_TS007_DATASET", "NM_2020_1").strip()
+NOMIS_TS007_DIM     = os.getenv("NOMIS_TS007_DIM", "c2021_age_19").strip()
+NOMIS_TS007_CATS    = os.getenv("NOMIS_TS007_CATS",
+    "1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1011,1012,1013,1014,1015,1016,1017,1018").strip()
 
 NOMIS_TS044_DIM = os.getenv("NOMIS_TS044_DIM", "").strip()
 NOMIS_TS044_CATS = os.getenv("NOMIS_TS044_CATS", "").strip()
@@ -1523,8 +1540,10 @@ def parse_jsonstat_single_dimension(jsonstat: dict) -> Dict[str, Any]:
     return {"items": items, "total": total_val, "dimensionId": main_dim}
 
 
-def get_nomis_table(label: str, dimension: str, categories: str, geography: str) -> Dict[str, Any]:
+def get_nomis_table(label: str, dimension: str, categories: str, geography: str,
+                    dataset_id: Optional[str] = None) -> Dict[str, Any]:
     retrieved = now_iso()
+    ds = (dataset_id or NOMIS_DATASET_ID or "").strip()
     sources = [{"label": "Nomis API (ONS)", "url": "https://www.nomisweb.co.uk/api/v01/help"}]
 
     if not NOMIS_ENABLED:
@@ -1532,25 +1551,29 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
 
     if not geography:
         return metric_unavailable(
-            "Nomis requires a geography id. Provide a numeric geography id or set NOMIS_DEFAULT_GEOGRAPHY.",
+            "Nomis requires a geography id. Provide a numeric geography id or an ONS code (e.g. E01000001).",
             sources,
             retrieved,
         )
 
-    if not is_digits_only(geography):
+    # Accept either a numeric Nomis geography id OR a standard ONS area code (E/W/S/N prefix).
+    _g = geography.strip()
+    _is_numeric = is_digits_only(_g)
+    _is_ons     = bool(re.match(r'^[EWSN]\d{8}$', _g))
+    if not (_is_numeric or _is_ons):
         return metric_unavailable(
-            "Nomis geography must be a numeric Nomis geography id for this dataset (NM_2023_1).",
+            f"Nomis geography must be a numeric id or an ONS code (E/W/S/N + 8 digits). Got: {_g}",
             sources,
             retrieved,
-            extra_metrics={"label": label, "geography": geography},
+            extra_metrics={"label": label, "geography": _g, "dataset": ds},
         )
 
     if not dimension or not categories:
         return metric_missing_provider(
-            f"{label} not configured. Set env for its dimension/categories (e.g. NOMIS_TS054_DIM and NOMIS_TS054_CATS).",
+            f"{label} not configured. Set env for its dimension/categories.",
             sources,
             retrieved,
-            extra_metrics={"label": label, "dimension": dimension, "categories": categories, "geography": geography},
+            extra_metrics={"label": label, "dimension": dimension, "categories": categories, "geography": _g, "dataset": ds},
         )
 
     if "..." in categories or "…" in categories:
@@ -1564,12 +1587,12 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
     try:
         params = {
             "date": "latest",
-            "geography": geography,
+            "geography": _g,
             "freq": NOMIS_FREQ,
             dimension: categories,
             "measures": "20100",
         }
-        js = fetch_nomis_jsonstat(NOMIS_DATASET_ID, params)
+        js = fetch_nomis_jsonstat(ds, params)
         parsed = parse_jsonstat_single_dimension(js)
 
         bullets = [f"• {it['label']}: {it['value']}" for it in parsed["items"]]
@@ -1578,9 +1601,9 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
         out = metric_ok(summary, bullets, sources, retrieved, 0.92)
         out["metrics"] = {
             "provider": "nomis",
-            "dataset": NOMIS_DATASET_ID,
+            "dataset": ds,
             "label": label,
-            "geography": geography,
+            "geography": _g,
             "dimensionId": parsed.get("dimensionId"),
             "total": parsed.get("total"),
             "items": parsed.get("items"),
@@ -1590,6 +1613,63 @@ def get_nomis_table(label: str, dimension: str, categories: str, geography: str)
 
     except Exception as e:
         return metric_unavailable(f"{label} fetch/parse failed: {str(e)}", sources, retrieved)
+
+
+def _normalize_census_items(table: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Reduce a Nomis JSON-stat result into a compact frontend-safe list:
+       [{"label": str, "value": int, "pct": float}, ...] sorted by value desc.
+       Empty list when items are missing or all zero — frontend renders unavailable."""
+    try:
+        items = ((table or {}).get("metrics") or {}).get("items") or []
+        total = sum(int(it.get("value") or 0) for it in items) or 0
+        out: List[Dict[str, Any]] = []
+        for it in items:
+            v = int(it.get("value") or 0)
+            if v <= 0:
+                continue
+            out.append({
+                "label": str(it.get("label") or "").strip(),
+                "value": v,
+                "pct":   round((v / total) * 100, 1) if total > 0 else 0.0,
+            })
+        out.sort(key=lambda x: x["value"], reverse=True)
+        return out
+    except Exception:
+        return []
+
+
+def _get_census_demographics(geography: str) -> Dict[str, Any]:
+    """Fetch Census 2021 people-profile tables for a geography.
+       Returns a compact dict the frontend renders directly. Each key is
+       independently safe — if one table fails the others still populate.
+       No fake data: empty lists signal honest 'unavailable'."""
+    out: Dict[str, Any] = {
+        "geography": geography,
+        "ethnic":    [],
+        "religion":  [],
+        "age":       [],
+        "household": [],
+        "fetched_at": now_iso(),
+    }
+    if not geography:
+        return out
+    try:
+        t = get_nomis_table("Ethnic group (TS021)",        NOMIS_TS021_DIM, NOMIS_TS021_CATS, geography, NOMIS_TS021_DATASET)
+        out["ethnic"]    = _normalize_census_items(t)
+    except Exception: pass
+    try:
+        t = get_nomis_table("Religion (TS030)",            NOMIS_TS030_DIM, NOMIS_TS030_CATS, geography, NOMIS_TS030_DATASET)
+        out["religion"]  = _normalize_census_items(t)
+    except Exception: pass
+    try:
+        t = get_nomis_table("Age (TS007A)",                NOMIS_TS007_DIM, NOMIS_TS007_CATS, geography, NOMIS_TS007_DATASET)
+        out["age"]       = _normalize_census_items(t)
+    except Exception: pass
+    try:
+        t = get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, geography, NOMIS_TS003_DATASET)
+        out["household"] = _normalize_census_items(t)
+    except Exception: pass
+    return out
 
 
 def map_property_type_label(v: Any) -> str:
@@ -7413,6 +7493,20 @@ def save_area(deal_id: str):
                 )
                 if _pct is not None:
                     area_data.setdefault("census", {})["private_rent_pct"] = _pct
+            except Exception:
+                pass
+
+            # Census 2021 people profile (TS021 ethnic / TS030 religion /
+            # TS007A age / TS003 household). Uses the deal's LSOA ONS code when
+            # available, else NOMIS_DEFAULT_GEOGRAPHY. Each sub-table is
+            # independently fault-tolerant: missing/failing tables yield empty
+            # arrays, never fake data.
+            try:
+                _ons = (area_data.get("lsoa_gss") or NOMIS_DEFAULT_GEOGRAPHY or "").strip()
+                if _ons:
+                    _demo = _get_census_demographics(_ons)
+                    if _demo:
+                        area_data.setdefault("census", {})["demographics"] = _demo
             except Exception:
                 pass
 
