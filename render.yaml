@@ -39,6 +39,8 @@ services:
     envVars:
       - key: OPENROUTER_API_KEY
         sync: false
+      - key: MAPBOX_PUBLIC_TOKEN
+        sync: false
 
   # Frontend (React + Vite)
   - type: static

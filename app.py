@@ -7952,6 +7952,22 @@ def test_llm():
     return jsonify(result)
 
 
+@app.route("/api/client-config", methods=["GET", "OPTIONS"])
+def client_config():
+    """Public, unauthenticated client runtime config.
+
+    Returns browser-safe public config values sourced from server environment.
+    Currently exposes MAPBOX_PUBLIC_TOKEN (a URL-restricted Mapbox public token,
+    prefix 'pk.'). Returns null when the env var is unset so the frontend can
+    surface a clear configuration error rather than guessing.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+    return jsonify({
+        "mapbox_token": os.environ.get("MAPBOX_PUBLIC_TOKEN")
+    }), 200
+
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
