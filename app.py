@@ -1645,16 +1645,16 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
        No fake data: empty lists signal honest 'unavailable'.
 
        Per-table diagnostics are emitted via app.logger so failures can be
-       traced without needing to expose Nomis params anywhere user-facing.
-       Logged for every table: dataset / dim / cats / reconstructed URL
-       (no secrets — Nomis is keyless) / status / item count / reason on
-       failure. Final summary line carries the counts for all four tables."""
+       traced. Logged for every table: dataset / dim / cats / reconstructed
+       URL (no secrets — Nomis is keyless) / status / item count / reason
+       on failure. Final summary line carries the counts for all four
+       tables."""
     out: Dict[str, Any] = {
-        "geography": geography,
-        "ethnic":    [],
-        "religion":  [],
-        "age":       [],
-        "household": [],
+        "geography":  geography,
+        "ethnic":     [],
+        "religion":   [],
+        "age":        [],
+        "household":  [],
         "fetched_at": now_iso(),
     }
 
@@ -1671,18 +1671,14 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
 
     app.logger.info("[census] start geography=%s", geography)
 
-    # Per-table config — every field independently overridable via env.
-    # Order: (out-key, label, dataset, dim, cats)
     tables = [
-        ("ethnic",    "Ethnic group (TS021)",         NOMIS_TS021_DATASET, NOMIS_TS021_DIM, NOMIS_TS021_CATS),
-        ("religion",  "Religion (TS030)",             NOMIS_TS030_DATASET, NOMIS_TS030_DIM, NOMIS_TS030_CATS),
-        ("age",       "Age (TS007A)",                 NOMIS_TS007_DATASET, NOMIS_TS007_DIM, NOMIS_TS007_CATS),
-        ("household", "Household composition (TS003)",NOMIS_TS003_DATASET, NOMIS_TS003_DIM, NOMIS_TS003_CATS),
+        ("ethnic",    "Ethnic group (TS021)",          NOMIS_TS021_DATASET, NOMIS_TS021_DIM, NOMIS_TS021_CATS),
+        ("religion",  "Religion (TS030)",              NOMIS_TS030_DATASET, NOMIS_TS030_DIM, NOMIS_TS030_CATS),
+        ("age",       "Age (TS007A)",                  NOMIS_TS007_DATASET, NOMIS_TS007_DIM, NOMIS_TS007_CATS),
+        ("household", "Household composition (TS003)", NOMIS_TS003_DATASET, NOMIS_TS003_DIM, NOMIS_TS003_CATS),
     ]
 
     for key, label, dataset_id, dim, cats in tables:
-        # Reconstruct the URL that get_nomis_table would hit. Nomis has no API
-        # key so the URL contains no secrets; safe to log.
         nomis_url = (
             f"https://www.nomisweb.co.uk/api/v01/dataset/{dataset_id}.data.json"
             f"?date=latest&geography={geography}&freq={NOMIS_FREQ}"
@@ -1702,15 +1698,12 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
             out[key] = items
 
             if status == "ok":
-                app.logger.info(
-                    "[census] %s status=ok items=%d", label, len(items),
-                )
+                app.logger.info("[census] %s status=ok items=%d", label, len(items))
                 if not items:
                     app.logger.warning(
                         "[census] %s ok but produced 0 normalized items — "
-                        "all category values were zero/missing for geography=%s. "
-                        "Override the dataset's dim/cats env vars if the dataset uses "
-                        "a different breakdown.",
+                        "geography=%s may have no data in this dataset; "
+                        "override the dataset's dim/cats env vars if needed.",
                         label, geography,
                     )
             else:
@@ -7266,10 +7259,129 @@ def ceiling_endpoint():
         app.logger.exception("[ceiling] /api/ceiling failed")
         return jsonify({"error": str(e)}), 500
 
+def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Auto-backfill area_json.census.demographics for older Area rows
+    that were saved before Census support existed. Idempotent: never
+    overwrites an existing Census fetch, never invents data, never
+    raises. The caller must have already verified ownership of the row.
+
+    Triggers ONLY when ALL of these hold:
+      - area_data is a dict in a stable state (fetch_status not 'fetching'
+        or 'error'),
+      - area_data has an lsoa_gss,
+      - area_data.census.demographics has no fetched_at marker AND no
+        non-empty per-table arrays.
+
+    Honest empties are preserved: a previous attempt that returned all
+    empty arrays carries a fetched_at timestamp, so we never retry
+    indefinitely on geographies Nomis has no data for.
+
+    Persists with optimistic-lock (eq updated_at) so concurrent writes
+    that touch other parts of area_json are not clobbered. On stale-write
+    rejection the Census fetch is logged but discarded — the next GET
+    will try again, which is safe.
+
+    Returns the (possibly mutated) area_data so callers can pass it
+    straight into the response payload.
+    """
+    if not isinstance(area_data, dict):
+        return area_data
+    if area_data.get("fetch_status") in ("fetching", "error"):
+        return area_data
+    if not supabase:
+        return area_data
+
+    geography = (area_data.get("lsoa_gss") or "").strip()
+    if not geography:
+        return area_data
+
+    existing_demo = (area_data.get("census") or {}).get("demographics") or {}
+    if existing_demo.get("fetched_at"):
+        return area_data
+    if any(existing_demo.get(k) for k in ("ethnic", "religion", "age", "household")):
+        return area_data
+
+    app.logger.info(
+        "[area-enrich] census missing — auto-enriching deal_id=%s geography=%s",
+        deal_id, geography,
+    )
+
+    # Snapshot for optimistic-lock. Also refresh area_data from the latest
+    # read so we don't write back a stale view if something raced.
+    try:
+        _snap = supabase.table("deals") \
+            .select("updated_at, area_json") \
+            .eq("id", deal_id) \
+            .limit(1) \
+            .execute()
+    except Exception as exc:
+        app.logger.exception(
+            "[area-enrich] snapshot failed deal_id=%s err=%r", deal_id, exc,
+        )
+        return area_data
+
+    _rows = _snap.data or []
+    if not _rows:
+        app.logger.warning("[area-enrich] snapshot returned 0 rows deal_id=%s", deal_id)
+        return area_data
+    _row = _rows[0]
+    _snap_ts = _row.get("updated_at")
+    _latest = _row.get("area_json")
+    if isinstance(_latest, dict):
+        area_data = _latest
+
+    # Re-check on the freshest view; a concurrent process may have
+    # populated Census between the caller's read and this snapshot.
+    _existing = (area_data.get("census") or {}).get("demographics") or {}
+    if _existing.get("fetched_at") or any(
+        _existing.get(k) for k in ("ethnic", "religion", "age", "household")
+    ):
+        return area_data
+
+    try:
+        demographics = _get_census_demographics(geography)
+        area_data.setdefault("census", {})["demographics"] = demographics
+
+        _q = supabase.table("deals").update({
+            "area_json":  area_data,
+            "updated_at": now_iso(),
+        }).eq("id", deal_id)
+        if _snap_ts:
+            _q = _q.eq("updated_at", _snap_ts)
+        _result = _q.execute()
+
+        if not _result.data:
+            app.logger.warning(
+                "[area-enrich] STALE_WRITE_REJECTED deal_id=%s — newer area_json "
+                "update existed; Census fetched but not persisted (will retry on next GET).",
+                deal_id,
+            )
+        else:
+            app.logger.info(
+                "[area-enrich] OK deal_id=%s counts=ethnic:%d religion:%d age:%d household:%d",
+                deal_id,
+                len(demographics.get("ethnic") or []),
+                len(demographics.get("religion") or []),
+                len(demographics.get("age") or []),
+                len(demographics.get("household") or []),
+            )
+    except Exception as exc:
+        app.logger.exception(
+            "[area-enrich] FAILED deal_id=%s geography=%s err=%r",
+            deal_id, geography, exc,
+        )
+    return area_data
+
+
 @app.route("/api/deals/<deal_id>/area", methods=["GET"])
 @require_auth
 def get_area(deal_id: str):
-    """Retrieve saved area intelligence for a deal."""
+    """Retrieve saved area intelligence for a deal.
+
+    Auto-enriches area_json.census.demographics on read when missing and
+    an lsoa_gss is present — so older rows saved before Census support
+    backfill on first view without requiring a manual refresh-census POST.
+    """
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
     try:
@@ -7279,6 +7391,7 @@ def get_area(deal_id: str):
         if not result.data:
             return jsonify({"error": "Deal not found"}), 404
         area = result.data.get("area_json")
+        area = _maybe_enrich_census_demographics(deal_id, area)
         return jsonify({
             "ok":       True,
             "area":     area,
@@ -7471,6 +7584,10 @@ def save_area(deal_id: str):
                         print(f"[_patch_inference ERROR] {_deal_id_ref}: {_e}")
                 import threading as _ti
                 _ti.Thread(target=_patch_inference, daemon=True).start()
+            # Auto-enrich Census demographics for older cached rows that
+            # were saved before Census support — synchronous so the cached
+            # fast-path returns a fully populated payload first time.
+            cached = _maybe_enrich_census_demographics(deal_id, cached)
             return jsonify({
                 "ok":       True,
                 "area":     cached,
@@ -7627,28 +7744,15 @@ def save_area(deal_id: str):
 @app.route("/api/deals/<deal_id>/area/refresh-census", methods=["POST"])
 @require_auth
 def refresh_area_census(deal_id: str):
-    """
-    Re-fetch Census 2021 demographics for an already-saved Area row and
-    merge them back into area_json.census.demographics. Touches nothing
-    else on the row.
+    """Manual repair / debug endpoint — force a fresh Census fetch and
+    persist into area_json.census.demographics, even when a previous
+    attempt is already on record. Distinct from the auto-enrichment
+    helper used by GET /area, which is idempotent and skips rows that
+    already have a fetched_at marker.
 
-    Lookup strategy is deliberately two-stage to avoid the PGRST116
-    failure mode of .single():
-
-        Stage 1: SELECT ... FROM deals WHERE id = :id LIMIT 1
-                 → tells us whether the row exists at all (no .single(),
-                   no PGRST116, robust to any auth/JWT/owner mismatch).
-        Stage 2: compare row.user_id to request.user_id in Python
-                 → distinguishes "deal doesn't exist" from "deal exists
-                   but JWT user_id does not own it" — each gets its own
-                   clear error message.
-
-    This is necessary because the live frontend's GET /area route uses
-    .single() and works for valid sessions, but a manual POST test or
-    a different bearer token can hit a PGRST116 that masks the real
-    cause. The Supabase client is a module-level service-role client
-    (line ~200), so RLS is bypassed — any 0-row result is a literal
-    no-match, not an auth denial.
+    Two-stage lookup (no .single() — see PGRST116 history): first locate
+    the row by primary key, then verify ownership in Python so each
+    failure mode surfaces a precise error code.
     """
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
@@ -7659,7 +7763,6 @@ def refresh_area_census(deal_id: str):
         deal_id, auth_uid,
     )
 
-    # ── Stage 1: locate the row by primary key only, never .single(). ───
     try:
         result = supabase.table("deals") \
             .select("id, user_id, area_json, postcode, address") \
@@ -7680,7 +7783,7 @@ def refresh_area_census(deal_id: str):
     rows = result.data or []
     if not rows:
         app.logger.warning(
-            "[refresh-census] no deal with id=%s in deals table (auth_user_id=%s)",
+            "[refresh-census] no deal with id=%s (auth_user_id=%s)",
             deal_id, auth_uid,
         )
         return jsonify({
@@ -7690,54 +7793,36 @@ def refresh_area_census(deal_id: str):
         }), 404
 
     row = rows[0]
-    row_owner = row.get("user_id")
-
-    # ── Stage 2: verify ownership in Python so the error is precise. ────
-    if row_owner != auth_uid:
+    if row.get("user_id") != auth_uid:
         app.logger.warning(
             "[refresh-census] ownership mismatch deal_id=%s row.user_id=%s auth_user_id=%s",
-            deal_id, row_owner, auth_uid,
+            deal_id, row.get("user_id"), auth_uid,
         )
         return jsonify({
             "error":   "ownership_mismatch",
             "deal_id": deal_id,
-            "hint":    "The signed-in user does not own this deal. "
-                       "If the live Area page can read it but this endpoint cannot, "
-                       "the auth token used for this POST is for a different user.",
+            "hint":    "The signed-in user does not own this deal.",
         }), 403
 
     area_data = row.get("area_json")
     if not isinstance(area_data, dict) or not area_data:
-        app.logger.warning(
-            "[refresh-census] area_json empty for deal_id=%s — run save_area first",
-            deal_id,
-        )
         return jsonify({
             "error":   "area_not_populated",
             "deal_id": deal_id,
-            "hint":    "Run POST /api/deals/<deal_id>/area first to populate area_json before refreshing Census.",
+            "hint":    "Run POST /api/deals/<deal_id>/area first to populate area_json.",
         }), 422
 
     geography = (area_data.get("lsoa_gss") or NOMIS_DEFAULT_GEOGRAPHY or "").strip()
     if not geography:
-        app.logger.warning(
-            "[refresh-census] no lsoa_gss for deal_id=%s and no NOMIS_DEFAULT_GEOGRAPHY",
-            deal_id,
-        )
         return jsonify({
             "error":   "missing_lsoa_gss",
             "deal_id": deal_id,
-            "hint":    "area_json has no lsoa_gss and no NOMIS_DEFAULT_GEOGRAPHY is set. "
-                       "Re-run the Area save with forceRefresh=true so lsoa_gss is repopulated.",
+            "hint":    "area_json has no lsoa_gss and no NOMIS_DEFAULT_GEOGRAPHY is set.",
         }), 422
 
     demographics = _get_census_demographics(geography)
-
-    # Merge — never replace the whole census subtree (private_rent_pct lives here too).
     area_data.setdefault("census", {})["demographics"] = demographics
 
-    # Persistence: filter by id only (we already verified ownership above);
-    # avoids any chance of a 0-row update if the user_id column were stale.
     try:
         supabase.table("deals").update({
             "area_json":  area_data,
@@ -7746,10 +7831,10 @@ def refresh_area_census(deal_id: str):
     except Exception as exc:
         app.logger.exception("[refresh-census] persistence failed deal_id=%s", deal_id)
         return jsonify({
-            "error":         "persistence_failed",
-            "deal_id":       deal_id,
-            "reason":        str(exc),
-            "demographics":  demographics,
+            "error":   "persistence_failed",
+            "deal_id": deal_id,
+            "reason":  str(exc),
+            "demographics": demographics,
             "counts": {
                 "ethnic":    len(demographics.get("ethnic") or []),
                 "religion":  len(demographics.get("religion") or []),
@@ -7768,7 +7853,6 @@ def refresh_area_census(deal_id: str):
         "[refresh-census] OK deal_id=%s geography=%s counts=%s",
         deal_id, geography, counts,
     )
-
     return jsonify({
         "ok":            True,
         "deal_id":       deal_id,
