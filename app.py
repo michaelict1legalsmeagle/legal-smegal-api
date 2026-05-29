@@ -1696,7 +1696,7 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
 
         try:
             t = get_nomis_table(label, dim, cats, geography, dataset_id)
-            status = (t or {}).get("status") or "n/a"
+            status  = (t or {}).get("status") or "n/a"
             summary = (t or {}).get("summary") or ""
             items   = _normalize_census_items(t) if t else []
             out[key] = items
@@ -1709,11 +1709,9 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
                     app.logger.warning(
                         "[census] %s ok but produced 0 normalized items — "
                         "all category values were zero/missing for geography=%s. "
-                        "Override NOMIS_%s_DIM / NOMIS_%s_CATS if the dataset uses "
+                        "Override the dataset's dim/cats env vars if the dataset uses "
                         "a different breakdown.",
                         label, geography,
-                        key.upper() if key != "ethnic" else "TS021",
-                        key.upper() if key != "ethnic" else "TS021",
                     )
             else:
                 app.logger.warning(
@@ -7636,37 +7634,61 @@ def refresh_area_census(deal_id: str):
     so existing deals can be repopulated without re-running the full
     Area pipeline.
 
-    Returns 422 if the row has no lsoa_gss (older Area pre-dating that
-    field) — never fabricates a geography. Returns the fresh demographics
-    dict and per-table counts so a healthy refresh is one line to verify.
+    Lookup mirrors GET /api/deals/<deal_id>/area exactly — same table,
+    same select, same eq filters, same .single() behaviour, same except
+    handler returning 500 with the real error message. The previous
+    version of this route used a broad `except Exception: return 404`
+    which swallowed every supabase-py exception as "Deal not found",
+    masking auth / RLS / parse errors as missing rows.
     """
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
 
-    try:
-        deal = supabase.table("deals") \
-            .select("id, area_json") \
-            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
-        if not deal.data:
-            return jsonify({"error": "Deal not found"}), 404
-    except Exception:
-        return jsonify({"error": "Deal not found"}), 404
+    app.logger.info(
+        "[refresh-census] start deal_id=%s user_id=%s",
+        deal_id, getattr(request, "user_id", None),
+    )
 
-    area_data = deal.data.get("area_json") or {}
+    try:
+        # Byte-for-byte mirror of the working GET /api/deals/<deal_id>/area
+        # lookup. Same table, same select, same eq filters, same .single().
+        result = supabase.table("deals") \
+            .select("area_json, postcode, address") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not result.data:
+            app.logger.warning(
+                "[refresh-census] no row deal_id=%s user_id=%s",
+                deal_id, request.user_id,
+            )
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception as e:
+        # Mirror GET — surface the real error rather than masking it as 404.
+        app.logger.exception("refresh_area_census lookup failed deal_id=%s", deal_id)
+        return jsonify({"error": str(e)}), 500
+
+    area_data = result.data.get("area_json")
     if not isinstance(area_data, dict) or not area_data:
+        app.logger.warning(
+            "[refresh-census] area_json empty for deal_id=%s — run save_area first",
+            deal_id,
+        )
         return jsonify({
-            "error": "area_not_populated",
+            "error":   "area_not_populated",
             "deal_id": deal_id,
-            "hint": "Run POST /api/deals/<deal_id>/area first to populate area_json before refreshing Census.",
+            "hint":    "Run POST /api/deals/<deal_id>/area first to populate area_json before refreshing Census.",
         }), 422
 
     geography = (area_data.get("lsoa_gss") or NOMIS_DEFAULT_GEOGRAPHY or "").strip()
     if not geography:
+        app.logger.warning(
+            "[refresh-census] no lsoa_gss for deal_id=%s and no NOMIS_DEFAULT_GEOGRAPHY",
+            deal_id,
+        )
         return jsonify({
-            "error": "missing_lsoa_gss",
+            "error":   "missing_lsoa_gss",
             "deal_id": deal_id,
-            "hint": "area_json has no lsoa_gss and no NOMIS_DEFAULT_GEOGRAPHY is set. "
-                    "Re-run the Area save with forceRefresh=true so lsoa_gss is repopulated.",
+            "hint":    "area_json has no lsoa_gss and no NOMIS_DEFAULT_GEOGRAPHY is set. "
+                       "Re-run the Area save with forceRefresh=true so lsoa_gss is repopulated.",
         }), 422
 
     demographics = _get_census_demographics(geography)
@@ -7678,29 +7700,39 @@ def refresh_area_census(deal_id: str):
         supabase.table("deals").update({
             "area_json":  area_data,
             "updated_at": now_iso(),
-        }).eq("id", deal_id).execute()
+        }).eq("id", deal_id).eq("user_id", request.user_id).execute()
     except Exception as exc:
-        app.logger.exception("refresh_area_census persistence failed for deal=%s: %r", deal_id, exc)
+        app.logger.exception("refresh_area_census persistence failed deal_id=%s", deal_id)
         return jsonify({
-            "error": "persistence_failed",
-            "deal_id": deal_id,
-            "demographics": demographics,
-            "counts": {k: (len(v) if isinstance(v, list) else None)
-                       for k, v in demographics.items()
-                       if k in ("ethnic", "religion", "age", "household")},
+            "error":         "persistence_failed",
+            "deal_id":       deal_id,
+            "reason":        str(exc),
+            "demographics":  demographics,
+            "counts": {
+                "ethnic":    len(demographics.get("ethnic") or []),
+                "religion":  len(demographics.get("religion") or []),
+                "age":       len(demographics.get("age") or []),
+                "household": len(demographics.get("household") or []),
+            },
         }), 500
+
+    counts = {
+        "ethnic":    len(demographics.get("ethnic") or []),
+        "religion":  len(demographics.get("religion") or []),
+        "age":       len(demographics.get("age") or []),
+        "household": len(demographics.get("household") or []),
+    }
+    app.logger.info(
+        "[refresh-census] OK deal_id=%s geography=%s counts=%s",
+        deal_id, geography, counts,
+    )
 
     return jsonify({
         "ok":            True,
         "deal_id":       deal_id,
         "geography":     geography,
-        "demographics": demographics,
-        "counts": {
-            "ethnic":    len(demographics.get("ethnic") or []),
-            "religion":  len(demographics.get("religion") or []),
-            "age":       len(demographics.get("age") or []),
-            "household": len(demographics.get("household") or []),
-        },
+        "demographics":  demographics,
+        "counts":        counts,
     }), 200
 
 
