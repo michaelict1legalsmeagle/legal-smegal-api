@@ -1642,7 +1642,13 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
     """Fetch Census 2021 people-profile tables for a geography.
        Returns a compact dict the frontend renders directly. Each key is
        independently safe — if one table fails the others still populate.
-       No fake data: empty lists signal honest 'unavailable'."""
+       No fake data: empty lists signal honest 'unavailable'.
+
+       Per-table diagnostics are emitted via app.logger so failures can be
+       traced without needing to expose Nomis params anywhere user-facing.
+       Logged for every table: dataset / dim / cats / reconstructed URL
+       (no secrets — Nomis is keyless) / status / item count / reason on
+       failure. Final summary line carries the counts for all four tables."""
     out: Dict[str, Any] = {
         "geography": geography,
         "ethnic":    [],
@@ -1651,24 +1657,81 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
         "household": [],
         "fetched_at": now_iso(),
     }
+
     if not geography:
+        app.logger.warning("[census] no geography supplied — skipping all tables")
         return out
-    try:
-        t = get_nomis_table("Ethnic group (TS021)",        NOMIS_TS021_DIM, NOMIS_TS021_CATS, geography, NOMIS_TS021_DATASET)
-        out["ethnic"]    = _normalize_census_items(t)
-    except Exception: pass
-    try:
-        t = get_nomis_table("Religion (TS030)",            NOMIS_TS030_DIM, NOMIS_TS030_CATS, geography, NOMIS_TS030_DATASET)
-        out["religion"]  = _normalize_census_items(t)
-    except Exception: pass
-    try:
-        t = get_nomis_table("Age (TS007A)",                NOMIS_TS007_DIM, NOMIS_TS007_CATS, geography, NOMIS_TS007_DATASET)
-        out["age"]       = _normalize_census_items(t)
-    except Exception: pass
-    try:
-        t = get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, geography, NOMIS_TS003_DATASET)
-        out["household"] = _normalize_census_items(t)
-    except Exception: pass
+
+    if not NOMIS_ENABLED:
+        app.logger.info(
+            "[census] NOMIS_ENABLED=0 — skipping all tables for geography=%s",
+            geography,
+        )
+        return out
+
+    app.logger.info("[census] start geography=%s", geography)
+
+    # Per-table config — every field independently overridable via env.
+    # Order: (out-key, label, dataset, dim, cats)
+    tables = [
+        ("ethnic",    "Ethnic group (TS021)",         NOMIS_TS021_DATASET, NOMIS_TS021_DIM, NOMIS_TS021_CATS),
+        ("religion",  "Religion (TS030)",             NOMIS_TS030_DATASET, NOMIS_TS030_DIM, NOMIS_TS030_CATS),
+        ("age",       "Age (TS007A)",                 NOMIS_TS007_DATASET, NOMIS_TS007_DIM, NOMIS_TS007_CATS),
+        ("household", "Household composition (TS003)",NOMIS_TS003_DATASET, NOMIS_TS003_DIM, NOMIS_TS003_CATS),
+    ]
+
+    for key, label, dataset_id, dim, cats in tables:
+        # Reconstruct the URL that get_nomis_table would hit. Nomis has no API
+        # key so the URL contains no secrets; safe to log.
+        nomis_url = (
+            f"https://www.nomisweb.co.uk/api/v01/dataset/{dataset_id}.data.json"
+            f"?date=latest&geography={geography}&freq={NOMIS_FREQ}"
+            f"&{dim}={cats}&measures=20100"
+        ) if (dataset_id and dim and cats) else "(skipped — missing dataset/dim/cats env)"
+
+        app.logger.info(
+            "[census] %s table=%s dataset=%s dim=%s cats=%s url=%s",
+            label, key, dataset_id or "(unset)", dim or "(unset)", cats or "(unset)", nomis_url,
+        )
+
+        try:
+            t = get_nomis_table(label, dim, cats, geography, dataset_id)
+            status = (t or {}).get("status") or "n/a"
+            summary = (t or {}).get("summary") or ""
+            items   = _normalize_census_items(t) if t else []
+            out[key] = items
+
+            if status == "ok":
+                app.logger.info(
+                    "[census] %s status=ok items=%d", label, len(items),
+                )
+                if not items:
+                    app.logger.warning(
+                        "[census] %s ok but produced 0 normalized items — "
+                        "all category values were zero/missing for geography=%s. "
+                        "Override NOMIS_%s_DIM / NOMIS_%s_CATS if the dataset uses "
+                        "a different breakdown.",
+                        label, geography,
+                        key.upper() if key != "ethnic" else "TS021",
+                        key.upper() if key != "ethnic" else "TS021",
+                    )
+            else:
+                app.logger.warning(
+                    "[census] %s status=%s items=%d reason=%s",
+                    label, status, len(items), summary or "(no summary)",
+                )
+        except Exception as exc:
+            app.logger.exception(
+                "[census] %s FAILED geography=%s dataset=%s dim=%s cats=%s err=%r",
+                label, geography, dataset_id, dim, cats, exc,
+            )
+
+    app.logger.info(
+        "[census] summary geography=%s ethnic=%d religion=%d age=%d household=%d",
+        geography,
+        len(out["ethnic"]), len(out["religion"]),
+        len(out["age"]),    len(out["household"]),
+    )
     return out
 
 
@@ -7561,6 +7624,84 @@ def save_area(deal_id: str):
         "fetching": True,
         "message":  "Area data is being fetched in the background.",
     }), 202
+
+
+@app.route("/api/deals/<deal_id>/area/refresh-census", methods=["POST"])
+@require_auth
+def refresh_area_census(deal_id: str):
+    """
+    Re-fetch Census 2021 demographics for an already-saved Area row and
+    merge them back into area_json.census.demographics. Touches nothing
+    else on the row. Use after Nomis env vars are configured or changed
+    so existing deals can be repopulated without re-running the full
+    Area pipeline.
+
+    Returns 422 if the row has no lsoa_gss (older Area pre-dating that
+    field) — never fabricates a geography. Returns the fresh demographics
+    dict and per-table counts so a healthy refresh is one line to verify.
+    """
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    try:
+        deal = supabase.table("deals") \
+            .select("id, area_json") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not deal.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+
+    area_data = deal.data.get("area_json") or {}
+    if not isinstance(area_data, dict) or not area_data:
+        return jsonify({
+            "error": "area_not_populated",
+            "deal_id": deal_id,
+            "hint": "Run POST /api/deals/<deal_id>/area first to populate area_json before refreshing Census.",
+        }), 422
+
+    geography = (area_data.get("lsoa_gss") or NOMIS_DEFAULT_GEOGRAPHY or "").strip()
+    if not geography:
+        return jsonify({
+            "error": "missing_lsoa_gss",
+            "deal_id": deal_id,
+            "hint": "area_json has no lsoa_gss and no NOMIS_DEFAULT_GEOGRAPHY is set. "
+                    "Re-run the Area save with forceRefresh=true so lsoa_gss is repopulated.",
+        }), 422
+
+    demographics = _get_census_demographics(geography)
+
+    # Merge — never replace the whole census subtree (private_rent_pct lives here too).
+    area_data.setdefault("census", {})["demographics"] = demographics
+
+    try:
+        supabase.table("deals").update({
+            "area_json":  area_data,
+            "updated_at": now_iso(),
+        }).eq("id", deal_id).execute()
+    except Exception as exc:
+        app.logger.exception("refresh_area_census persistence failed for deal=%s: %r", deal_id, exc)
+        return jsonify({
+            "error": "persistence_failed",
+            "deal_id": deal_id,
+            "demographics": demographics,
+            "counts": {k: (len(v) if isinstance(v, list) else None)
+                       for k, v in demographics.items()
+                       if k in ("ethnic", "religion", "age", "household")},
+        }), 500
+
+    return jsonify({
+        "ok":            True,
+        "deal_id":       deal_id,
+        "geography":     geography,
+        "demographics": demographics,
+        "counts": {
+            "ethnic":    len(demographics.get("ethnic") or []),
+            "religion":  len(demographics.get("religion") or []),
+            "age":       len(demographics.get("age") or []),
+            "household": len(demographics.get("household") or []),
+        },
+    }), 200
 
 
 # ── AUCTION BRIEF ─────────────────────────────────────────────
