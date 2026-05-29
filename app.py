@@ -7630,43 +7630,83 @@ def refresh_area_census(deal_id: str):
     """
     Re-fetch Census 2021 demographics for an already-saved Area row and
     merge them back into area_json.census.demographics. Touches nothing
-    else on the row. Use after Nomis env vars are configured or changed
-    so existing deals can be repopulated without re-running the full
-    Area pipeline.
+    else on the row.
 
-    Lookup mirrors GET /api/deals/<deal_id>/area exactly — same table,
-    same select, same eq filters, same .single() behaviour, same except
-    handler returning 500 with the real error message. The previous
-    version of this route used a broad `except Exception: return 404`
-    which swallowed every supabase-py exception as "Deal not found",
-    masking auth / RLS / parse errors as missing rows.
+    Lookup strategy is deliberately two-stage to avoid the PGRST116
+    failure mode of .single():
+
+        Stage 1: SELECT ... FROM deals WHERE id = :id LIMIT 1
+                 → tells us whether the row exists at all (no .single(),
+                   no PGRST116, robust to any auth/JWT/owner mismatch).
+        Stage 2: compare row.user_id to request.user_id in Python
+                 → distinguishes "deal doesn't exist" from "deal exists
+                   but JWT user_id does not own it" — each gets its own
+                   clear error message.
+
+    This is necessary because the live frontend's GET /area route uses
+    .single() and works for valid sessions, but a manual POST test or
+    a different bearer token can hit a PGRST116 that masks the real
+    cause. The Supabase client is a module-level service-role client
+    (line ~200), so RLS is bypassed — any 0-row result is a literal
+    no-match, not an auth denial.
     """
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
 
+    auth_uid = getattr(request, "user_id", None)
     app.logger.info(
-        "[refresh-census] start deal_id=%s user_id=%s",
-        deal_id, getattr(request, "user_id", None),
+        "[refresh-census] start deal_id=%s auth_user_id=%s",
+        deal_id, auth_uid,
     )
 
+    # ── Stage 1: locate the row by primary key only, never .single(). ───
     try:
-        # Byte-for-byte mirror of the working GET /api/deals/<deal_id>/area
-        # lookup. Same table, same select, same eq filters, same .single().
         result = supabase.table("deals") \
-            .select("area_json, postcode, address") \
-            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
-        if not result.data:
-            app.logger.warning(
-                "[refresh-census] no row deal_id=%s user_id=%s",
-                deal_id, request.user_id,
-            )
-            return jsonify({"error": "Deal not found"}), 404
+            .select("id, user_id, area_json, postcode, address") \
+            .eq("id", deal_id) \
+            .limit(1) \
+            .execute()
     except Exception as e:
-        # Mirror GET — surface the real error rather than masking it as 404.
-        app.logger.exception("refresh_area_census lookup failed deal_id=%s", deal_id)
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception(
+            "[refresh-census] supabase lookup raised deal_id=%s err=%r",
+            deal_id, e,
+        )
+        return jsonify({
+            "error":   "supabase_lookup_failed",
+            "deal_id": deal_id,
+            "reason":  str(e),
+        }), 500
 
-    area_data = result.data.get("area_json")
+    rows = result.data or []
+    if not rows:
+        app.logger.warning(
+            "[refresh-census] no deal with id=%s in deals table (auth_user_id=%s)",
+            deal_id, auth_uid,
+        )
+        return jsonify({
+            "error":   "deal_not_found",
+            "deal_id": deal_id,
+            "hint":    "No row in deals table for this id.",
+        }), 404
+
+    row = rows[0]
+    row_owner = row.get("user_id")
+
+    # ── Stage 2: verify ownership in Python so the error is precise. ────
+    if row_owner != auth_uid:
+        app.logger.warning(
+            "[refresh-census] ownership mismatch deal_id=%s row.user_id=%s auth_user_id=%s",
+            deal_id, row_owner, auth_uid,
+        )
+        return jsonify({
+            "error":   "ownership_mismatch",
+            "deal_id": deal_id,
+            "hint":    "The signed-in user does not own this deal. "
+                       "If the live Area page can read it but this endpoint cannot, "
+                       "the auth token used for this POST is for a different user.",
+        }), 403
+
+    area_data = row.get("area_json")
     if not isinstance(area_data, dict) or not area_data:
         app.logger.warning(
             "[refresh-census] area_json empty for deal_id=%s — run save_area first",
@@ -7696,13 +7736,15 @@ def refresh_area_census(deal_id: str):
     # Merge — never replace the whole census subtree (private_rent_pct lives here too).
     area_data.setdefault("census", {})["demographics"] = demographics
 
+    # Persistence: filter by id only (we already verified ownership above);
+    # avoids any chance of a 0-row update if the user_id column were stale.
     try:
         supabase.table("deals").update({
             "area_json":  area_data,
             "updated_at": now_iso(),
-        }).eq("id", deal_id).eq("user_id", request.user_id).execute()
+        }).eq("id", deal_id).execute()
     except Exception as exc:
-        app.logger.exception("refresh_area_census persistence failed deal_id=%s", deal_id)
+        app.logger.exception("[refresh-census] persistence failed deal_id=%s", deal_id)
         return jsonify({
             "error":         "persistence_failed",
             "deal_id":       deal_id,
