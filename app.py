@@ -166,21 +166,34 @@ NOMIS_TS003_CATS = os.getenv(
 ).strip()
 NOMIS_TS003_DATASET = os.getenv("NOMIS_TS003_DATASET", "NM_2023_1").strip()
 
-# Census 2021 — Ethnic group (TS021). Default to 6 high-level categories.
+# Census 2021 — Ethnic group (TS021). Dataset NM_2041_1 exposes the documented
+# ONS "ethnic_group_tb_20b" classification (20 cats incl. Total at code 0).
+# Use leaf codes 1..19, mirroring the convention proven by working TS030
+# (c2021_religion_10 with cats 1..9). The previous default c2021_eth_8 / 1..8
+# returned zero rows because that dimension is not exposed on NM_2041_1.
 NOMIS_TS021_DATASET = os.getenv("NOMIS_TS021_DATASET", "NM_2041_1").strip()
-NOMIS_TS021_DIM     = os.getenv("NOMIS_TS021_DIM", "c2021_eth_8").strip()
-NOMIS_TS021_CATS    = os.getenv("NOMIS_TS021_CATS", "1,2,3,4,5,6,7,8").strip()
+NOMIS_TS021_DIM     = os.getenv("NOMIS_TS021_DIM", "c2021_eth_20").strip()
+NOMIS_TS021_CATS    = os.getenv(
+    "NOMIS_TS021_CATS",
+    "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19"
+).strip()
 
 # Census 2021 — Religion (TS030). Default to 9 categories incl. 'no religion' and 'not stated'.
 NOMIS_TS030_DATASET = os.getenv("NOMIS_TS030_DATASET", "NM_2049_1").strip()
 NOMIS_TS030_DIM     = os.getenv("NOMIS_TS030_DIM", "c2021_religion_10").strip()
 NOMIS_TS030_CATS    = os.getenv("NOMIS_TS030_CATS", "1,2,3,4,5,6,7,8,9").strip()
 
-# Census 2021 — Age by broad band (TS007A). Default to 5-year/broad bands.
+# Census 2021 — Age by five-year bands (TS007A, dataset NM_2020_1). The variable
+# is "Age (19 categories)" — Total at code 0 plus 18 five-year bands at codes
+# 1..18. Use simple leaf codes 1..18 (NOT 1001..1018 — those 4-digit codes are
+# aggregation TYPE codes used by some Nomis dims; this one uses plain leaves,
+# same convention as TS030 religion and TS003 household leaves).
 NOMIS_TS007_DATASET = os.getenv("NOMIS_TS007_DATASET", "NM_2020_1").strip()
 NOMIS_TS007_DIM     = os.getenv("NOMIS_TS007_DIM", "c2021_age_19").strip()
-NOMIS_TS007_CATS    = os.getenv("NOMIS_TS007_CATS",
-    "1001,1002,1003,1004,1005,1006,1007,1008,1009,1010,1011,1012,1013,1014,1015,1016,1017,1018").strip()
+NOMIS_TS007_CATS    = os.getenv(
+    "NOMIS_TS007_CATS",
+    "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18"
+).strip()
 
 NOMIS_TS044_DIM = os.getenv("NOMIS_TS044_DIM", "").strip()
 NOMIS_TS044_CATS = os.getenv("NOMIS_TS044_CATS", "").strip()
@@ -1644,11 +1657,9 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
        independently safe — if one table fails the others still populate.
        No fake data: empty lists signal honest 'unavailable'.
 
-       Per-table diagnostics are emitted via app.logger so failures can be
-       traced. Logged for every table: dataset / dim / cats / reconstructed
-       URL (no secrets — Nomis is keyless) / status / item count / reason
-       on failure. Final summary line carries the counts for all four
-       tables."""
+       Per-table diagnostics are emitted via app.logger. Logged for every
+       table: dataset / dim / cats / reconstructed URL (no secrets) /
+       status / item count / reason on failure."""
     out: Dict[str, Any] = {
         "geography":  geography,
         "ethnic":     [],
@@ -7260,29 +7271,13 @@ def ceiling_endpoint():
         return jsonify({"error": str(e)}), 500
 
 def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Auto-backfill area_json.census.demographics for older Area rows
-    that were saved before Census support existed. Idempotent: never
-    overwrites an existing Census fetch, never invents data, never
-    raises. The caller must have already verified ownership of the row.
+    """Auto-backfill area_json.census.demographics for older Area rows that
+    were saved before Census support existed. Idempotent: never overwrites
+    an existing Census fetch (incl. honest empty with fetched_at), never
+    invents data, never raises. Caller must have verified row ownership.
 
-    Triggers ONLY when ALL of these hold:
-      - area_data is a dict in a stable state (fetch_status not 'fetching'
-        or 'error'),
-      - area_data has an lsoa_gss,
-      - area_data.census.demographics has no fetched_at marker AND no
-        non-empty per-table arrays.
-
-    Honest empties are preserved: a previous attempt that returned all
-    empty arrays carries a fetched_at timestamp, so we never retry
-    indefinitely on geographies Nomis has no data for.
-
-    Persists with optimistic-lock (eq updated_at) so concurrent writes
-    that touch other parts of area_json are not clobbered. On stale-write
-    rejection the Census fetch is logged but discarded — the next GET
-    will try again, which is safe.
-
-    Returns the (possibly mutated) area_data so callers can pass it
-    straight into the response payload.
+    Persists with optimistic lock (eq updated_at) so concurrent writes
+    that touch other parts of area_json are not clobbered.
     """
     if not isinstance(area_data, dict):
         return area_data
@@ -7306,8 +7301,6 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
         deal_id, geography,
     )
 
-    # Snapshot for optimistic-lock. Also refresh area_data from the latest
-    # read so we don't write back a stale view if something raced.
     try:
         _snap = supabase.table("deals") \
             .select("updated_at, area_json") \
@@ -7330,8 +7323,6 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
     if isinstance(_latest, dict):
         area_data = _latest
 
-    # Re-check on the freshest view; a concurrent process may have
-    # populated Census between the caller's read and this snapshot.
     _existing = (area_data.get("census") or {}).get("demographics") or {}
     if _existing.get("fetched_at") or any(
         _existing.get(k) for k in ("ethnic", "religion", "age", "household")
@@ -7353,7 +7344,7 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
         if not _result.data:
             app.logger.warning(
                 "[area-enrich] STALE_WRITE_REJECTED deal_id=%s — newer area_json "
-                "update existed; Census fetched but not persisted (will retry on next GET).",
+                "update existed; Census fetched but not persisted (next GET retries).",
                 deal_id,
             )
         else:
@@ -7744,15 +7735,13 @@ def save_area(deal_id: str):
 @app.route("/api/deals/<deal_id>/area/refresh-census", methods=["POST"])
 @require_auth
 def refresh_area_census(deal_id: str):
-    """Manual repair / debug endpoint — force a fresh Census fetch and
-    persist into area_json.census.demographics, even when a previous
-    attempt is already on record. Distinct from the auto-enrichment
-    helper used by GET /area, which is idempotent and skips rows that
-    already have a fetched_at marker.
+    """Manual repair/debug endpoint — force a fresh Census fetch and persist
+    into area_json.census.demographics, even when a previous attempt is
+    already on record. Distinct from the auto-enrichment helper used by
+    GET /area which skips rows with an existing fetched_at marker.
 
-    Two-stage lookup (no .single() — see PGRST116 history): first locate
-    the row by primary key, then verify ownership in Python so each
-    failure mode surfaces a precise error code.
+    Two-stage lookup (.limit(1).execute() then ownership check in Python)
+    so any failure mode surfaces a precise error code rather than PGRST116.
     """
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
@@ -7782,10 +7771,6 @@ def refresh_area_census(deal_id: str):
 
     rows = result.data or []
     if not rows:
-        app.logger.warning(
-            "[refresh-census] no deal with id=%s (auth_user_id=%s)",
-            deal_id, auth_uid,
-        )
         return jsonify({
             "error":   "deal_not_found",
             "deal_id": deal_id,
@@ -7794,10 +7779,6 @@ def refresh_area_census(deal_id: str):
 
     row = rows[0]
     if row.get("user_id") != auth_uid:
-        app.logger.warning(
-            "[refresh-census] ownership mismatch deal_id=%s row.user_id=%s auth_user_id=%s",
-            deal_id, row.get("user_id"), auth_uid,
-        )
         return jsonify({
             "error":   "ownership_mismatch",
             "deal_id": deal_id,
