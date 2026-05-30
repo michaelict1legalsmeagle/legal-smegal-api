@@ -166,16 +166,19 @@ NOMIS_TS003_CATS = os.getenv(
 ).strip()
 NOMIS_TS003_DATASET = os.getenv("NOMIS_TS003_DATASET", "NM_2023_1").strip()
 
-# Census 2021 — Ethnic group (TS021). Dataset NM_2041_1 exposes the documented
-# ONS "ethnic_group_tb_20b" classification (20 cats incl. Total at code 0).
-# Use leaf codes 1..19, mirroring the convention proven by working TS030
-# (c2021_religion_10 with cats 1..9). The previous default c2021_eth_8 / 1..8
-# returned zero rows because that dimension is not exposed on NM_2041_1.
+# Census 2021 — Ethnic group (TS021). Dataset NM_2041_1.
+# The Nomis dataset page (https://www.nomisweb.co.uk/datasets/c2021ts021)
+# documents the default variable as "Ethnic group (25 categories)" — 1 Total
+# at code 0 plus 24 ethnic sub-categories at codes 1..24. The dim name is
+# c2021_eth_25, mirroring the convention TS030 religion uses successfully
+# (c2021_religion_10 / cats 1..9 — dim suffix = total cat count incl. Total,
+# cats query skips Total at 0). Previous default c2021_eth_8 / 1..8 returned
+# zero rows because that classification is not exposed on NM_2041_1.
 NOMIS_TS021_DATASET = os.getenv("NOMIS_TS021_DATASET", "NM_2041_1").strip()
-NOMIS_TS021_DIM     = os.getenv("NOMIS_TS021_DIM", "c2021_eth_20").strip()
+NOMIS_TS021_DIM     = os.getenv("NOMIS_TS021_DIM", "c2021_eth_25").strip()
 NOMIS_TS021_CATS    = os.getenv(
     "NOMIS_TS021_CATS",
-    "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19"
+    "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24"
 ).strip()
 
 # Census 2021 — Religion (TS030). Default to 9 categories incl. 'no religion' and 'not stated'.
@@ -183,11 +186,12 @@ NOMIS_TS030_DATASET = os.getenv("NOMIS_TS030_DATASET", "NM_2049_1").strip()
 NOMIS_TS030_DIM     = os.getenv("NOMIS_TS030_DIM", "c2021_religion_10").strip()
 NOMIS_TS030_CATS    = os.getenv("NOMIS_TS030_CATS", "1,2,3,4,5,6,7,8,9").strip()
 
-# Census 2021 — Age by five-year bands (TS007A, dataset NM_2020_1). The variable
-# is "Age (19 categories)" — Total at code 0 plus 18 five-year bands at codes
-# 1..18. Use simple leaf codes 1..18 (NOT 1001..1018 — those 4-digit codes are
-# aggregation TYPE codes used by some Nomis dims; this one uses plain leaves,
-# same convention as TS030 religion and TS003 household leaves).
+# Census 2021 — Age by five-year bands (TS007A, dataset NM_2020_1). The Nomis
+# dataset page (https://www.nomisweb.co.uk/datasets/c2021ts007a) documents the
+# variable as "Age (19 categories)" — 1 Total at code 0 plus 18 five-year age
+# bands at codes 1..18. Use simple leaf codes 1..18, mirroring the TS030
+# religion pattern. Previous default cats 1001..1018 were 4-digit type-codes
+# that don't exist on this dim and returned zero rows.
 NOMIS_TS007_DATASET = os.getenv("NOMIS_TS007_DATASET", "NM_2020_1").strip()
 NOMIS_TS007_DIM     = os.getenv("NOMIS_TS007_DIM", "c2021_age_19").strip()
 NOMIS_TS007_CATS    = os.getenv(
@@ -1653,13 +1657,14 @@ def _normalize_census_items(table: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _get_census_demographics(geography: str) -> Dict[str, Any]:
     """Fetch Census 2021 people-profile tables for a geography.
-       Returns a compact dict the frontend renders directly. Each key is
-       independently safe — if one table fails the others still populate.
-       No fake data: empty lists signal honest 'unavailable'.
+       Each key is independently safe — if one table fails the others still
+       populate. No fake data: empty lists signal honest 'unavailable'.
 
-       Per-table diagnostics are emitted via app.logger. Logged for every
-       table: dataset / dim / cats / reconstructed URL (no secrets) /
-       status / item count / reason on failure."""
+       Per-table diagnostics emitted via app.logger. Every fetch logs:
+       dataset, dim, cats, reconstructed URL (no secrets), status, item
+       count, and reason on failure. If a table returns 0 items, the
+       constructed Nomis URL is logged so it can be hit in a browser
+       to verify what Nomis actually accepts for that dim/cats combo."""
     out: Dict[str, Any] = {
         "geography":  geography,
         "ethnic":     [],
@@ -1713,14 +1718,17 @@ def _get_census_demographics(geography: str) -> Dict[str, Any]:
                 if not items:
                     app.logger.warning(
                         "[census] %s ok but produced 0 normalized items — "
-                        "geography=%s may have no data in this dataset; "
-                        "override the dataset's dim/cats env vars if needed.",
-                        label, geography,
+                        "geography=%s may have no data for this dim/cats; "
+                        "verify by hitting %s in a browser. Override "
+                        "NOMIS_%s_DIM / NOMIS_%s_CATS env vars to retry "
+                        "without redeploy.",
+                        label, geography, nomis_url,
+                        key.upper(), key.upper(),
                     )
             else:
                 app.logger.warning(
-                    "[census] %s status=%s items=%d reason=%s",
-                    label, status, len(items), summary or "(no summary)",
+                    "[census] %s status=%s items=%d reason=%s url=%s",
+                    label, status, len(items), summary or "(no summary)", nomis_url,
                 )
         except Exception as exc:
             app.logger.exception(
@@ -7271,13 +7279,23 @@ def ceiling_endpoint():
         return jsonify({"error": str(e)}), 500
 
 def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Auto-backfill area_json.census.demographics for older Area rows that
-    were saved before Census support existed. Idempotent: never overwrites
-    an existing Census fetch (incl. honest empty with fetched_at), never
-    invents data, never raises. Caller must have verified row ownership.
+    """Auto-backfill area_json.census.demographics on read.
 
-    Persists with optimistic lock (eq updated_at) so concurrent writes
-    that touch other parts of area_json are not clobbered.
+    Triggers a fresh Nomis fetch in two cases:
+      1. The row has no fetched_at and no Census data at all (legacy rows
+         saved before Census support existed).
+      2. The row has fetched_at set BUT is in a partial-failure state —
+         religion or household populated, but ethnic or age empty. This
+         covers deals where an earlier fetch ran with broken cats config
+         (e.g. c2021_eth_8 / 1001..1018) and persisted empty arrays for
+         the failing tables. With the corrected dim/cats now in env, the
+         next fetch should populate them.
+
+    Idempotent / safe-by-construction:
+      - Never overwrites a fully-populated Census state.
+      - Never invents data — only persists what Nomis returns.
+      - Optimistic-lock write so concurrent updates aren't clobbered.
+      - Never raises (silent on persistence failure; next read retries).
     """
     if not isinstance(area_data, dict):
         return area_data
@@ -7291,14 +7309,35 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
         return area_data
 
     existing_demo = (area_data.get("census") or {}).get("demographics") or {}
-    if existing_demo.get("fetched_at"):
+
+    # Detect partial-failure: some tables populated, ethnic OR age empty.
+    has_ethnic    = bool(existing_demo.get("ethnic"))
+    has_religion  = bool(existing_demo.get("religion"))
+    has_age       = bool(existing_demo.get("age"))
+    has_household = bool(existing_demo.get("household"))
+    is_partial_failure = (
+        (has_religion or has_household) and (not has_ethnic or not has_age)
+    )
+    already_attempted = bool(existing_demo.get("fetched_at"))
+    has_any_data      = has_ethnic or has_religion or has_age or has_household
+
+    # Skip conditions — in order of specificity:
+    if already_attempted and not is_partial_failure:
+        # Earlier fetch ran AND result is not partial-failure — preserve as-is.
+        # (Either everything populated, or geography genuinely has no Census.)
         return area_data
-    if any(existing_demo.get(k) for k in ("ethnic", "religion", "age", "household")):
+    if has_any_data and not is_partial_failure:
+        # Has some data, not partial-failure (e.g. only religion present
+        # because user-defined geography returns only one table). Preserve.
         return area_data
 
+    # Otherwise: fall through to fetch.
+    reason = "partial_failure_retry" if is_partial_failure else "legacy_backfill"
     app.logger.info(
-        "[area-enrich] census missing — auto-enriching deal_id=%s geography=%s",
-        deal_id, geography,
+        "[area-enrich] census %s — deal_id=%s geography=%s "
+        "(has ethnic=%s religion=%s age=%s household=%s)",
+        reason, deal_id, geography,
+        has_ethnic, has_religion, has_age, has_household,
     )
 
     try:
@@ -7323,10 +7362,17 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
     if isinstance(_latest, dict):
         area_data = _latest
 
+    # Re-check partial-failure on latest snapshot — another writer may have
+    # already populated it between our read and lock.
     _existing = (area_data.get("census") or {}).get("demographics") or {}
-    if _existing.get("fetched_at") or any(
-        _existing.get(k) for k in ("ethnic", "religion", "age", "household")
-    ):
+    _has_eth = bool(_existing.get("ethnic"))
+    _has_rel = bool(_existing.get("religion"))
+    _has_age = bool(_existing.get("age"))
+    _has_hh  = bool(_existing.get("household"))
+    _is_partial = (_has_rel or _has_hh) and (not _has_eth or not _has_age)
+    if _existing.get("fetched_at") and not _is_partial:
+        return area_data
+    if (_has_eth or _has_rel or _has_age or _has_hh) and not _is_partial:
         return area_data
 
     try:
@@ -7349,8 +7395,8 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
             )
         else:
             app.logger.info(
-                "[area-enrich] OK deal_id=%s counts=ethnic:%d religion:%d age:%d household:%d",
-                deal_id,
+                "[area-enrich] OK deal_id=%s reason=%s counts=ethnic:%d religion:%d age:%d household:%d",
+                deal_id, reason,
                 len(demographics.get("ethnic") or []),
                 len(demographics.get("religion") or []),
                 len(demographics.get("age") or []),
@@ -7369,9 +7415,11 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
 def get_area(deal_id: str):
     """Retrieve saved area intelligence for a deal.
 
-    Auto-enriches area_json.census.demographics on read when missing and
-    an lsoa_gss is present — so older rows saved before Census support
-    backfill on first view without requiring a manual refresh-census POST.
+    Auto-enriches area_json.census.demographics when ethnic OR age is empty
+    while religion or household has data (partial-failure recovery), or when
+    no Census fetch has been attempted on this row yet (legacy backfill).
+    Safe by construction: preserves existing data, never overwrites fully
+    populated state.
     """
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
@@ -7575,9 +7623,8 @@ def save_area(deal_id: str):
                         print(f"[_patch_inference ERROR] {_deal_id_ref}: {_e}")
                 import threading as _ti
                 _ti.Thread(target=_patch_inference, daemon=True).start()
-            # Auto-enrich Census demographics for older cached rows that
-            # were saved before Census support — synchronous so the cached
-            # fast-path returns a fully populated payload first time.
+            # Auto-enrich Census demographics on cached fast-path too —
+            # picks up legacy + partial-failure rows on first read.
             cached = _maybe_enrich_census_demographics(deal_id, cached)
             return jsonify({
                 "ok":       True,
@@ -7736,9 +7783,7 @@ def save_area(deal_id: str):
 @require_auth
 def refresh_area_census(deal_id: str):
     """Manual repair/debug endpoint — force a fresh Census fetch and persist
-    into area_json.census.demographics, even when a previous attempt is
-    already on record. Distinct from the auto-enrichment helper used by
-    GET /area which skips rows with an existing fetched_at marker.
+    into area_json.census.demographics regardless of fetched_at state.
 
     Two-stage lookup (.limit(1).execute() then ownership check in Python)
     so any failure mode surfaces a precise error code rather than PGRST116.
