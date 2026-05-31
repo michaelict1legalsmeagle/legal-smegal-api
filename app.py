@@ -3002,17 +3002,22 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
 
 
 def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
-    """Nearest active GP practice via NHS Spine Directory (ODS).
+    """Nearest active GP practice via NHS Spine Directory (ODS) + postcodes.io.
 
-    Public, no-auth endpoint:
-      https://directory.spineservices.nhs.uk/ORD/2-0-0/organisations
-    Role RO76 = GP Practice. Filters to active organisations in the deal's
-    outward postcode, bulk-geocodes candidate postcodes via postcodes.io,
-    returns the practice with the smallest haversine distance to the deal.
-
-    Returns {name, postcode, ods_code, distance_m} or None. No fabrication
-    from summary text — None when ODS yields nothing usable.
+    Strategy (no API key, no env vars):
+      1. Geocode the deal postcode via postcodes.io to get (lat, lng).
+      2. Build a wide candidate set by querying ODS with the deal's own outward
+         code AND each neighbouring outcode returned by postcodes.io
+         /outcodes/{outcode}/nearest — typically 5-10 adjacent outcodes covering
+         a ~10 km radius.  Each ODS query uses Roles=RO76&Status=Active&Limit=100.
+         Duplicate organisations (same OrgId) are deduplicated.
+      3. Bulk-geocode every unique candidate postcode via postcodes.io POST /postcodes.
+      4. Haversine-sort; return nearest {name, postcode, ods_code, distance_m}.
+      5. Return None only when no real ODS practice can be resolved at all.
+         Never fabricates names or returns long unavailable sentences.
     """
+    import math as _math
+
     pc = normalize_postcode(postcode)
     if not pc:
         return None
@@ -3021,47 +3026,86 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
     if not outcode:
         return None
 
-    # 1. Pull active GP practices in the outward postcode (no auth).
-    try:
-        ods_url = "https://directory.spineservices.nhs.uk/ORD/2-0-0/organisations"
-        status, payload = _http_get_json(ods_url, params={
-            "PostCode": outcode,
-            "Roles":    "RO76",
-            "Status":   "Active",
-            "Limit":    50,
-        }, timeout=10)
-    except Exception as e:
-        print(f"[WARN] GP ODS request failed for {outcode}: {e}")
-        return None
-    if status != 200 or not isinstance(payload, dict):
-        return None
+    # ── helpers ────────────────────────────────────────────────────────────────
+    def _haversine_m(la1: float, lo1: float, la2: float, lo2: float) -> float:
+        R = 6_371_000.0
+        rla1, rla2 = _math.radians(la1), _math.radians(la2)
+        dla = _math.radians(la2 - la1)
+        dlo = _math.radians(lo2 - lo1)
+        a = (_math.sin(dla / 2) ** 2
+             + _math.cos(rla1) * _math.cos(rla2) * _math.sin(dlo / 2) ** 2)
+        return 2 * R * _math.asin(_math.sqrt(min(a, 1.0)))
 
-    orgs = payload.get("Organisations") or []
-    candidates = []
-    for o in orgs:
-        name = (o.get("Name") or "").strip()
-        org_pc = (o.get("PostCode") or "").strip().upper()
-        org_id = (o.get("OrgId") or "").strip()
-        if name:
-            candidates.append({"name": name, "postcode": org_pc, "ods_code": org_id})
-    if not candidates:
-        return None
+    def _ods_query(postcode_or_outcode: str) -> List[Dict[str, Any]]:
+        """Query ODS for active GP practices near a postcode/outcode. Silent on error."""
+        try:
+            st, pl = _http_get_json(
+                "https://directory.spineservices.nhs.uk/ORD/2-0-0/organisations",
+                params={
+                    "PostCode": postcode_or_outcode,
+                    "Roles":    "RO76",
+                    "Status":   "Active",
+                    "Limit":    100,
+                },
+                timeout=12,
+            )
+            if st != 200 or not isinstance(pl, dict):
+                return []
+            out = []
+            for o in (pl.get("Organisations") or []):
+                name   = (o.get("Name")    or "").strip()
+                org_pc = (o.get("PostCode") or "").strip().upper()
+                org_id = (o.get("OrgId")   or "").strip()
+                if name and org_id:
+                    out.append({"name": name, "postcode": org_pc, "ods_code": org_id})
+            return out
+        except Exception:
+            return []
 
-    # 2. Resolve deal lat/lng via postcodes.io to enable distance sort.
+    # ── 1. Geocode the deal postcode ───────────────────────────────────────────
     deal_lat = deal_lng = None
     try:
-        pio_status, pio_payload = _http_get_json(
+        st, pl = _http_get_json(
             f"https://api.postcodes.io/postcodes/{pc.replace(' ', '%20')}",
             timeout=10,
         )
-        if pio_status == 200 and isinstance(pio_payload, dict):
-            r = pio_payload.get("result") or {}
+        if st == 200 and isinstance(pl, dict):
+            r = pl.get("result") or {}
             deal_lat = safe_float(r.get("latitude"))
             deal_lng = safe_float(r.get("longitude"))
     except Exception:
         pass
 
-    # 3. Without deal coords, return first real candidate (ODS authoritative).
+    # ── 2. Collect neighbour outcodes via postcodes.io ─────────────────────────
+    # /outcodes/{outcode}/nearest returns the outcode itself plus adjacent ones.
+    neighbour_outcodes: List[str] = [outcode]
+    try:
+        st, pl = _http_get_json(
+            f"https://api.postcodes.io/outcodes/{outcode}/nearest",
+            params={"limit": 12, "radius": 10000},
+            timeout=10,
+        )
+        if st == 200 and isinstance(pl, dict):
+            for row in (pl.get("result") or []):
+                oc = (row.get("outcode") or "").strip().upper()
+                if oc and oc not in neighbour_outcodes:
+                    neighbour_outcodes.append(oc)
+    except Exception:
+        pass
+
+    # ── 3. Query ODS for every outcode; deduplicate by OrgId ──────────────────
+    seen_ids: set = set()
+    candidates: List[Dict[str, Any]] = []
+    for oc in neighbour_outcodes:
+        for org in _ods_query(oc):
+            if org["ods_code"] not in seen_ids:
+                seen_ids.add(org["ods_code"])
+                candidates.append(org)
+
+    if not candidates:
+        return None
+
+    # ── 4. Without deal coords — no distance ranking possible ─────────────────
     if deal_lat is None or deal_lng is None:
         c = candidates[0]
         return {
@@ -3071,47 +3115,37 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
             "distance_m": None,
         }
 
-    # 4. Bulk-geocode candidate postcodes; haversine-sort; pick nearest.
+    # ── 5. Bulk-geocode candidate postcodes via postcodes.io POST /postcodes ───
     pcs = list({c["postcode"] for c in candidates if c["postcode"]})
     coords: Dict[str, Tuple[float, float]] = {}
-    if pcs:
+    # Process in batches of 100 (postcodes.io limit per POST call)
+    _batch_size = 100
+    for _i in range(0, len(pcs), _batch_size):
+        _batch = pcs[_i: _i + _batch_size]
         try:
-            bulk_status, bulk_payload = _http_get_json(
+            br = requests.post(
                 "https://api.postcodes.io/postcodes",
-                params=None, timeout=10,
+                json={"postcodes": _batch},
+                headers={"User-Agent": HTTP_USER_AGENT},
+                timeout=12,
             )
-            # postcodes.io bulk requires POST; fall through to per-postcode lookup
-            # if the GET-style call returns nothing usable.
-        except Exception:
-            bulk_payload = None
-        try:
-            import requests as _rq
-            br = _rq.post("https://api.postcodes.io/postcodes",
-                          json={"postcodes": pcs}, timeout=10)
             if br.status_code == 200:
                 for row in (br.json() or {}).get("result") or []:
-                    q = (row or {}).get("query") or ""
+                    q   = (row or {}).get("query") or ""
                     res = (row or {}).get("result") or {}
                     lat = safe_float(res.get("latitude"))
                     lng = safe_float(res.get("longitude"))
                     if q and lat is not None and lng is not None:
                         coords["".join(q.upper().split())] = (lat, lng)
         except Exception as e:
-            print(f"[WARN] GP bulk-geocode failed: {e}")
+            print(f"[WARN] GP bulk-geocode batch failed: {e}")
 
-    import math as _math
-    def _haversine_m(la1, lo1, la2, lo2):
-        R = 6371000.0
-        rla1, rla2 = _math.radians(la1), _math.radians(la2)
-        dla = _math.radians(la2 - la1)
-        dlo = _math.radians(lo2 - lo1)
-        a = _math.sin(dla / 2) ** 2 + _math.cos(rla1) * _math.cos(rla2) * _math.sin(dlo / 2) ** 2
-        return 2 * R * _math.asin(_math.sqrt(a))
-
-    best, best_d = None, None
+    # ── 6. Haversine-sort; pick nearest ───────────────────────────────────────
+    best: Optional[Dict[str, Any]] = None
+    best_d: Optional[float] = None
     for c in candidates:
         key = "".join(c["postcode"].upper().split())
-        ll = coords.get(key)
+        ll  = coords.get(key)
         if not ll:
             continue
         try:
@@ -3129,7 +3163,7 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
             "distance_m": int(best_d),
         }
 
-    # No candidate could be geocoded — first real candidate, distance unknown.
+    # Candidates found but none could be geocoded — return first real name only.
     c = candidates[0]
     return {
         "name":       c["name"],
