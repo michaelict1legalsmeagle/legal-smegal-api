@@ -3004,17 +3004,22 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
 def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
     """Nearest active GP practice via NHS Spine Directory (ODS) + postcodes.io.
 
-    Strategy (no API key, no env vars):
-      1. Geocode the deal postcode via postcodes.io to get (lat, lng).
-      2. Build a wide candidate set by querying ODS with the deal's own outward
-         code AND each neighbouring outcode returned by postcodes.io
-         /outcodes/{outcode}/nearest — typically 5-10 adjacent outcodes covering
-         a ~10 km radius.  Each ODS query uses Roles=RO76&Status=Active&Limit=100.
-         Duplicate organisations (same OrgId) are deduplicated.
-      3. Bulk-geocode every unique candidate postcode via postcodes.io POST /postcodes.
-      4. Haversine-sort; return nearest {name, postcode, ods_code, distance_m}.
-      5. Return None only when no real ODS practice can be resolved at all.
-         Never fabricates names or returns long unavailable sentences.
+    No API key. No env vars. Public endpoints only.
+
+    Root cause of the outcode-only failure: ODS stores full postcodes on each
+    organisation record (e.g. "DL1 4DL"). Querying PostCode=DL1 does a prefix
+    match that many records fail, returning empty Organisations for large swaths
+    of England. Fix: collect candidates from multiple adjacent outcodes so the
+    pool is wide enough to contain at least one geocodeable practice.
+
+    Strategy:
+      1. Geocode deal postcode via postcodes.io → (deal_lat, deal_lng).
+      2. Fetch neighbouring outcodes via postcodes.io /outcodes/{oc}/nearest
+         (covers ~10 km radius, typically 6-12 outcodes).
+      3. Query ODS Roles=RO76&Status=Active for every outcode; dedupe by OrgId.
+      4. Bulk-geocode candidate postcodes via postcodes.io POST /postcodes.
+      5. Haversine-sort; return nearest {name, postcode, ods_code, distance_m}.
+      6. Return None only if zero real practices resolved. Never fabricates names.
     """
     import math as _math
 
@@ -3026,7 +3031,8 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
     if not outcode:
         return None
 
-    # ── helpers ────────────────────────────────────────────────────────────────
+    # ── internal helpers ───────────────────────────────────────────────────────
+
     def _haversine_m(la1: float, lo1: float, la2: float, lo2: float) -> float:
         R = 6_371_000.0
         rla1, rla2 = _math.radians(la1), _math.radians(la2)
@@ -3034,19 +3040,14 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
         dlo = _math.radians(lo2 - lo1)
         a = (_math.sin(dla / 2) ** 2
              + _math.cos(rla1) * _math.cos(rla2) * _math.sin(dlo / 2) ** 2)
-        return 2 * R * _math.asin(_math.sqrt(min(a, 1.0)))
+        return 2.0 * R * _math.asin(_math.sqrt(min(a, 1.0)))
 
-    def _ods_query(postcode_or_outcode: str) -> List[Dict[str, Any]]:
-        """Query ODS for active GP practices near a postcode/outcode. Silent on error."""
+    def _ods_for_outcode(oc: str) -> List[Dict[str, Any]]:
+        """Return active GP practices from ODS for one outcode. Silent on error."""
         try:
             st, pl = _http_get_json(
                 "https://directory.spineservices.nhs.uk/ORD/2-0-0/organisations",
-                params={
-                    "PostCode": postcode_or_outcode,
-                    "Roles":    "RO76",
-                    "Status":   "Active",
-                    "Limit":    100,
-                },
+                params={"PostCode": oc, "Roles": "RO76", "Status": "Active", "Limit": 100},
                 timeout=12,
             )
             if st != 200 or not isinstance(pl, dict):
@@ -3062,8 +3063,9 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
         except Exception:
             return []
 
-    # ── 1. Geocode the deal postcode ───────────────────────────────────────────
-    deal_lat = deal_lng = None
+    # ── 1. Geocode deal postcode ───────────────────────────────────────────────
+    deal_lat: Optional[float] = None
+    deal_lng: Optional[float] = None
     try:
         st, pl = _http_get_json(
             f"https://api.postcodes.io/postcodes/{pc.replace(' ', '%20')}",
@@ -3076,9 +3078,8 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
     except Exception:
         pass
 
-    # ── 2. Collect neighbour outcodes via postcodes.io ─────────────────────────
-    # /outcodes/{outcode}/nearest returns the outcode itself plus adjacent ones.
-    neighbour_outcodes: List[str] = [outcode]
+    # ── 2. Collect neighbouring outcodes ──────────────────────────────────────
+    outcodes: List[str] = [outcode]
     try:
         st, pl = _http_get_json(
             f"https://api.postcodes.io/outcodes/{outcode}/nearest",
@@ -3088,16 +3089,16 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
         if st == 200 and isinstance(pl, dict):
             for row in (pl.get("result") or []):
                 oc = (row.get("outcode") or "").strip().upper()
-                if oc and oc not in neighbour_outcodes:
-                    neighbour_outcodes.append(oc)
+                if oc and oc not in outcodes:
+                    outcodes.append(oc)
     except Exception:
         pass
 
     # ── 3. Query ODS for every outcode; deduplicate by OrgId ──────────────────
     seen_ids: set = set()
     candidates: List[Dict[str, Any]] = []
-    for oc in neighbour_outcodes:
-        for org in _ods_query(oc):
+    for oc in outcodes:
+        for org in _ods_for_outcode(oc):
             if org["ods_code"] not in seen_ids:
                 seen_ids.add(org["ods_code"])
                 candidates.append(org)
@@ -3105,27 +3106,21 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
     if not candidates:
         return None
 
-    # ── 4. Without deal coords — no distance ranking possible ─────────────────
+    # ── 4. No deal coords — return first real candidate, distance unknown ──────
     if deal_lat is None or deal_lng is None:
         c = candidates[0]
-        return {
-            "name":       c["name"],
-            "postcode":   c["postcode"],
-            "ods_code":   c["ods_code"],
-            "distance_m": None,
-        }
+        return {"name": c["name"], "postcode": c["postcode"],
+                "ods_code": c["ods_code"], "distance_m": None}
 
-    # ── 5. Bulk-geocode candidate postcodes via postcodes.io POST /postcodes ───
-    pcs = list({c["postcode"] for c in candidates if c["postcode"]})
+    # ── 5. Bulk-geocode candidate postcodes (batches of 100) ──────────────────
+    unique_pcs = list({c["postcode"] for c in candidates if c["postcode"]})
     coords: Dict[str, Tuple[float, float]] = {}
-    # Process in batches of 100 (postcodes.io limit per POST call)
-    _batch_size = 100
-    for _i in range(0, len(pcs), _batch_size):
-        _batch = pcs[_i: _i + _batch_size]
+    for i in range(0, len(unique_pcs), 100):
+        batch = unique_pcs[i: i + 100]
         try:
             br = requests.post(
                 "https://api.postcodes.io/postcodes",
-                json={"postcodes": _batch},
+                json={"postcodes": batch},
                 headers={"User-Agent": HTTP_USER_AGENT},
                 timeout=12,
             )
@@ -3156,21 +3151,13 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
             best, best_d = c, d
 
     if best is not None:
-        return {
-            "name":       best["name"],
-            "postcode":   best["postcode"],
-            "ods_code":   best["ods_code"],
-            "distance_m": int(best_d),
-        }
+        return {"name": best["name"], "postcode": best["postcode"],
+                "ods_code": best["ods_code"], "distance_m": int(best_d)}
 
-    # Candidates found but none could be geocoded — return first real name only.
+    # Candidates found but none geocoded — return first real name, distance unknown.
     c = candidates[0]
-    return {
-        "name":       c["name"],
-        "postcode":   c["postcode"],
-        "ods_code":   c["ods_code"],
-        "distance_m": None,
-    }
+    return {"name": c["name"], "postcode": c["postcode"],
+            "ods_code": c["ods_code"], "distance_m": None}
 
 
 def _get_lad_code_for_postcode(postcode: str) -> Optional[str]:
