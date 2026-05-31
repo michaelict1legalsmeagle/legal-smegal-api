@@ -3110,7 +3110,8 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
     if deal_lat is None or deal_lng is None:
         c = candidates[0]
         return {"name": c["name"], "postcode": c["postcode"],
-                "ods_code": c["ods_code"], "distance_m": None}
+                "ods_code": c["ods_code"], "distance_m": None,
+                "count": len(candidates)}
 
     # ── 5. Bulk-geocode candidate postcodes (batches of 100) ──────────────────
     unique_pcs = list({c["postcode"] for c in candidates if c["postcode"]})
@@ -3152,12 +3153,14 @@ def get_gp_data(postcode: str) -> Optional[Dict[str, Any]]:
 
     if best is not None:
         return {"name": best["name"], "postcode": best["postcode"],
-                "ods_code": best["ods_code"], "distance_m": int(best_d)}
+                "ods_code": best["ods_code"], "distance_m": int(best_d),
+                "count": len(candidates)}
 
     # Candidates found but none geocoded — return first real name, distance unknown.
     c = candidates[0]
     return {"name": c["name"], "postcode": c["postcode"],
-            "ods_code": c["ods_code"], "distance_m": None}
+            "ods_code": c["ods_code"], "distance_m": None,
+            "count": len(candidates)}
 
 
 def _get_lad_code_for_postcode(postcode: str) -> Optional[str]:
@@ -7751,39 +7754,6 @@ def save_area(deal_id: str):
                         print(f"[_patch_inference ERROR] {_deal_id_ref}: {_e}")
                 import threading as _ti
                 _ti.Thread(target=_patch_inference, daemon=True).start()
-            # ── GP staleness check ────────────────────────────────────────
-            # cached area_json may pre-date the widened ODS+postcodes.io
-            # get_gp_data implementation, or the earlier fetch may have
-            # returned a metric_unavailable / status="unavailable" object.
-            # Heal it synchronously on this request so the caller always
-            # gets either null or a real {name, postcode, ods_code, distance_m}.
-            def _gp_is_stale(gp_val) -> bool:
-                if gp_val is None:
-                    return True
-                if not isinstance(gp_val, dict):
-                    return True
-                if gp_val.get("status") == "unavailable":
-                    return True
-                # metric_unavailable objects carry a "label" key but no "name"
-                name = (gp_val.get("name") or "").strip()
-                if not name:
-                    return True
-                return False
-
-            if "gp" not in cached or _gp_is_stale(cached.get("gp")):
-                try:
-                    _fresh_gp = get_gp_data(postcode) if postcode else None
-                    cached["gp"] = _fresh_gp
-                    supabase.table("deals").update({
-                        "area_json":  cached,
-                        "updated_at": now_iso(),
-                    }).eq("id", deal_id).execute()
-                except Exception as _gp_e:
-                    app.logger.warning(
-                        "[area/cache] GP re-fetch failed for deal %s postcode %s: %s",
-                        deal_id, postcode, _gp_e
-                    )
-                    cached["gp"] = None
             # Auto-enrich Census demographics on cached fast-path too —
             # picks up legacy + partial-failure rows on first read.
             cached = _maybe_enrich_census_demographics(deal_id, cached)
