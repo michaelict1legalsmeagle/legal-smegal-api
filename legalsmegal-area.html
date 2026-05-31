@@ -1,0 +1,2875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Area Intelligence — LegalSmegal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.9.0/mapbox-gl.css" rel="stylesheet">
+<style>
+
+/* ═══ SYSTEM TOKENS ══════════════════════════════════════════════ */
+:root {
+  --bg:          #080c10;
+  --surface:     #0d1219;
+  --surface-2:   #111820;
+  --surface-3:   #161e28;
+  --surface-4:   #1b2430;
+  --border:      #1c2530;
+  --border-2:    #243040;
+  --border-3:    #2d3a4d;
+  --text-pri:    #e8edf2;
+  --text-sec:    #9aafc4;
+  --text-ter:    #526882;
+  --text-quat:   #3a4a5e;
+  --accent:      #c8a84b;
+  --accent-2:    #d4b65a;
+  --accent-dim:  rgba(200,168,75,0.12);
+  --green:       #3ecf8e;
+  --green-dim:   rgba(62,207,142,0.12);
+  --red:         #e05c5c;
+  --red-dim:     rgba(224,92,92,0.12);
+  --amber:       #e8943a;
+  --amber-dim:   rgba(232,148,58,0.12);
+  --blue:        #4a9eff;
+  --blue-dim:    rgba(74,158,255,0.12);
+  --purple:      #9b6dff;
+  --purple-dim:  rgba(155,109,255,0.14);
+  --cyan:        #4ed6e0;
+  --cyan-dim:    rgba(78,214,224,0.14);
+  --teal:        #2dd4b8;
+  --teal-dim:    rgba(45,212,184,0.14);
+  --font-mono:   'IBM Plex Mono', monospace;
+  --font-sans:   'IBM Plex Sans', sans-serif;
+}
+
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  background: var(--bg); color: var(--text-pri);
+  font-family: var(--font-sans); font-size: 13px;
+  line-height: 1.5; min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: none; }
+
+/* ── NAV (verdict spec — preserved) ─────────────────────────── */
+nav {
+  height: 44px; background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 20px; gap: 0;
+  position: sticky; top: 0; z-index: 200;
+}
+.nav-brand {
+  font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+  color: var(--text-pri); letter-spacing: 0.02em;
+  text-decoration: none; white-space: nowrap; margin-right: 20px;
+}
+.nav-brand span { color: var(--accent); }
+.nav-ctx {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-ter);
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.nav-right { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; align-items: center; }
+.nav-btn {
+  height: 28px; padding: 0 12px; border-radius: 3px;
+  border: 1px solid var(--border-2); background: transparent; color: var(--text-sec);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer;
+  text-decoration: none; display: inline-flex; align-items: center;
+  transition: border-color 0.15s, color 0.15s; white-space: nowrap;
+}
+.nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+.nav-btn.active {
+  border-color: var(--accent); background: var(--accent-dim); color: var(--accent);
+  cursor: default; pointer-events: none;
+}
+.nav-user {
+  width: 30px; height: 30px; border-radius: 50%; background: var(--surface-3);
+  border: 1px solid var(--border-2); color: var(--text-sec);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; margin-left: 6px;
+}
+.nav-user:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ── STEPBAR (verdict spec — preserved) ─────────────────────── */
+.step-bar {
+  height: 36px; background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 20px; gap: 0;
+  position: sticky; top: 44px; z-index: 199; overflow-x: auto;
+}
+.step-item { display: inline-flex; align-items: center; gap: 6px; }
+.step-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--text-quat);
+}
+.step-dot.done   { background: var(--green); }
+.step-dot.active { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.step-dot.pending{ background: var(--text-quat); }
+.step-lbl {
+  font-family: var(--font-mono); font-size: 10px;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-ter);
+}
+.step-lbl.done   { color: var(--text-sec); }
+.step-lbl.active { color: var(--accent); font-weight: 600; }
+.step-lbl.pending{ color: var(--text-ter); }
+.step-sep { color: var(--text-quat); margin: 0 14px; font-size: 11px; }
+
+/* ── LOADER ──────────────────────────────────────────────────── */
+#areaLoader {
+  position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
+  padding: 8px 16px; background: var(--surface-2);
+  border: 1px solid var(--border-2); border-radius: 3px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-sec);
+  z-index: 500;
+}
+
+/* ═══ AREA SHELL ════════════════════════════════════════════════ */
+.area-shell {
+  padding: 16px 28px 20px 28px;
+  display: flex; flex-direction: column; gap: 14px;
+  max-width: 1880px; margin: 0 auto;
+}
+
+/* ── SEARCH ROW ─────────────────────────────────────────────── */
+.area-search-row {
+  position: relative;
+}
+.area-search {
+  display: flex; align-items: center; gap: 0;
+  height: 44px; background: var(--surface-2);
+  border: 1px solid var(--border-2); border-radius: 4px;
+  padding: 0 14px;
+  font-family: var(--font-sans);
+}
+.area-search-icon {
+  width: 16px; height: 16px; color: var(--text-ter); flex-shrink: 0;
+  margin-right: 10px;
+}
+.area-search input {
+  flex: 1; background: transparent; border: 0; outline: 0;
+  color: var(--text-pri); font-family: var(--font-mono); font-size: 13px;
+  letter-spacing: 0.04em;
+  height: 100%; padding: 0;
+}
+.area-search input:read-only { cursor: default; }
+.area-search input::placeholder { color: var(--text-quat); }
+.area-search-clear {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 0; background: var(--surface-4); color: var(--text-ter);
+  font-size: 12px; line-height: 18px; text-align: center;
+  cursor: pointer; flex-shrink: 0;
+}
+.area-search-clear:hover { color: var(--text-pri); }
+.area-search-clear.hidden { visibility: hidden; }
+
+/* ── TABS ROW ───────────────────────────────────────────────── */
+.area-tabs-row {
+  display: flex; align-items: center; gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0;
+  position: relative;
+}
+.area-tabs {
+  display: flex; gap: 0; align-items: stretch;
+}
+.area-tab {
+  height: 38px; padding: 0 14px;
+  background: transparent; border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-sec);
+  font-family: var(--font-sans); font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s;
+  display: inline-flex; align-items: center;
+  margin-right: 8px;
+}
+.area-tab:hover { color: var(--text-pri); }
+.area-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.area-tabs-right {
+  margin-left: auto; display: flex; gap: 4px; align-items: center;
+}
+.area-tab-action {
+  height: 28px; padding: 0 12px;
+  background: transparent; border: 1px solid transparent;
+  color: var(--text-sec);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  cursor: pointer; border-radius: 3px;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.area-tab-action:hover { color: var(--accent); border-color: var(--border-2); }
+.area-tab-action .ico { width: 12px; height: 12px; opacity: 0.8; }
+
+/* ═══ BODY GRID ═════════════════════════════════════════════════ */
+.area-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.85fr);
+  gap: 14px;
+  align-items: stretch;
+}
+@media (max-width: 1100px) {
+  .area-body { grid-template-columns: 1fr; }
+}
+
+/* ── LEFT PANEL ─────────────────────────────────────────────── */
+.area-left {
+  display: flex; flex-direction: column; gap: 12px;
+  min-width: 0;
+}
+
+.area-header {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 2px 0 0 0;
+}
+.area-header-title {
+  font-family: var(--font-sans); font-size: 18px; font-weight: 600;
+  color: var(--text-pri); letter-spacing: -0.01em;
+}
+.area-header-locality {
+  font-family: var(--font-sans); font-size: 12px;
+  color: var(--text-ter);
+}
+.area-header-summary {
+  font-family: var(--font-sans); font-size: 12.5px;
+  color: var(--text-sec); line-height: 1.55;
+  margin-top: 4px;
+}
+.area-header-chips {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
+}
+.area-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  background: var(--surface-2); border: 1px solid var(--border-2);
+  border-radius: 3px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-sec);
+}
+.area-chip.green  { color: var(--green);  border-color: rgba(62,207,142,0.25);  background: var(--green-dim); }
+.area-chip.blue   { color: var(--blue);   border-color: rgba(74,158,255,0.28);  background: var(--blue-dim); }
+.area-chip.amber  { color: var(--amber);  border-color: rgba(232,148,58,0.28);  background: var(--amber-dim); }
+.area-chip.red    { color: var(--red);    border-color: rgba(224,92,92,0.28);   background: var(--red-dim); }
+.area-chip.muted  { color: var(--text-ter); }
+.area-chip-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.85; }
+.area-chip-arrow { font-size: 12px; line-height: 1; }
+
+/* ── EVIDENCE CARDS ─────────────────────────────────────────── */
+.area-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.area-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px 14px 11px 14px;
+  display: flex; flex-direction: column; gap: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  min-width: 0;
+  /* Per-card identity — each tone-* class sets these. Defaults to gold. */
+  --card-accent:     var(--accent);
+  --card-accent-dim: var(--accent-dim);
+}
+.area-card:hover {
+  border-color: var(--card-accent);
+  background: var(--surface-3);
+}
+.area-card.active {
+  border-color: var(--card-accent);
+  background: var(--card-accent-dim);
+}
+.area-card.tone-transport    { --card-accent: var(--blue);   --card-accent-dim: var(--blue-dim); }
+.area-card.tone-crime        { --card-accent: var(--red);    --card-accent-dim: var(--red-dim); }
+.area-card.tone-flood        { --card-accent: var(--cyan);   --card-accent-dim: var(--cyan-dim); }
+.area-card.tone-amenities    { --card-accent: var(--green);  --card-accent-dim: var(--green-dim); }
+.area-card.tone-schools      { --card-accent: var(--purple); --card-accent-dim: var(--purple-dim); }
+.area-card.tone-rental       { --card-accent: var(--amber);  --card-accent-dim: var(--amber-dim); }
+.area-card.tone-market       { --card-accent: var(--accent); --card-accent-dim: var(--accent-dim); }
+.area-card.tone-demographics { --card-accent: var(--teal);   --card-accent-dim: var(--teal-dim); }
+.area-card-head {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text-pri);
+}
+.area-card-ico {
+  width: 16px; height: 16px; flex-shrink: 0;
+}
+.area-card-title {
+  font-family: var(--font-sans); font-size: 13px; font-weight: 500;
+  color: var(--text-pri); flex: 1;
+}
+.area-card-chev {
+  color: var(--text-quat); font-size: 12px; line-height: 1;
+}
+.area-card-rows {
+  display: flex; flex-direction: column; gap: 5px;
+}
+.area-card-row {
+  display: flex; align-items: baseline; gap: 8px;
+  font-family: var(--font-sans); font-size: 12px;
+  color: var(--text-sec); line-height: 1.4;
+  min-width: 0;
+}
+.area-card-row .lbl {
+  color: var(--text-ter); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.area-card-row .val {
+  color: var(--text-pri); font-weight: 500;
+  text-align: right; flex-shrink: 0;
+  white-space: nowrap;
+}
+.area-card-row .val.good   { color: var(--green); }
+.area-card-row .val.bad    { color: var(--red); }
+.area-card-row .val.warn   { color: var(--amber); }
+.area-card-row .val.muted  { color: var(--text-ter); font-weight: 400; }
+.area-card-row .val .sub   {
+  display: inline-block; color: var(--text-ter); font-weight: 400;
+  font-size: 10.5px; margin-left: 4px;
+}
+.area-card-row .val .delta {
+  display: inline-block; margin-left: 4px;
+  font-family: var(--font-mono); font-size: 10.5px;
+}
+.area-card-row .val .delta.up   { color: var(--green); }
+.area-card-row .val .delta.down { color: var(--red); }
+
+/* card-icon palette by topic */
+.ico-transport { color: var(--blue); }
+.ico-crime     { color: var(--red); }
+.ico-flood     { color: var(--cyan); }
+.ico-amenities { color: var(--green); }
+.ico-schools   { color: var(--purple); }
+.ico-rental    { color: var(--amber); }
+.ico-market    { color: var(--accent); }
+.ico-demo      { color: var(--teal); }
+
+/* ── MAP PANEL ──────────────────────────────────────────────── */
+.area-right {
+  position: relative;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  min-height: 600px;
+  min-width: 0;
+}
+#areaMap {
+  position: absolute; inset: 0;
+  background: #050a0e;
+}
+/* Mapbox GL dark trim */
+.mapboxgl-map { background: #050a0e; outline: none; font-family: var(--font-sans); }
+.mapboxgl-canvas:focus { outline: none; }
+.mapboxgl-ctrl-attrib {
+  background: rgba(8,12,16,0.88) !important;
+  color: var(--text-ter) !important;
+  font-family: var(--font-sans); font-size: 10px !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 3px !important;
+  padding: 1px 6px !important;
+}
+.mapboxgl-ctrl-attrib a { color: var(--text-sec) !important; }
+.mapboxgl-ctrl-bottom-left, .mapboxgl-ctrl-bottom-right { z-index: 405; }
+.mapboxgl-popup { z-index: 430; }
+.mapboxgl-popup-content {
+  background: var(--surface-2) !important;
+  color: var(--text-pri) !important;
+  border: 1px solid var(--border-2) !important;
+  border-radius: 4px !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55) !important;
+  padding: 12px 14px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+}
+.mapboxgl-popup-tip { display: none !important; }
+.mapboxgl-popup-close-button {
+  color: var(--text-ter) !important;
+  font-size: 16px !important;
+  padding: 2px 7px 0 0 !important;
+}
+.mapboxgl-popup-close-button:hover { color: var(--text-pri) !important; background: transparent !important; }
+
+/* Config-error overlay (Plan A hard-fail — no silent fallback) */
+.map-config-error {
+  position: absolute; inset: 0; z-index: 460;
+  display: none; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 28px; text-align: center;
+  background: #060a0e;
+}
+.map-config-error.show { display: flex; }
+.map-config-error svg { width: 34px; height: 34px; color: var(--red); opacity: 0.9; }
+.map-config-error-title {
+  font-family: var(--font-sans); font-size: 14px; font-weight: 600; color: var(--text-pri);
+}
+.map-config-error-detail {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-ter);
+  max-width: 460px; line-height: 1.6;
+}
+/* Popup internals */
+.pop-title {
+  font-family: var(--font-sans); font-size: 12.5px; font-weight: 600;
+  color: var(--text-pri); margin-bottom: 4px;
+}
+.pop-meta {
+  font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--text-ter); letter-spacing: 0.03em;
+}
+.pop-badge {
+  display: inline-block; margin-left: 4px;
+  font-family: var(--font-mono); font-size: 9.5px;
+  padding: 1px 6px; border-radius: 2px;
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+.pop-badge.good { color: var(--green); background: var(--green-dim); border: 1px solid rgba(62,207,142,0.28); }
+.pop-badge.warn { color: var(--amber); background: var(--amber-dim); border: 1px solid rgba(232,148,58,0.28); }
+.pop-badge.bad  { color: var(--red);   background: var(--red-dim);   border: 1px solid rgba(224,92,92,0.28); }
+.pop-badge.mute { color: var(--text-ter); background: var(--surface-3); border: 1px solid var(--border-2); }
+
+/* Map overlays — top */
+.map-top {
+  position: absolute; left: 0; right: 0; top: 0;
+  display: flex; justify-content: space-between; align-items: flex-start;
+  padding: 12px 12px 0 12px;
+  pointer-events: none;
+  z-index: 410;
+}
+.map-top > * { pointer-events: auto; }
+.map-top-left { display: flex; gap: 6px; }
+.map-top-right { display: flex; gap: 6px; align-items: center; }
+.map-btn {
+  height: 30px; padding: 0 10px;
+  background: rgba(13,18,25,0.92);
+  border: 1px solid var(--border-2);
+  border-radius: 3px;
+  color: var(--text-pri);
+  font-family: var(--font-sans); font-size: 12px; font-weight: 500;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  backdrop-filter: blur(4px);
+  transition: border-color 0.15s;
+}
+.map-btn:hover { border-color: var(--accent); }
+.map-btn .ico { width: 13px; height: 13px; opacity: 0.85; }
+.map-btn .badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px;
+  background: var(--accent); color: #1a1208;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  border-radius: 9px; padding: 0 5px;
+  margin-left: 4px;
+}
+.map-layer-chip {
+  height: 28px; padding: 0 10px;
+  background: rgba(13,18,25,0.92);
+  border: 1px solid var(--border-2);
+  border-radius: 3px;
+  color: var(--text-sec);
+  font-family: var(--font-mono); font-size: 10px;
+  font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase;
+  display: inline-flex; align-items: center; gap: 6px;
+  cursor: pointer; transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+  backdrop-filter: blur(4px);
+}
+.map-layer-chip:hover { color: var(--text-pri); }
+.map-layer-chip .dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--text-ter);
+}
+.map-layer-chip.layer-schools   .dot { background: var(--purple); }
+.map-layer-chip.layer-amenities .dot { background: var(--green); }
+.map-layer-chip.layer-transport .dot { background: var(--blue); }
+.map-layer-chip.layer-crime     .dot { background: var(--red); }
+.map-layer-chip.layer-flood     .dot { background: var(--cyan); }
+.map-layer-chip.dim { opacity: 0.42; }
+.map-layer-chip.no-data { opacity: 0.55; cursor: help; }
+.map-layer-chip.no-data::after {
+  content: '—'; color: var(--text-quat); margin-left: 2px;
+}
+
+/* Map zoom + locate controls */
+.map-controls {
+  position: absolute; right: 12px; bottom: 100px;
+  display: flex; flex-direction: column; gap: 6px;
+  z-index: 410;
+}
+.map-ctrl-btn {
+  width: 32px; height: 32px;
+  background: rgba(13,18,25,0.92);
+  border: 1px solid var(--border-2);
+  border-radius: 3px;
+  color: var(--text-pri);
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(4px);
+  font-size: 16px; font-weight: 300;
+}
+.map-ctrl-btn:hover { border-color: var(--accent); color: var(--accent); }
+.map-ctrl-btn .ico { width: 16px; height: 16px; }
+
+/* Subject pin label */
+.subject-pin-wrap {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center;
+  filter: drop-shadow(0 6px 18px rgba(200,168,75,0.5));
+  cursor: default; z-index: 50;
+}
+.subject-pin {
+  background: linear-gradient(180deg, var(--accent-2) 0%, var(--accent) 100%);
+  color: #150f04;
+  font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 6px 12px;
+  border-radius: 4px;
+  white-space: nowrap;
+  box-shadow: 0 0 0 4px rgba(200,168,75,0.18), 0 3px 12px rgba(0,0,0,0.55);
+}
+.subject-pin::after {
+  content: ''; position: absolute; left: 50%; top: calc(100% - 11px);
+  width: 0; height: 0;
+  border-left: 6px solid transparent; border-right: 6px solid transparent;
+  border-top: 8px solid var(--accent);
+  transform: translateX(-50%);
+}
+.subject-pin-dot {
+  width: 11px; height: 11px; margin-top: 7px;
+  background: var(--accent); border-radius: 50%;
+  border: 2px solid #150f04;
+  box-shadow: 0 0 0 4px rgba(200,168,75,0.25), 0 0 16px rgba(200,168,75,0.6);
+}
+
+/* POI markers — schools (Mapbox HTML markers, centre-anchored by Mapbox) */
+.poi-marker {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: 2px solid #050a0e;
+  position: relative;
+  cursor: pointer;
+}
+.poi-marker::after {
+  content: ''; position: absolute; inset: -4px;
+  border-radius: 50%;
+  opacity: 0.32;
+  pointer-events: none;
+}
+.poi-marker.schools {
+  background: radial-gradient(circle at 32% 30%, #c5a3ff 0%, var(--purple) 65%);
+  box-shadow: 0 0 0 1px rgba(155,109,255,0.32), 0 1px 6px rgba(0,0,0,0.55);
+}
+.poi-marker.schools::after { background: var(--purple); }
+
+/* Filters popout */
+.filters-pop {
+  position: absolute; top: 50px; left: 80px;
+  width: 230px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  padding: 12px;
+  z-index: 420;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  display: none;
+}
+.filters-pop.open { display: block; }
+.filters-pop-title {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-ter); margin-bottom: 10px;
+}
+.filters-pop-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0;
+  font-family: var(--font-sans); font-size: 12px;
+  color: var(--text-pri);
+  cursor: pointer;
+}
+.filters-pop-row .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.filters-pop-row.lyr-schools   .dot { background: var(--purple); }
+.filters-pop-row.lyr-amenities .dot { background: var(--green); }
+.filters-pop-row.lyr-transport .dot { background: var(--blue); }
+.filters-pop-row.lyr-crime     .dot { background: var(--red); }
+.filters-pop-row.lyr-flood     .dot { background: var(--cyan); }
+.filters-pop-row input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 13px; height: 13px;
+  margin-left: auto;
+}
+.filters-pop-row .nd {
+  margin-left: auto; font-family: var(--font-mono); font-size: 9px;
+  color: var(--text-quat); text-transform: uppercase; letter-spacing: 0.06em;
+}
+
+/* ── LOWER STRIP ─────────────────────────────────────────────── */
+.area-strip {
+  display: flex; flex-direction: column; gap: 10px;
+  padding-top: 4px;
+}
+.area-strip-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+}
+.area-strip-title {
+  font-family: var(--font-sans); font-size: 14px; font-weight: 600;
+  color: var(--text-pri);
+}
+.area-strip-action {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--accent); cursor: pointer;
+}
+.area-strip-action:hover { color: var(--accent-2); }
+
+.area-strip-body {
+  position: relative;
+}
+.strip-scroll {
+  display: flex; gap: 10px;
+  overflow-x: auto; overflow-y: hidden;
+  scroll-behavior: smooth;
+  padding-bottom: 4px;
+}
+.strip-scroll::-webkit-scrollbar { height: 6px; }
+.strip-scroll::-webkit-scrollbar-track { background: transparent; }
+.strip-scroll::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 3px; }
+.strip-card {
+  flex: 0 0 230px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.strip-card-head {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-bottom: 4px;
+}
+.strip-card-ico {
+  width: 30px; height: 30px; border-radius: 4px;
+  background: var(--surface-3); border: 1px solid var(--border-2);
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.strip-card-ico svg { width: 16px; height: 16px; }
+.strip-card-title {
+  font-family: var(--font-sans); font-size: 12.5px; font-weight: 500;
+  color: var(--text-pri); line-height: 1.3;
+  max-height: 2.6em; overflow: hidden;
+}
+.strip-card-meta-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.strip-card-mile {
+  font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--text-ter);
+}
+.strip-card-badge {
+  display: inline-flex; align-items: center;
+  height: 18px; padding: 0 7px;
+  border-radius: 2px;
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 500;
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+.strip-card-badge.outstanding { color: var(--green);  background: var(--green-dim); border: 1px solid rgba(62,207,142,0.25); }
+.strip-card-badge.good        { color: var(--green);  background: var(--green-dim); border: 1px solid rgba(62,207,142,0.25); }
+.strip-card-badge.requires    { color: var(--amber);  background: var(--amber-dim); border: 1px solid rgba(232,148,58,0.28); }
+.strip-card-badge.inadequate  { color: var(--red);    background: var(--red-dim);   border: 1px solid rgba(224,92,92,0.28); }
+.strip-card-badge.muted       { color: var(--text-ter); background: var(--surface-3); border: 1px solid var(--border-2); }
+.strip-card-line {
+  font-family: var(--font-sans); font-size: 11px;
+  color: var(--text-sec);
+}
+.strip-card-foot {
+  font-family: var(--font-sans); font-size: 11px;
+  color: var(--text-ter); margin-top: auto;
+}
+.strip-empty {
+  padding: 24px 18px; text-align: left;
+  background: var(--surface-2); border: 1px dashed var(--border-2);
+  border-radius: 4px;
+  font-family: var(--font-sans); font-size: 12px; color: var(--text-ter);
+}
+
+/* ── BOTTOM SUMMARY BAR ─────────────────────────────────────── */
+.area-bottom {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  padding: 12px 16px;
+  margin-top: 4px;
+}
+.area-bottom-ico {
+  width: 24px; height: 24px; flex-shrink: 0; color: var(--accent);
+}
+.area-bottom-text {
+  flex: 1; font-family: var(--font-sans); font-size: 13px;
+  color: var(--text-sec); line-height: 1.5;
+  min-width: 0;
+}
+.area-bottom-text strong { color: var(--text-pri); font-weight: 500; }
+.area-bottom-btn {
+  height: 34px; padding: 0 14px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--accent);
+  font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 8px;
+  flex-shrink: 0;
+}
+.area-bottom-btn:hover { background: var(--accent-dim); }
+
+/* skeletons */
+.skel {
+  display: inline-block; background: linear-gradient(90deg, var(--surface-3), var(--surface-4), var(--surface-3));
+  background-size: 200% 100%;
+  animation: skel 1.4s ease infinite;
+  border-radius: 2px;
+}
+@keyframes skel {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+</style>
+</head>
+<body>
+
+<!-- deal_id wiring (preserved verbatim from prior file) -->
+<script>
+(function(){
+  var did = new URLSearchParams(window.location.search).get('deal_id');
+  if (!did) return;
+  function wire(){
+    document.querySelectorAll('a[href*="legalsmegal-"]').forEach(function(a){
+      var h = a.getAttribute('href') || '';
+      if (h.includes('deal_id=') || h.includes('signin')) return;
+      a.href = h + (h.includes('?') ? '&' : '?') + 'deal_id=' + did;
+    });
+  }
+  wire();
+  if (window.MutationObserver) new MutationObserver(wire).observe(document.body,{childList:true,subtree:true});
+})();
+</script>
+
+<nav>
+  <a href="index.html" class="nav-brand">Legal<span>Smegal</span></a>
+  <span class="nav-ctx" id="navCtx"></span>
+  <div class="nav-right">
+    <a href="legalsmegal-dashboard.html"   class="nav-btn">Dashboard</a>
+    <a href="legalsmegal-discovery.html"   class="nav-btn">Discovery</a>
+    <a href="legalsmegal-workbench.html"   class="nav-btn">Flag Workbench</a>
+    <a href="legalsmegal-financials.html"  class="nav-btn">Financial Model</a>
+    <a href="legalsmegal-area.html"        class="nav-btn active">Area Intelligence</a>
+    <a href="legalsmegal-auction.html"     class="nav-btn">Auction Report</a>
+    <span class="nav-user" id="navUser" title="Sign out" onclick="window.signOut && window.signOut()">MS</span>
+  </div>
+</nav>
+
+<div class="step-bar">
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Upload</span></span>
+  <span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Verdict</span></span>
+  <span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Flag Workbench</span></span>
+  <span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Financial Model</span></span>
+  <span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot active"></span><span class="step-lbl active">Area Intelligence</span></span>
+  <span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot pending"></span><span class="step-lbl pending">Auction Report</span></span>
+</div>
+
+<div id="areaLoader">Fetching area intelligence…</div>
+
+<div class="area-shell">
+
+  <!-- ─── Search row (deal postcode, read-only by default — 6B) ─── -->
+  <div class="area-search-row">
+    <div class="area-search">
+      <svg class="area-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <input type="text" id="dealPostcodeInput" readonly placeholder="Deal postcode" aria-label="Deal postcode">
+      <button class="area-search-clear hidden" id="dealPostcodeClear" aria-label="Clear" type="button">×</button>
+    </div>
+  </div>
+
+  <!-- ─── Tabs row ─── -->
+  <div class="area-tabs-row">
+    <div class="area-tabs" role="tablist">
+      <button class="area-tab active" data-tab="overview"    role="tab">Overview</button>
+      <button class="area-tab"        data-tab="crime"       role="tab">Crime</button>
+      <button class="area-tab"        data-tab="transport"   role="tab">Transport</button>
+      <button class="area-tab"        data-tab="amenities"   role="tab">Amenities</button>
+      <button class="area-tab"        data-tab="schools"     role="tab">Schools</button>
+      <button class="area-tab"        data-tab="environment" role="tab">Environment</button>
+    </div>
+    <div class="area-tabs-right">
+      <button class="area-tab-action" id="saveAreaBtn" type="button">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15 8.5 22 9.5 17 14.5 18 22 12 18.5 6 22 7 14.5 2 9.5 9 8.5"/></svg>
+        Save area
+      </button>
+      <button class="area-tab-action" id="shareAreaBtn" type="button">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+        Share
+      </button>
+    </div>
+  </div>
+
+  <!-- ─── Body grid ─── -->
+  <div class="area-body">
+
+    <!-- LEFT EVIDENCE PANEL -->
+    <div class="area-left">
+
+      <div class="area-header">
+        <div class="area-header-title" id="areaTitle">Area intelligence for <span class="skel" style="width:90px;height:14px"></span></div>
+        <div class="area-header-locality" id="areaLocality"><span class="skel" style="width:160px;height:11px"></span></div>
+        <div class="area-header-summary"  id="areaSummary"><span class="skel" style="width:80%;height:11px;display:inline-block"></span></div>
+        <div class="area-header-chips"    id="areaChips"></div>
+      </div>
+
+      <div class="area-cards" id="areaCards">
+
+        <!-- TRANSPORT -->
+        <div class="area-card tone-transport" data-card="transport" id="cardTransport">
+          <div class="area-card-head">
+            <svg class="area-card-ico ico-transport" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="3" width="16" height="14" rx="2"/><circle cx="8" cy="17" r="1.5"/><circle cx="16" cy="17" r="1.5"/><path d="M4 11h16"/></svg>
+            <span class="area-card-title">Transport</span>
+            <span class="area-card-chev">›</span>
+          </div>
+          <div class="area-card-rows">
+            <div class="area-card-row"><span class="lbl">Public transport</span><span class="val" id="trVal">—</span></div>
+            <div class="area-card-row"><span class="lbl" id="trStationLbl">Nearest station</span><span class="val" id="trStation">—</span></div>
+            <div class="area-card-row"><span class="lbl">Bus stops nearby</span><span class="val" id="trBus">—</span></div>
+          </div>
+        </div>
+
+        <!-- CRIME -->
+        <div class="area-card tone-crime" data-card="crime" id="cardCrime">
+          <div class="area-card-head">
+            <svg class="area-card-ico ico-crime" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6l-8-4z"/></svg>
+            <span class="area-card-title">Crime</span>
+            <span class="area-card-chev">›</span>
+          </div>
+          <div class="area-card-rows">
+            <div class="area-card-row"><span class="lbl">Crimes recorded</span><span class="val" id="crTotal">—</span></div>
+            <div class="area-card-row"><span class="lbl">vs national avg</span><span class="val" id="crIndex">—</span></div>
+            <div class="area-card-row"><span class="lbl">Most common</span><span class="val" id="crTop">—</span></div>
+          </div>
+        </div>
+
+        <!-- FLOOD -->
+        <div class="area-card tone-flood" data-card="environment" id="cardFlood">
+          <div class="area-card-head">
+            <svg class="area-card-ico ico-flood" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 14c2-1 4-1 6 0s4 1 6 0 4-1 6 0"/><path d="M3 18c2-1 4-1 6 0s4 1 6 0 4-1 6 0"/><path d="M12 2c2 4 4 6 4 9a4 4 0 1 1-8 0c0-3 2-5 4-9z"/></svg>
+            <span class="area-card-title">Flood</span>
+            <span class="area-card-chev">›</span>
+          </div>
+          <div class="area-card-rows">
+            <div class="area-card-row"><span class="lbl">Flood zone</span><span class="val" id="flZone">—</span></div>
+            <div class="area-card-row"><span class="lbl">Annual probability</span><span class="val" id="flProb">—</span></div>
+            <div class="area-card-row"><span class="lbl">Areas in 0.5km</span><span class="val" id="flAreas">—</span></div>
+          </div>
+        </div>
+
+        <!-- AMENITIES -->
+        <div class="area-card tone-amenities" data-card="amenities" id="cardAmenities">
+          <div class="area-card-head">
+            <svg class="area-card-ico ico-amenities" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-6 9 6v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+            <span class="area-card-title">Amenities</span>
+            <span class="area-card-chev">›</span>
+          </div>
+          <div class="area-card-rows">
+            <div class="area-card-row"><span class="lbl">Amenities (~1.2km)</span><span class="val" id="amTotal">—</span></div>
+            <div class="area-card-row"><span class="lbl">Shops</span><span class="val" id="amShop">—</span></div>
+            <div class="area-card-row"><span class="lbl">Food &amp; drink</span><span class="val" id="amFood">—</span></div>
+          </div>
+        </div>
+
+        <!-- SCHOOLS -->
+        <div class="area-card tone-schools" data-card="schools" id="cardSchools">
+          <div class="area-card-head">
+            <svg class="area-card-ico ico-schools" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1 2 3 6 3s6-2 6-3v-5"/></svg>
+            <span class="area-card-title">Schools</span>
+            <span class="area-card-chev">›</span>
+          </div>
+          <div class="area-card-rows">
+            <div class="area-card-row"><span class="lbl">Primary</span><span class="val" id="scPrimary">—</span></div>
+            <div class="area-card-row"><span class="lbl">Secondary</span><span class="val" id="scSecondary">—</span></div>
+            <div class="area-card-row"><span class="lbl">Nursery / other</span><span class="val" id="scOther">—</span></div>
+          </div>
+        </div>
+
+        <!-- RENTAL DEMAND -->
+        <div class="area-card tone-rental" data-card="rental" id="cardRental">
+          <div class="area-card-head">
+            <svg class="area-card-ico ico-rental" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l9-9 9 9"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>
+            <span class="area-card-title">Rental demand</span>
+            <span class="area-card-chev">›</span>
+          </div>
+          <div class="area-card-rows">
+            <div class="area-card-row"><span class="lbl">Regional rent</span><span class="val" id="rdRent">—</span></div>
+            <div class="area-card-row"><span class="lbl">Rent YoY</span><span class="val" id="rdYoy">—</span></div>
+            <div class="area-card-row"><span class="lbl">Demand signal</span><span class="val" id="rdSignal">—</span></div>
+          </div>
+        </div>
+
+        <!-- MARKET ACTIVITY -->
+        <div class="area-card tone-market" data-card="market" id="cardMarket">
+          <div class="area-card-head">
+            <svg class="area-card-ico ico-market" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>
+            <span class="area-card-title">Market activity</span>
+            <span class="area-card-chev">›</span>
+          </div>
+          <div class="area-card-rows">
+            <div class="area-card-row"><span class="lbl">Price trend (YoY)</span><span class="val" id="mkYoy">—</span></div>
+            <div class="area-card-row"><span class="lbl">Avg sale price</span><span class="val" id="mkAvg">—</span></div>
+            <div class="area-card-row"><span class="lbl">Properties sold (3m)</span><span class="val" id="mkTx">—</span></div>
+            <div class="area-card-row"><span class="lbl">Property mix</span><span class="val" id="mkMix">—</span></div>
+          </div>
+        </div>
+
+        <!-- DEMOGRAPHICS (4A — only real available fields) -->
+        <div class="area-card tone-demographics" data-card="demographics" id="cardDemo">
+          <div class="area-card-head">
+            <svg class="area-card-ico ico-demo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 20c0-3 3-5 6-5s6 2 6 5"/><path d="M14.5 20c0-2 2-3.5 4.5-3.5s4 1.5 4 3.5"/></svg>
+            <span class="area-card-title">Demographics</span>
+            <span class="area-card-chev">›</span>
+          </div>
+          <div class="area-card-rows">
+            <div class="area-card-row"><span class="lbl">Broadband</span><span class="val" id="dmBroadband">—</span></div>
+            <div class="area-card-row"><span class="lbl">PRS share</span><span class="val" id="dmPRS">—</span></div>
+            <div class="area-card-row"><span class="lbl">Households</span><span class="val" id="dmHouseholds">—</span></div>
+            <div class="area-card-row"><span class="lbl">GP service</span><span class="val" id="dmGP">—</span></div>
+          </div>
+        </div>
+
+      </div><!-- /area-cards -->
+    </div><!-- /area-left -->
+
+    <!-- RIGHT MAP PANEL -->
+    <div class="area-right">
+      <div id="areaMap"></div>
+
+      <div class="map-config-error" id="mapConfigError">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <div class="map-config-error-title" id="mapConfigErrorTitle">Map unavailable</div>
+        <div class="map-config-error-detail" id="mapConfigErrorDetail">Mapbox token not configured.</div>
+      </div>
+
+      <div class="map-top">
+        <div class="map-top-left">
+          <button class="map-btn" id="allLayersBtn" type="button">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 22 8 12 14 2 8 12 2"/><polyline points="2 14 12 20 22 14"/></svg>
+            All layers
+          </button>
+          <button class="map-btn" id="filtersBtn" type="button">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            Filters<span class="badge" id="filtersBadge">0</span>
+          </button>
+        </div>
+        <div class="map-top-right" id="layerChips"><!-- populated --></div>
+      </div>
+
+      <div class="filters-pop" id="filtersPop">
+        <div class="filters-pop-title">Map layers</div>
+        <label class="filters-pop-row lyr-schools">
+          <span class="dot"></span> Schools
+          <input type="checkbox" data-layer="schools" checked>
+        </label>
+        <label class="filters-pop-row lyr-amenities">
+          <span class="dot"></span> Amenities
+          <span class="nd" id="filtNdAmen">no map data</span>
+          <input type="checkbox" data-layer="amenities" disabled>
+        </label>
+        <label class="filters-pop-row lyr-transport">
+          <span class="dot"></span> Transport
+          <span class="nd" id="filtNdTran">no map data</span>
+          <input type="checkbox" data-layer="transport" disabled>
+        </label>
+        <label class="filters-pop-row lyr-crime">
+          <span class="dot"></span> Crime
+          <input type="checkbox" data-layer="crime" checked>
+        </label>
+        <label class="filters-pop-row lyr-flood">
+          <span class="dot"></span> Flood
+          <span class="nd" id="filtNdFlood">zone only</span>
+          <input type="checkbox" data-layer="flood" disabled>
+        </label>
+      </div>
+
+      <div class="map-controls">
+        <button class="map-ctrl-btn" id="mapLocate" title="Centre on subject" type="button">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+        </button>
+        <button class="map-ctrl-btn" id="mapZoomIn"  title="Zoom in"  type="button">+</button>
+        <button class="map-ctrl-btn" id="mapZoomOut" title="Zoom out" type="button">−</button>
+      </div>
+    </div><!-- /area-right -->
+
+  </div><!-- /area-body -->
+
+  <!-- ─── Lower detail strip ─── -->
+  <div class="area-strip" id="areaStrip">
+    <div class="area-strip-head">
+      <div class="area-strip-title" id="stripTitle">Nearest schools</div>
+      <div class="area-strip-action" id="stripAction" style="display:none">View all</div>
+    </div>
+    <div class="area-strip-body">
+      <div class="strip-scroll" id="stripScroll">
+        <div class="strip-empty">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Bottom summary bar ─── -->
+  <div class="area-bottom">
+    <svg class="area-bottom-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15 8.5 22 9.5 17 14.5 18 22 12 18.5 6 22 7 14.5 2 9.5 9 8.5"/></svg>
+    <div class="area-bottom-text" id="bottomText">
+      <span class="skel" style="width:60%;height:13px;display:inline-block"></span>
+    </div>
+    <button class="area-bottom-btn" id="exploreBtn" type="button">
+      Explore full report
+      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+    </button>
+  </div>
+
+</div><!-- /area-shell -->
+
+<!-- Mapbox GL -->
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.9.0/mapbox-gl.js"></script>
+
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+
+/* ── Auth + deal_id resolution (pattern preserved) ── */
+const SUPABASE_URL  = 'https://qdgxmwdvmfrcicgpukhs.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkZ3htd2R2bWZyY2ljZ3B1a2hzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk1MTY3MzIsImV4cCI6MjA3NTA5MjczMn0.Xpw9u14JWCcTkhkxgt5YzeLfNMG5rGWo4R_C7zRwz-c';
+const API_BASE      = 'https://legal-smegal-api-final.onrender.com';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
+const { data: { session } } = await supabase.auth.getSession();
+if (!session) { window.location.href = 'legalsmegal-signin.html'; throw new Error('No session'); }
+const headers = { 'Authorization': `Bearer ${session.access_token}`, 'Content-Type': 'application/json' };
+window._headers = headers;
+window.signOut = async () => { await supabase.auth.signOut(); window.location.href = 'legalsmegal-signin.html'; };
+
+const params  = new URLSearchParams(window.location.search);
+const dealId  = params.get('deal_id') || null;
+if (!dealId) {
+  window.location.href = 'legalsmegal-discovery.html';
+  throw new Error('no deal_id');
+}
+window._dealId = dealId;
+
+/* ── Formatters ── */
+const fmtGBP = n => (n == null || isNaN(n)) ? '—' : '£' + Math.round(Number(n)).toLocaleString('en-GB');
+const fmtPct = n => (n == null || isNaN(n)) ? '—' : (Number(n) > 0 ? '+' : '') + Number(n).toFixed(1) + '%';
+const fmtInt = n => (n == null || isNaN(n)) ? '—' : Math.round(Number(n)).toLocaleString('en-GB');
+const fmtPlain = v => {
+  // Plain primitive formatter for raw area_json scalar fields (broadband, gp).
+  // No fabrication: anything non-primitive, null, or empty → '—'.
+  if (v == null) return '—';
+  if (typeof v === 'string') { const t = v.trim(); return t.length ? t : '—'; }
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '—';
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  return '—';
+};
+const pickField = (src, keys) => {
+  // Extract the first non-empty primitive field from an object-typed source
+  // (e.g. area_json.broadband / area_json.gp arrive as objects, not strings).
+  // Tries each key in priority order; falls back through to '—' with no
+  // fabrication. If src is itself a primitive, formats it directly.
+  if (src == null) return '—';
+  if (typeof src === 'string' || typeof src === 'number' || typeof src === 'boolean') {
+    return fmtPlain(src);
+  }
+  if (typeof src === 'object') {
+    for (let i = 0; i < keys.length; i++) {
+      const v = src[keys[i]];
+      if (v == null) continue;
+      if (typeof v === 'string') { const t = v.trim(); if (t.length) return t; continue; }
+      if (typeof v === 'number') { if (Number.isFinite(v)) return String(v); continue; }
+      if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+    }
+  }
+  return '—';
+};
+const safeNum = v => {
+  if (v == null) return null;
+  if (typeof v === 'number' && isFinite(v)) return v;
+  const s = String(v).replace(/[%£,\s]/g, '');
+  const n = parseFloat(s);
+  return isFinite(n) ? n : null;
+};
+
+function showLoading(msg) {
+  const el = document.getElementById('areaLoader');
+  if (!el) return;
+  el.textContent = msg; el.style.display = 'block';
+}
+function hideLoading() {
+  const el = document.getElementById('areaLoader');
+  if (el) el.style.display = 'none';
+}
+
+/* ═══ STATE ═══ */
+const state = {
+  deal: null,
+  summary: null,
+  area: null,
+  postcode: '',
+  postcodeSource: '',   // 'deal' | 'property' | 'summary' | 'address'
+  locality: '',
+  lat: null, lng: null,
+  activeTab: 'overview',
+  activeStrip: 'overview',
+  layers: { schools: true, amenities: true, transport: true, crime: true, flood: false },
+  layerHasData: { schools: false, amenities: false, transport: false, crime: false, flood: false },
+  schoolPoints: [],    // [{name, miles, ofsted, lat, lng}]
+  crimePoints: [],     // [{cat, lat, lng, street}]
+  amenityPoints: [],   // [{cat, name, lat, lng}]
+  transportPoints: [], // [{kind, name, lat, lng}]
+  filtersOpen: false,
+};
+window._areaState = state;
+
+/* ═══ POSTCODE RESOLUTION ═══ */
+function resolvePostcode(deal, summary) {
+  const prop = (summary && summary.property) || {};
+  if (deal && deal.postcode)     return { pc: normPC(deal.postcode),     src: 'deal' };
+  if (prop && prop.postcode)     return { pc: normPC(prop.postcode),     src: 'property' };
+  if (summary && summary.postcode) return { pc: normPC(summary.postcode), src: 'summary' };
+  const addr = (deal && deal.address) || (prop && prop.address) || '';
+  if (addr) {
+    const m = addr.match(/\b([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})\b/i);
+    if (m) return { pc: normPC(m[1]), src: 'address' };
+  }
+  return { pc: '', src: '' };
+}
+function normPC(s) {
+  if (!s) return '';
+  const t = String(s).toUpperCase().replace(/\s+/g, '');
+  if (t.length < 5) return t;
+  return t.slice(0, t.length - 3) + ' ' + t.slice(-3);
+}
+
+/* ═══ POSTCODES.IO LOOKUP (locality + lat/lng fallback) ═══ */
+async function postcodesLookup(pc) {
+  try {
+    const url = 'https://api.postcodes.io/postcodes/' + encodeURIComponent(pc);
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && j.result ? j.result : null;
+  } catch (e) { return null; }
+}
+async function postcodesBulk(pcs) {
+  try {
+    const r = await fetch('https://api.postcodes.io/postcodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ postcodes: pcs })
+    });
+    if (!r.ok) return {};
+    const j = await r.json();
+    const out = {};
+    (j.result || []).forEach(row => {
+      const q = row && row.query;
+      const res = row && row.result;
+      if (q && res) out[q.toUpperCase().replace(/\s+/g,' ').trim()] = res;
+    });
+    return out;
+  } catch (e) { return {}; }
+}
+
+/* ═══ RENDER: HEADER + CHIPS + SUMMARY ═══ */
+function renderHeader() {
+  document.getElementById('dealPostcodeInput').value = state.postcode || '';
+  document.getElementById('areaTitle').textContent  = state.postcode
+    ? ('Area intelligence for ' + state.postcode)
+    : 'Area intelligence — postcode unavailable';
+  document.getElementById('areaLocality').textContent = state.locality || '';
+  document.title = 'Area Intelligence' + (state.postcode ? ' — ' + state.postcode : '') + ' — LegalSmegal';
+}
+
+function renderSummaryAndChips() {
+  const a = state.area || {};
+  const inf = a.inference || {};
+  const sigs = inf.signals || {};
+  const bench = inf.benchmarks || {};
+
+  // ── Chips (derived from real signals only) ──
+  const chips = [];
+
+  // Transport status — derived from real OSM counts
+  const tm = (a.transport && a.transport.metrics) || {};
+  const tc = tm.counts || {};
+  const tStations = Number(tc.stations || 0);
+  const tBus      = Number(tc.bus_stops || 0);
+  const tTram     = Number(tc.tram_stops || 0);
+  const tHasData  = (tStations + tBus + tTram) > 0;
+  if (tHasData) {
+    let lbl, cls;
+    if (tStations >= 1 && tBus >= 15)      { lbl = 'Good transport';      cls = 'green'; }
+    else if (tStations >= 1 || tBus >= 10) { lbl = 'Average transport';   cls = 'blue';  }
+    else                                    { lbl = 'Limited transport';   cls = 'amber'; }
+    chips.push({ lbl, cls, dot: true });
+  }
+
+  // Crime status — vs national index from inference.benchmarks.crime
+  const ci = bench.crime && bench.crime.crime_index;
+  if (ci != null && isFinite(ci)) {
+    let lbl, cls;
+    if (ci < 0.85)      { lbl = 'Lower crime';   cls = 'blue'; }
+    else if (ci > 1.15) { lbl = 'Higher crime';  cls = 'red';  }
+    else                { lbl = 'Average crime'; cls = 'muted'; }
+    chips.push({ lbl, cls, dot: true });
+  }
+
+  // Demand chip — from inference.signals.demand
+  if (sigs.demand) {
+    const d = String(sigs.demand);
+    if (d === 'Increasing')      chips.push({ lbl: 'Rising demand',  cls: 'green', arrow: true });
+    else if (d === 'Weakening')  chips.push({ lbl: 'Falling demand', cls: 'red',   arrow: true });
+    else if (d === 'Stable')     chips.push({ lbl: 'Stable demand',  cls: 'muted', arrow: false });
+    // "Insufficient Data" → no chip (honest)
+  }
+
+  const chipsHost = document.getElementById('areaChips');
+  chipsHost.innerHTML = chips.map(c =>
+    '<span class="area-chip ' + (c.cls || 'muted') + '">' +
+      (c.dot   ? '<span class="area-chip-dot"></span>' : '') +
+      (c.arrow ? '<span class="area-chip-arrow">↗</span>' : '') +
+      escapeHtml(c.lbl) +
+    '</span>'
+  ).join('');
+
+  // ── Summary line — composed from real fields only ──
+  const parts = [];
+  // Locality phrasing
+  const loc = state.locality ? state.locality.split(',')[0].trim() : '';
+  if (loc) parts.push(`${escapeHtml(loc)} area data`);
+  else if (state.postcode) parts.push(`Area data for ${escapeHtml(state.postcode)}`);
+
+  // Schools count
+  const scCount = Array.isArray(a.schools && a.schools.value) ? a.schools.value.length : 0;
+  if (scCount > 0) parts.push(`${scCount} schools within 3mi`);
+
+  // Transport summary
+  if (tHasData) {
+    const tParts = [];
+    if (tStations) tParts.push(`${tStations} station${tStations === 1 ? '' : 's'}`);
+    if (tBus)      tParts.push(`${tBus} bus stops`);
+    if (tParts.length) parts.push(tParts.join(' · '));
+  }
+
+  // Price trend
+  const pyoy = bench.price && bench.price.local_yoy;
+  if (pyoy != null && isFinite(pyoy)) parts.push(`prices ${fmtPct(pyoy)} YoY`);
+
+  const summaryEl = document.getElementById('areaSummary');
+  if (parts.length >= 2) {
+    summaryEl.textContent = parts.join(' · ') + '.';
+  } else if (parts.length === 1) {
+    summaryEl.textContent = parts[0] + '.';
+  } else {
+    summaryEl.textContent = 'Area summary unavailable — insufficient data.';
+  }
+
+  // Bottom bar — same composition, slightly fuller
+  const bottomParts = [];
+  if (state.locality) bottomParts.push(`<strong>${escapeHtml(state.locality)}</strong>`);
+  const bottomChips = chips.map(c => c.lbl).filter(Boolean);
+  if (bottomChips.length) bottomParts.push(bottomChips.join(' · '));
+  if (pyoy != null && isFinite(pyoy)) bottomParts.push('market ' + fmtPct(pyoy) + ' YoY');
+  const bottomEl = document.getElementById('bottomText');
+  bottomEl.innerHTML = bottomParts.length
+    ? bottomParts.join(' — ')
+    : 'Area evidence summarised from live data sources.';
+}
+
+/* ═══ RENDER: CARDS ═══ */
+function renderCards() {
+  const a = state.area || {};
+  const inf = a.inference || {};
+  const bench = inf.benchmarks || {};
+
+  /* TRANSPORT */
+  const tm = (a.transport && a.transport.metrics) || {};
+  const tc = tm.counts || {};
+  const tSample = tm.sample || {};
+  const tStations = Number(tc.stations || 0);
+  const tBus      = Number(tc.bus_stops || 0);
+  const tTram     = Number(tc.tram_stops || 0);
+  const tHasData  = (tStations + tBus + tTram) > 0;
+  setText('trVal',  tHasData
+    ? (tStations >= 1 && tBus >= 15 ? 'Good' :
+       (tStations >= 1 || tBus >= 10 ? 'Average' : 'Limited'))
+    : '—',
+    tHasData
+      ? (tStations >= 1 && tBus >= 15 ? 'good' : (tStations >= 1 || tBus >= 10 ? '' : 'warn'))
+      : 'muted'
+  );
+  if (tStations >= 1 && Array.isArray(tSample.stations) && tSample.stations.length) {
+    document.getElementById('trStationLbl').textContent = 'Nearest station';
+    setText('trStation', String(tSample.stations[0]));
+  } else if (tTram >= 1 && Array.isArray(tSample.tram) && tSample.tram.length) {
+    document.getElementById('trStationLbl').textContent = 'Nearest tram stop';
+    setText('trStation', String(tSample.tram[0]));
+  } else {
+    document.getElementById('trStationLbl').textContent = 'Nearest station';
+    setText('trStation', '—', 'muted');
+  }
+  setText('trBus', tBus > 0 ? fmtInt(tBus) : '—', tBus > 0 ? '' : 'muted');
+
+  /* CRIME */
+  const cm = (a.crime && a.crime.metrics) || {};
+  const cTotal = Number(cm.total || 0);
+  const cCats  = cm.categories || {};
+  setText('crTotal', cTotal > 0 ? fmtInt(cTotal) : '—', cTotal > 0 ? '' : 'muted');
+  const ciVal = bench.crime && bench.crime.crime_index;
+  if (ciVal != null && isFinite(ciVal)) {
+    const pctDiff = (ciVal - 1) * 100;
+    const cls = pctDiff < -5 ? 'good' : (pctDiff > 5 ? 'bad' : '');
+    const txt = (pctDiff >= 0 ? '+' : '') + pctDiff.toFixed(0) + '%';
+    setText('crIndex', txt, cls);
+  } else {
+    setText('crIndex', '—', 'muted');
+  }
+  // Most common category
+  let topCat = '', topN = -1;
+  for (const k in cCats) if (cCats[k] > topN) { topN = cCats[k]; topCat = k; }
+  setText('crTop', topCat ? humanizeCategory(topCat) : '—', topCat ? '' : 'muted');
+
+  /* FLOOD */
+  const fm = (a.flood && a.flood.metrics) || {};
+  const fZone = (fm.zone != null) ? Number(fm.zone) : null;
+  const fAreas = (fm.flood_areas != null) ? Number(fm.flood_areas) : null;
+  if (fZone === 1)      { setText('flZone',  'Zone 1', 'good'); setText('flProb', '< 0.1%', 'good'); }
+  else if (fZone === 2) { setText('flZone',  'Zone 2', 'warn'); setText('flProb', '0.1–1%', 'warn'); }
+  else if (fZone === 3) { setText('flZone',  'Zone 3', 'bad');  setText('flProb', '> 1%',   'bad');  }
+  else                  { setText('flZone',  '—', 'muted');     setText('flProb', '—',     'muted'); }
+  setText('flAreas', fAreas != null ? fmtInt(fAreas) : '—', fAreas == null ? 'muted' : '');
+
+  /* AMENITIES */
+  const am = (a.amenities && a.amenities.metrics) || {};
+  const bks = am.buckets || {};
+  const aTotal = Number(am.total || 0);
+  setText('amTotal', aTotal > 0 ? fmtInt(aTotal) : '—', aTotal > 0 ? '' : 'muted');
+  setText('amShop', bks.shopping && bks.shopping.count > 0 ? fmtInt(bks.shopping.count) : '—',
+    bks.shopping && bks.shopping.count > 0 ? '' : 'muted');
+  setText('amFood', bks.foodDrink && bks.foodDrink.count > 0 ? fmtInt(bks.foodDrink.count) : '—',
+    bks.foodDrink && bks.foodDrink.count > 0 ? '' : 'muted');
+
+  /* SCHOOLS — real phase breakdown (primary/secondary/nursery/other). No fake ratings. */
+  const schools = Array.isArray(a.schools && a.schools.value) ? a.schools.value : [];
+  const phaseBuckets = { primary: 0, secondary: 0, nurseryOther: 0 };
+  let phaseTagged = 0;
+  schools.forEach(s => {
+    const ph = String((s && (s.phase || s.school_type)) || '').toLowerCase().trim();
+    if (!ph) return;
+    phaseTagged += 1;
+    // Map real phase strings into the four-category bucket the task specifies.
+    // DfE phase values include: 'primary', 'secondary', 'nursery', 'sixteen plus',
+    // 'all-through', 'middle deemed primary/secondary', 'not applicable', 'special'.
+    if (ph.includes('primary') && !ph.includes('middle')) phaseBuckets.primary += 1;
+    else if (ph.includes('middle deemed primary')) phaseBuckets.primary += 1;
+    else if (ph.includes('secondary') || ph.includes('sixteen') || ph.includes('16')) phaseBuckets.secondary += 1;
+    else if (ph.includes('middle deemed secondary')) phaseBuckets.secondary += 1;
+    else if (ph.includes('all-through') || ph.includes('all through')) {
+      // Counts in both primary and secondary
+      phaseBuckets.primary += 1;
+      phaseBuckets.secondary += 1;
+    }
+    else if (ph.includes('nursery') || ph.includes('early')) phaseBuckets.nurseryOther += 1;
+    else /* special, not-applicable, unknown, etc. */ phaseBuckets.nurseryOther += 1;
+  });
+  if (phaseTagged === 0) {
+    // No phase info on any row — honest unavailable state.
+    setText('scPrimary',   '—', 'muted');
+    setText('scSecondary', '—', 'muted');
+    setText('scOther',     '—', 'muted');
+  } else {
+    setText('scPrimary',   fmtInt(phaseBuckets.primary),     phaseBuckets.primary     > 0 ? '' : 'muted');
+    setText('scSecondary', fmtInt(phaseBuckets.secondary),   phaseBuckets.secondary   > 0 ? '' : 'muted');
+    setText('scOther',     fmtInt(phaseBuckets.nurseryOther),phaseBuckets.nurseryOther> 0 ? '' : 'muted');
+  }
+
+  /* RENTAL DEMAND */
+  const rental = bench.rental || {};
+  const regRent = rental.regional_rent_gbp;
+  const rYoy    = rental.local_yoy;
+  setText('rdRent', regRent != null ? (fmtGBP(regRent) + ' pcm') : '—', regRent != null ? '' : 'muted');
+  setText('rdYoy',  rYoy != null ? fmtPct(rYoy) : '—',
+    rYoy != null ? (rYoy > 0 ? 'good' : (rYoy < 0 ? 'bad' : '')) : 'muted');
+  const dSig = (inf.signals && inf.signals.demand) || '';
+  if (dSig === 'Insufficient Data' || !dSig) setText('rdSignal', '—', 'muted');
+  else if (dSig === 'Increasing')             setText('rdSignal', dSig, 'good');
+  else if (dSig === 'Weakening')              setText('rdSignal', dSig, 'bad');
+  else                                         setText('rdSignal', dSig);
+
+  /* MARKET ACTIVITY */
+  const price = bench.price || {};
+  const liq   = bench.liquidity || {};
+  setText('mkYoy', price.local_yoy != null ? fmtPct(price.local_yoy) : '—',
+    price.local_yoy != null ? (price.local_yoy > 0 ? 'good' : (price.local_yoy < 0 ? 'bad' : '')) : 'muted');
+  setText('mkAvg', price.local != null ? fmtGBP(price.local) : '—', price.local != null ? '' : 'muted');
+  setText('mkTx',  liq.quarterly_transactions != null ? fmtInt(liq.quarterly_transactions) : '—',
+    liq.quarterly_transactions != null ? '' : 'muted');
+  // Property mix from real comp data (housing.metrics.property_type_counts).
+  const ptCounts = (a.housing && a.housing.metrics && a.housing.metrics.property_type_counts) || null;
+  if (ptCounts && typeof ptCounts === 'object') {
+    const entries = Object.entries(ptCounts)
+      .map(([k, v]) => [k, Number(v) || 0])
+      .filter(([, v]) => v > 0)
+      .sort((x, y) => y[1] - x[1]);
+    if (entries.length) {
+      const total = entries.reduce((s, [, v]) => s + v, 0);
+      const top   = entries[0];
+      const pct   = total ? Math.round((top[1] / total) * 100) : 0;
+      setText('mkMix', `${abbrevPropertyType(top[0])} ${pct}%`);
+    } else {
+      setText('mkMix', '—', 'muted');
+    }
+  } else {
+    setText('mkMix', '—', 'muted');
+  }
+
+  /* DEMOGRAPHICS — Broadband · PRS share · Households · GP service.
+     Each value read directly from its real path in area_json.
+     No charts, no bars, no fabrication. PRS share carries a percent. */
+  const cen = (a.census || {});
+  const demo = cen.demographics || {};
+
+  // Broadband — Superfast availability % from broadband.value[0].sfbb_availability
+  const bbVal = (a.broadband && Array.isArray(a.broadband.value) && a.broadband.value.length)
+    ? a.broadband.value[0] : null;
+  const sfbb = bbVal ? bbVal.sfbb_availability : null;
+  const sfbbFinite = sfbb != null && Number.isFinite(Number(sfbb));
+  const broadbandTxt = sfbbFinite ? ('Superfast ' + Math.round(Number(sfbb)) + '%') : '—';
+
+  // PRS share — single percent suffixed with 'private rent'.
+  const prp = cen.private_rent_pct;
+  const prpFinite = prp != null && Number.isFinite(Number(prp));
+  const prsTxt = prpFinite ? (Math.round(Number(prp)) + '% private rent') : '—';
+
+  // Households — top label only (no %, no chart). Empty array → '—'.
+  const householdsTxt = fmtDemoTop(demo.household);
+
+  // GP service — nearest GP practice from NHS ODS-enriched area_json.gp.
+  // Only show the real practice name. Never fall through to summary/status
+  // which can contain long error or diagnostic text.
+  const _gpSrc = a.gp;
+  const gpTxt = (_gpSrc && typeof _gpSrc === 'object' && typeof _gpSrc.name === 'string' && _gpSrc.name.trim())
+    ? _gpSrc.name.trim()
+    : '—';
+
+  setText('dmBroadband',  broadbandTxt,  broadbandTxt  !== '—' ? '' : 'muted');
+  setText('dmPRS',        prsTxt,        prsTxt        !== '—' ? '' : 'muted');
+  setText('dmHouseholds', householdsTxt, householdsTxt !== '—' ? '' : 'muted');
+  setText('dmGP',         gpTxt,         gpTxt         !== '—' ? '' : 'muted');
+}
+
+function fmtDemoTop(arr) {
+  // Demographics CARD spec: heading + plain text label only.
+  // No percentage. No truncation. No charts/bars (those belong to the
+  // strip, never the card). Empty array → '—'. Missing label → '—'.
+  if (!Array.isArray(arr) || !arr.length) return '—';
+  const top = arr[0];
+  if (!top || !top.label) return '—';
+  return String(top.label);
+}
+
+function setText(id, txt, cls) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = txt;
+  el.classList.remove('good','bad','warn','muted');
+  if (cls) el.classList.add(cls);
+}
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function humanizeCategory(k) {
+  return String(k).replace(/-/g, ' ').replace(/\b\w/g, m => m.toUpperCase());
+}
+function abbrevPropertyType(t) {
+  const s = String(t || '').toLowerCase();
+  if (s.includes('detached') && !s.includes('semi')) return 'Detached';
+  if (s.includes('semi'))                            return 'Semi-detached';
+  if (s.includes('terrace'))                         return 'Terraced';
+  if (s.includes('flat') || s.includes('maison'))    return 'Flats';
+  if (s.includes('bungalow'))                        return 'Bungalow';
+  if (s) return humanizeCategory(s);
+  return '—';
+}
+
+/* ═══ LOWER STRIP (per-tab) ═══ */
+function renderStrip() {
+  // activeStrip is set by switchTab (mirrors active tab) or by card click for
+  // rental/market/demographics — those have no tab and drive the strip directly.
+  const which   = state.activeStrip || state.activeTab || 'overview';
+  const titleEl  = document.getElementById('stripTitle');
+  const actionEl = document.getElementById('stripAction');
+  const host     = document.getElementById('stripScroll');
+  host.innerHTML = '';
+  actionEl.style.display = 'none';
+  actionEl.onclick = null;
+
+  const a = state.area || {};
+
+  if (which === 'overview' || which === 'schools') {
+    titleEl.textContent = which === 'schools' ? 'Schools' : 'Schools nearby';
+    const schools = Array.isArray(a.schools && a.schools.value) ? a.schools.value.slice() : [];
+    if (!schools.length) { host.innerHTML = '<div class="strip-empty">Schools data unavailable.</div>'; return; }
+
+    // Real phase/type mix — counted from schools_ofsted.phase / school_type only.
+    // No invented zeroes: buckets with no real schools are omitted.
+    const mix = { primary: 0, secondary: 0, nurseryEarly: 0, otherUnknown: 0 };
+    let phaseTagged = 0;
+    schools.forEach(s => {
+      const ph = String((s && (s.phase || s.school_type)) || '').toLowerCase().trim();
+      if (!ph) return;
+      phaseTagged += 1;
+      if (ph.includes('all-through') || ph.includes('all through')) {
+        mix.primary += 1; mix.secondary += 1;
+      } else if (ph.includes('middle deemed primary')) {
+        mix.primary += 1;
+      } else if (ph.includes('middle deemed secondary')) {
+        mix.secondary += 1;
+      } else if (ph.includes('primary')) {
+        mix.primary += 1;
+      } else if (ph.includes('secondary') || ph.includes('sixteen') || ph.includes('16')) {
+        mix.secondary += 1;
+      } else if (ph.includes('nursery') || ph.includes('early')) {
+        mix.nurseryEarly += 1;
+      } else {
+        mix.otherUnknown += 1;
+      }
+    });
+
+    // Mix cards first — purple identity, only buckets with real counts.
+    if (phaseTagged > 0) {
+      if (mix.primary       > 0) host.appendChild(makePhaseMixCard('Primary',           mix.primary));
+      if (mix.secondary     > 0) host.appendChild(makePhaseMixCard('Secondary',         mix.secondary));
+      if (mix.nurseryEarly  > 0) host.appendChild(makePhaseMixCard('Nursery / early',   mix.nurseryEarly));
+      if (mix.otherUnknown  > 0) host.appendChild(makePhaseMixCard('Other / unknown',   mix.otherUnknown));
+    }
+
+    // Then the nearest-schools list (real coordinates → real miles).
+    schools.sort((x, y) => (Number(x.miles||999) - Number(y.miles||999)));
+    const show = schools.slice(0, which === 'schools' ? 10 : 6);
+    show.forEach(s => host.appendChild(makeSchoolCard(s)));
+    if (schools.length > show.length) {
+      actionEl.textContent = `View all (${schools.length})`;
+      actionEl.style.display = 'inline-block';
+      actionEl.onclick = () => switchTab('schools');
+    }
+    return;
+  }
+
+  if (which === 'crime') {
+    titleEl.textContent = 'Crime breakdown';
+    const cm = (a.crime && a.crime.metrics) || {};
+    const cats = cm.categories || {};
+    const entries = Object.keys(cats).map(k => ({ k, n: Number(cats[k] || 0) }))
+                          .sort((x, y) => y.n - x.n);
+    if (!entries.length) { host.innerHTML = '<div class="strip-empty">Crime breakdown unavailable.</div>'; return; }
+    entries.slice(0, 10).forEach(e => host.appendChild(makeCrimeCard(e)));
+    return;
+  }
+
+  if (which === 'transport') {
+    titleEl.textContent = 'Transport nearby';
+    const tm = (a.transport && a.transport.metrics) || {};
+    const tc = tm.counts || {};
+    const ts = tm.sample || {};
+    const cards = [];
+    (ts.stations || []).forEach(n => cards.push(makeTransportCard('rail', n, null)));
+    (ts.tram     || []).forEach(n => cards.push(makeTransportCard('tram', n, null)));
+    (ts.bus      || []).slice(0, 8).forEach(n => cards.push(makeTransportCard('bus',  n, null)));
+    if (!cards.length && (Number(tc.stations||0) + Number(tc.bus_stops||0) + Number(tc.tram_stops||0)) > 0) {
+      if (tc.stations) cards.push(makeTransportCard('rail', `${tc.stations} rail station(s)`, '~' + (tm.radiusMeters || 1200) + 'm radius'));
+      if (tc.tram_stops) cards.push(makeTransportCard('tram', `${tc.tram_stops} tram stop(s)`, '~' + (tm.radiusMeters || 1200) + 'm radius'));
+      if (tc.bus_stops)  cards.push(makeTransportCard('bus',  `${tc.bus_stops} bus stop(s)`,   '~' + (tm.radiusMeters || 1200) + 'm radius'));
+    }
+    if (!cards.length) { host.innerHTML = '<div class="strip-empty">Transport data unavailable.</div>'; return; }
+    cards.forEach(c => host.appendChild(c));
+    return;
+  }
+
+  if (which === 'amenities') {
+    titleEl.textContent = 'Amenities nearby';
+    const am = (a.amenities && a.amenities.metrics) || {};
+    const bks = am.buckets || {};
+    const order = [
+      ['foodDrink',  'Food & drink'],
+      ['shopping',   'Shopping'],
+      ['healthcare', 'Healthcare'],
+      ['education',  'Education'],
+      ['leisure',    'Leisure'],
+      ['services',   'Services'],
+    ];
+    const cards = [];
+    order.forEach(([key, label]) => {
+      const b = bks[key] || {};
+      if (b.count > 0) cards.push(makeAmenityCard(label, b.count, b.top || []));
+    });
+    if (!cards.length) { host.innerHTML = '<div class="strip-empty">Amenities data unavailable.</div>'; return; }
+    cards.forEach(c => host.appendChild(c));
+    return;
+  }
+
+  if (which === 'environment') {
+    titleEl.textContent = 'Environment evidence';
+    const cards = [];
+    const fm = (a.flood && a.flood.metrics) || {};
+    if (fm.zone != null) cards.push(makeEnvFloodCard(fm));
+    const epc = a.epc || {};
+    if (epc && epc.metrics) cards.push(makeEnvEpcCard(epc.metrics));
+    const plan = a.planning || {};
+    if (plan && plan.metrics) cards.push(makeEnvPlanningCard(plan.metrics));
+    if (!cards.length) { host.innerHTML = '<div class="strip-empty">Environment data unavailable.</div>'; return; }
+    cards.forEach(c => host.appendChild(c));
+    return;
+  }
+
+  /* ── Card-only strips: real-evidence-only, no schools fallback. ── */
+  const inf = a.inference || {};
+  const bench = inf.benchmarks || {};
+
+  if (which === 'rental') {
+    titleEl.textContent = 'Rental evidence';
+    const r = bench.rental || {};
+    const sigs = inf.signals || {};
+    const rd = sigs.rentalDemand || {};
+    const cards = [];
+    if (r.regional_rent_gbp != null) cards.push(makeKvCard({
+      kind: 'rental', label: 'Regional rent', value: fmtGBP(r.regional_rent_gbp) + ' pcm',
+      sub: 'ONS Private Rental Index',
+    }));
+    if (r.local_yoy != null && isFinite(r.local_yoy)) cards.push(makeKvCard({
+      kind: 'rental', label: 'Rent YoY', value: fmtPct(r.local_yoy),
+      valueCls: r.local_yoy > 0 ? 'good' : (r.local_yoy < 0 ? 'bad' : ''),
+      sub: 'Year-on-year change',
+    }));
+    if (sigs.demand) cards.push(makeKvCard({
+      kind: 'rental', label: 'Demand signal', value: String(sigs.demand),
+      valueCls: sigs.demand === 'Increasing' ? 'good' : (sigs.demand === 'Weakening' ? 'bad' : ''),
+      sub: 'Composite demand index',
+    }));
+    if (rd.trend) cards.push(makeKvCard({
+      kind: 'rental', label: 'Rental trend', value: String(rd.trend),
+      sub: rd.percentage ? `${rd.percentage}` : '',
+    }));
+    if (!cards.length) { host.innerHTML = '<div class="strip-empty">Rental evidence unavailable.</div>'; return; }
+    cards.forEach(c => host.appendChild(c));
+    return;
+  }
+
+  if (which === 'market') {
+    titleEl.textContent = 'Market activity';
+    const p = bench.price || {};
+    const liq = bench.liquidity || {};
+    const housing = a.housing || {};
+    const hm = housing.metrics || {};
+    const ptc = hm.property_type_counts || null;
+    const cards = [];
+
+    if (p.local != null)     cards.push(makeKvCard({
+      kind: 'market', label: 'Avg sale price', value: fmtGBP(p.local),
+      sub: 'Comparable sales mean',
+    }));
+    if (p.local_yoy != null && isFinite(p.local_yoy)) cards.push(makeKvCard({
+      kind: 'market', label: 'Price YoY', value: fmtPct(p.local_yoy),
+      valueCls: p.local_yoy > 0 ? 'good' : (p.local_yoy < 0 ? 'bad' : ''),
+      sub: 'UK HPI / Land Registry',
+    }));
+    if (liq.quarterly_transactions != null) cards.push(makeKvCard({
+      kind: 'market', label: 'Sold (3m)', value: fmtInt(liq.quarterly_transactions),
+      sub: liq.annual_transactions != null ? `${fmtInt(liq.annual_transactions)} in 12m` : 'Quarterly transactions',
+    }));
+    // Property-type breakdown (real, from comps)
+    if (ptc && typeof ptc === 'object') {
+      const entries = Object.entries(ptc).map(([k,v]) => [k, Number(v)||0])
+        .filter(([,v]) => v > 0).sort((x,y) => y[1] - x[1]);
+      const total = entries.reduce((s,[,v]) => s+v, 0);
+      if (entries.length && total > 0) {
+        const lines = entries.slice(0, 4).map(([k,v]) => {
+          const pct = Math.round((v/total)*100);
+          return `${abbrevPropertyType(k)} ${pct}%`;
+        });
+        cards.push(makeKvCard({
+          kind: 'market', label: 'Property mix', value: lines[0],
+          sub: lines.slice(1).join(' · ') || `${total} comps`,
+        }));
+      }
+    }
+    // Recent comps (real, from soldComps)
+    const comps = Array.isArray(housing.soldComps) ? housing.soldComps.slice() : [];
+    if (comps.length) {
+      comps.sort((x,y) => {
+        const dx = new Date(x.date_sold || x.transaction_date || x.date || 0).getTime();
+        const dy = new Date(y.date_sold || y.transaction_date || y.date || 0).getTime();
+        return dy - dx;
+      });
+      comps.slice(0, 3).forEach(c => host.appendChild(makeCompCard(c)));
+    }
+    if (!cards.length && !comps.length) {
+      host.innerHTML = '<div class="strip-empty">Market activity unavailable.</div>'; return;
+    }
+    cards.forEach(c => host.appendChild(c));
+    return;
+  }
+
+  if (which === 'demographics') {
+    titleEl.textContent = 'Census 2021 — local people';
+    const demo = (a.census && a.census.demographics) || {};
+    const blocks = [
+      { key: 'ethnic',    title: 'Ethnic group',          source: 'Census 2021 · TS021' },
+      { key: 'religion',  title: 'Religion',              source: 'Census 2021 · TS030' },
+      { key: 'age',       title: 'Age profile',           source: 'Census 2021 · TS007A' },
+      { key: 'household', title: 'Household composition', source: 'Census 2021 · TS003' },
+    ];
+    let any = false;
+    blocks.forEach(b => {
+      let items = Array.isArray(demo[b.key]) ? demo[b.key] : [];
+      if (!items.length) return;
+      // Household composition (TS003) includes both parent group labels and
+      // sub-category children (e.g. "One person household" and
+      // "One person household: Aged 66 years and over"), producing near-duplicate
+      // entries. Deduplicate: remove any item whose label starts with another
+      // item's label (child is sub-category of parent). Keep top 4 by value.
+      if (b.key === 'household') {
+        const byShortest = items.slice().sort((x, y) => x.label.length - y.label.length);
+        const kept = [];
+        byShortest.forEach(function(item) {
+          const lbl = item.label.trim();
+          const isChild = kept.some(function(k) { return lbl !== k.label && lbl.startsWith(k.label); });
+          if (!isChild) kept.push(item);
+        });
+        items = kept.sort(function(x, y) { return y.value - x.value; }).slice(0, 4);
+      }
+      any = true;
+      host.appendChild(makeDemographicsCard(b.title, items, b.source));
+    });
+    if (!any) {
+      host.innerHTML = '<div class="strip-empty">Census 2021 people profile not yet returned for this LSOA — backend Nomis fetch pending or unavailable for the geography.</div>';
+      return;
+    }
+    // Deprivation as supporting context — only after the people profile, only if real.
+    const dep = bench.deprivation || {};
+    if (dep.imd_decile != null) {
+      const d = Number(dep.imd_decile);
+      host.appendChild(makeKvCard({
+        kind: 'demographics', label: 'Deprivation decile', value: d + ' / 10',
+        valueCls: d <= 3 ? 'bad' : (d >= 8 ? 'good' : ''),
+        sub: '1 = most deprived · 10 = least (IMD)',
+      }));
+    }
+    return;
+  }
+}
+
+function ofstedClass(rating) {
+  const r = String(rating || '').toLowerCase();
+  if (r === 'outstanding') return 'outstanding';
+  if (r === 'good') return 'good';
+  if (r === 'requires improvement') return 'requires';
+  if (r === 'inadequate') return 'inadequate';
+  return 'muted';
+}
+function ofstedLabel(rating) {
+  const r = String(rating || '').toLowerCase();
+  if (r === 'outstanding') return 'Outstanding';
+  if (r === 'good') return 'Good';
+  if (r === 'requires improvement') return 'Requires imp.';
+  if (r === 'inadequate') return 'Inadequate';
+  return rating ? String(rating) : '—';
+}
+
+function makeSchoolCard(s) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const name  = (s && s.school_name) ? String(s.school_name) : 'School';
+  const miles = (s && s.miles != null && isFinite(Number(s.miles))) ? (Number(s.miles).toFixed(1) + ' mi') : '';
+  const ofst  = s && s.ofsted_rating ? s.ofsted_rating : '';
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--purple')}" stroke-width="2"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1 2 3 6 3s6-2 6-3v-5"/></svg>
+      </div>
+      <div class="strip-card-title">${escapeHtml(name)}</div>
+    </div>
+    <div class="strip-card-meta-row">
+      ${miles ? `<span class="strip-card-mile">${escapeHtml(miles)}</span>` : ''}
+      ${ofst  ? `<span class="strip-card-badge ${ofstedClass(ofst)}">${escapeHtml(ofstedLabel(ofst))}</span>` : ''}
+    </div>
+    ${ofst ? `<div class="strip-card-foot">Ofsted: ${escapeHtml(ofstedLabel(ofst))}</div>` : ''}
+  `;
+  return div;
+}
+
+/* Schools phase/type mix card — used in the schools strip BEFORE the school
+   list. Purple identity matching the schools layer. Real count only. */
+function makePhaseMixCard(label, count) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const c = cssVar('--purple');
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico" style="border-color:rgba(155,109,255,0.32); background:rgba(155,109,255,0.06);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1 2 3 6 3s6-2 6-3v-5"/></svg>
+      </div>
+      <div class="strip-card-title">${escapeHtml(label)}</div>
+    </div>
+    <div class="strip-card-meta-row">
+      <span class="strip-card-mile" style="color:${cssVar('--text-pri')};font-weight:600;font-size:13px;">${fmtInt(count)}</span>
+      <span class="strip-card-badge" style="color:${c};background:rgba(155,109,255,0.14);border:1px solid rgba(155,109,255,0.28);">in 3 mi</span>
+    </div>
+    <div class="strip-card-foot">Phase mix · DfE Get Information about Schools</div>
+  `;
+  return div;
+}
+
+function makeCrimeCard(e) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--red')}" stroke-width="2"><path d="M12 2L4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6l-8-4z"/></svg>
+      </div>
+      <div class="strip-card-title">${escapeHtml(humanizeCategory(e.k))}</div>
+    </div>
+    <div class="strip-card-meta-row">
+      <span class="strip-card-mile">${fmtInt(e.n)} recorded</span>
+    </div>
+    <div class="strip-card-foot">Source: Police.uk</div>
+  `;
+  return div;
+}
+
+function makeTransportCard(kind, name, sub) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const ico = (kind === 'rail')
+    ? `<svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--blue')}" stroke-width="2"><rect x="4" y="3" width="16" height="14" rx="2"/><circle cx="8" cy="17" r="1.5"/><circle cx="16" cy="17" r="1.5"/><path d="M4 11h16"/></svg>`
+    : (kind === 'tram')
+    ? `<svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--blue')}" stroke-width="2"><rect x="5" y="3" width="14" height="14" rx="2"/><line x1="5" y1="13" x2="19" y2="13"/><line x1="9" y1="20" x2="6" y2="22"/><line x1="15" y1="20" x2="18" y2="22"/></svg>`
+    : `<svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--blue')}" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><circle cx="8" cy="17" r="1.5"/><circle cx="16" cy="17" r="1.5"/></svg>`;
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">${ico}</div>
+      <div class="strip-card-title">${escapeHtml(name)}</div>
+    </div>
+    <div class="strip-card-meta-row">
+      <span class="strip-card-mile">${escapeHtml(kind === 'rail' ? 'Rail' : kind === 'tram' ? 'Tram' : 'Bus')}</span>
+    </div>
+    ${sub ? `<div class="strip-card-foot">${escapeHtml(sub)}</div>` : '<div class="strip-card-foot">Source: OpenStreetMap</div>'}
+  `;
+  return div;
+}
+
+function makeAmenityCard(label, count, top) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const sample = (top && top.length) ? top.slice(0, 3).join(', ') : '';
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--green')}" stroke-width="2"><path d="M3 9l9-6 9 6v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+      </div>
+      <div class="strip-card-title">${escapeHtml(label)}</div>
+    </div>
+    <div class="strip-card-meta-row">
+      <span class="strip-card-mile">${fmtInt(count)} nearby</span>
+    </div>
+    ${sample ? `<div class="strip-card-foot">${escapeHtml(sample)}</div>` : '<div class="strip-card-foot">Source: OpenStreetMap</div>'}
+  `;
+  return div;
+}
+
+function makeEnvFloodCard(fm) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const z = Number(fm.zone || 1);
+  const lbl = z === 3 ? 'High flood risk' : z === 2 ? 'Medium flood risk' : 'Low flood risk';
+  const badge = z === 3 ? 'inadequate' : z === 2 ? 'requires' : 'good';
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--cyan')}" stroke-width="2"><path d="M12 2c2 4 4 6 4 9a4 4 0 1 1-8 0c0-3 2-5 4-9z"/></svg>
+      </div>
+      <div class="strip-card-title">${escapeHtml(lbl)}</div>
+    </div>
+    <div class="strip-card-meta-row">
+      <span class="strip-card-mile">Zone ${z}</span>
+      <span class="strip-card-badge ${badge}">${escapeHtml(z === 3 ? 'High' : z === 2 ? 'Medium' : 'Low')}</span>
+    </div>
+    <div class="strip-card-foot">Environment Agency Flood Map</div>
+  `;
+  return div;
+}
+function makeEnvEpcCard(m) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const dom = m && m.dominant_rating ? String(m.dominant_rating).toUpperCase() : '';
+  const score = m && m.efficiency_score != null ? Number(m.efficiency_score).toFixed(1) : null;
+  if (!dom && !score) {
+    div.innerHTML = `<div class="strip-card-head"><div class="strip-card-ico">
+      <svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--green')}" stroke-width="2"><path d="M3 21h18"/><path d="M5 21V11l7-6 7 6v10"/></svg>
+    </div><div class="strip-card-title">EPC distribution</div></div>
+    <div class="strip-card-foot">No EPC data available.</div>`;
+    return div;
+  }
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--green')}" stroke-width="2"><path d="M3 21h18"/><path d="M5 21V11l7-6 7 6v10"/></svg>
+      </div>
+      <div class="strip-card-title">EPC distribution</div>
+    </div>
+    <div class="strip-card-meta-row">
+      ${dom ? `<span class="strip-card-mile">Dominant: ${escapeHtml(dom)}</span>` : ''}
+      ${score != null ? `<span class="strip-card-badge muted">Score ${escapeHtml(score)}</span>` : ''}
+    </div>
+    <div class="strip-card-foot">MHCLG EPC register</div>
+  `;
+  return div;
+}
+function makeEnvPlanningCard(m) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const recent = m && m.recent_24m != null ? Number(m.recent_24m) : null;
+  const total  = m && m.total != null ? Number(m.total) : null;
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--amber')}" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      </div>
+      <div class="strip-card-title">Planning activity</div>
+    </div>
+    <div class="strip-card-meta-row">
+      ${recent != null ? `<span class="strip-card-mile">${fmtInt(recent)} in last 24m</span>` : ''}
+      ${total != null ? `<span class="strip-card-badge muted">${fmtInt(total)} total</span>` : ''}
+    </div>
+    <div class="strip-card-foot">PlanningAlerts / local data</div>
+  `;
+  return div;
+}
+
+/* Generic key-value strip card for the card-only strips
+   (rental / market / demographics). All values must be real. */
+function makeKvCard(opts) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const kind = opts.kind || 'rental';
+  // pick a paint colour from the existing token palette per kind
+  const stroke = kind === 'market'       ? cssVar('--green')
+              :  kind === 'demographics' ? cssVar('--text-sec')
+              :  /* rental */              cssVar('--amber');
+  const ico = kind === 'market'
+    ? `<svg viewBox="0 0 24 24" fill="none" stroke="${stroke}" stroke-width="2"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>`
+    : kind === 'demographics'
+    ? `<svg viewBox="0 0 24 24" fill="none" stroke="${stroke}" stroke-width="2"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 20c0-3 3-5 6-5s6 2 6 5"/><path d="M14.5 20c0-2 2-3.5 4.5-3.5s4 1.5 4 3.5"/></svg>`
+    : `<svg viewBox="0 0 24 24" fill="none" stroke="${stroke}" stroke-width="2"><path d="M3 12l9-9 9 9"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>`;
+  const valueColour = opts.valueCls === 'good' ? cssVar('--green')
+                    : opts.valueCls === 'bad'  ? cssVar('--red')
+                    : opts.valueCls === 'warn' ? cssVar('--amber')
+                    : cssVar('--text-pri');
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">${ico}</div>
+      <div class="strip-card-title">${escapeHtml(opts.label || '')}</div>
+    </div>
+    <div class="strip-card-meta-row">
+      <span class="strip-card-mile" style="color:${valueColour};font-size:13px;font-weight:600;">${escapeHtml(opts.value || '—')}</span>
+    </div>
+    ${opts.sub ? `<div class="strip-card-foot">${escapeHtml(opts.sub)}</div>` : ''}
+  `;
+  return div;
+}
+
+/* Real sold-comp card. Uses only fields that exist on the comp row. */
+function makeCompCard(c) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  const addr = c.address || c.full_address || c.paon || c.street || 'Recent sale';
+  const price = c.price_paid != null ? c.price_paid
+              : c.price       != null ? c.price
+              : c.sale_price  != null ? c.sale_price
+              : null;
+  const rawDate = c.date_sold || c.transaction_date || c.date || '';
+  let dateLabel = '';
+  if (rawDate) {
+    const d = new Date(rawDate);
+    if (!isNaN(d.getTime())) {
+      dateLabel = d.toLocaleDateString('en-GB', { year: 'numeric', month: 'short' });
+    }
+  }
+  const ptype = c.property_type || c.propertyType || c.type || '';
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${cssVar('--green')}" stroke-width="2"><path d="M3 9l9-6 9 6v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+      </div>
+      <div class="strip-card-title">${escapeHtml(addr)}</div>
+    </div>
+    <div class="strip-card-meta-row">
+      ${price != null ? `<span class="strip-card-mile" style="color:${cssVar('--text-pri')};font-weight:600;">${escapeHtml(fmtGBP(price))}</span>` : ''}
+      ${ptype ? `<span class="strip-card-badge muted">${escapeHtml(abbrevPropertyType(ptype))}</span>` : ''}
+    </div>
+    ${dateLabel ? `<div class="strip-card-foot">Sold ${escapeHtml(dateLabel)}</div>` : '<div class="strip-card-foot">HM Land Registry</div>'}
+  `;
+  return div;
+}
+
+/* Census 2021 people-profile card — used by the demographics strip.
+   Renders the title + top 4 categories with real % bars.
+   No fabrication: receives a pre-normalised items array from the backend. */
+function makeDemographicsCard(title, items, sourceLabel) {
+  const div = document.createElement('div');
+  div.className = 'strip-card';
+  div.style.flexBasis = '260px';
+  const teal = cssVar('--teal');
+  const show = (items || []).slice(0, 4);
+  const rows = show.map(it => {
+    const lbl = String(it.label || '').length > 22 ? (String(it.label).slice(0, 21) + '…') : String(it.label || '');
+    const pct = Number(it.pct || 0);
+    const w = Math.max(2, Math.min(100, pct));
+    return `
+      <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+        <div style="flex:1;min-width:0;font-family:var(--font-sans);font-size:11px;color:var(--text-sec);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(lbl)}</div>
+        <div style="width:54px;height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden;flex-shrink:0;">
+          <div style="width:${w}%;height:100%;background:${teal};opacity:0.85;"></div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--text-pri);font-weight:600;flex-shrink:0;width:30px;text-align:right;">${pct.toFixed(0)}%</div>
+      </div>`;
+  }).join('');
+  div.innerHTML = `
+    <div class="strip-card-head">
+      <div class="strip-card-ico" style="border-color:rgba(45,212,184,0.32);background:rgba(45,212,184,0.06);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${teal}" stroke-width="2"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 20c0-3 3-5 6-5s6 2 6 5"/><path d="M14.5 20c0-2 2-3.5 4.5-3.5s4 1.5 4 3.5"/></svg>
+      </div>
+      <div class="strip-card-title">${escapeHtml(title)}</div>
+    </div>
+    <div>${rows}</div>
+    <div class="strip-card-foot">${escapeHtml(sourceLabel || 'Census 2021 (ONS / Nomis)')}</div>
+  `;
+  return div;
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/* ═══ TABS ═══ */
+function switchTab(tab) {
+  state.activeTab = tab;
+  state.activeStrip = tab;
+  document.querySelectorAll('.area-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tab);
+  });
+  // Emphasise the corresponding card
+  document.querySelectorAll('.area-card').forEach(c => c.classList.remove('active'));
+  const map = {
+    transport:   'cardTransport',
+    crime:       'cardCrime',
+    amenities:   'cardAmenities',
+    schools:     'cardSchools',
+    environment: 'cardFlood',
+  };
+  if (map[tab]) {
+    const el = document.getElementById(map[tab]);
+    if (el) el.classList.add('active');
+  }
+  // Layer emphasis on map
+  applyTabToLayers(tab);
+  renderStrip();
+}
+
+// Card-driven strip without changing the tab — used by rental/market/demographics
+// cards that have no dedicated top tab. Each card opens its own correct lower strip.
+function setActiveStripFromCard(stripKey, cardEl) {
+  state.activeStrip = stripKey;
+  document.querySelectorAll('.area-card').forEach(c => c.classList.remove('active'));
+  if (cardEl) cardEl.classList.add('active');
+  renderStrip();
+}
+function applyTabToLayers(tab) {
+  // Only enable a layer if it actually has data; overview/environment show all real layers.
+  const H = state.layerHasData;
+  if (tab === 'crime')          setLayers({ schools: false, crime: H.crime, amenities: false, transport: false, flood: false });
+  else if (tab === 'schools')   setLayers({ schools: H.schools, crime: false, amenities: false, transport: false, flood: false });
+  else if (tab === 'amenities') setLayers({ schools: false, crime: false, amenities: H.amenities, transport: false, flood: false });
+  else if (tab === 'transport') setLayers({ schools: false, crime: false, amenities: false, transport: H.transport, flood: false });
+  else /* overview, environment */ setLayers({ schools: H.schools, crime: H.crime, amenities: H.amenities, transport: H.transport, flood: false });
+}
+function setLayers(layers) {
+  Object.assign(state.layers, layers);
+  syncLayerUI();
+  applyLayerVisibility();
+}
+function syncLayerUI() {
+  document.querySelectorAll('.map-layer-chip').forEach(chip => {
+    const layer = chip.dataset.layer;
+    const hasData = !!state.layerHasData[layer];
+    const on = hasData && !!state.layers[layer];
+    chip.classList.toggle('dim', !on);
+    chip.classList.toggle('no-data', !hasData);
+  });
+  document.querySelectorAll('.filters-pop-row input[type="checkbox"]').forEach(cb => {
+    const layer = cb.dataset.layer;
+    const hasData = !!state.layerHasData[layer];
+    cb.disabled = !hasData;
+    cb.checked = hasData && !!state.layers[layer];
+    const row = cb.closest('.filters-pop-row');
+    const nd = row ? row.querySelector('.nd') : null;
+    if (nd) nd.style.display = hasData ? 'none' : '';
+  });
+  // Badge = number of real layers currently visible.
+  const activeCount = Object.keys(state.layers)
+    .filter(k => state.layers[k] && state.layerHasData[k]).length;
+  const badge = document.getElementById('filtersBadge');
+  if (badge) badge.textContent = String(activeCount);
+}
+
+/* ═══ MAP (Mapbox GL — Plan A production path) ═══ */
+const map = { instance: null, subject: null, schoolMarkers: [], loaded: false };
+
+function showMapConfigError(title, detail) {
+  const el = document.getElementById('mapConfigError');
+  if (!el) return;
+  const t = document.getElementById('mapConfigErrorTitle');
+  const d = document.getElementById('mapConfigErrorDetail');
+  if (t) t.textContent = title;
+  if (d) d.textContent = detail;
+  el.classList.add('show');
+}
+function hideMapConfigError() {
+  const el = document.getElementById('mapConfigError');
+  if (el) el.classList.remove('show');
+}
+
+async function fetchMapboxToken() {
+  try {
+    const r = await fetch(`${API_BASE}/api/client-config`, { headers });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j && j.mapbox_token) ? j.mapbox_token : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function initMapbox() {
+  if (map.instance) return;
+
+  // Plan A: token MUST come from env-backed runtime config. No silent fallback.
+  const token = await fetchMapboxToken();
+  if (!token) {
+    showMapConfigError('Map unavailable',
+      'Mapbox token not configured. Set MAPBOX_PUBLIC_TOKEN on the API service environment, then reload.');
+    return;
+  }
+  if (typeof mapboxgl === 'undefined') {
+    showMapConfigError('Map unavailable', 'Mapbox GL JS failed to load.');
+    return;
+  }
+  if (state.lat == null || state.lng == null) {
+    showMapConfigError('Location unavailable',
+      'No coordinates resolved for this deal postcode — cannot centre the map.');
+    return;
+  }
+
+  hideMapConfigError();
+  mapboxgl.accessToken = token;
+  map.instance = new mapboxgl.Map({
+    container: 'areaMap',
+    style: 'mapbox://styles/mapbox/standard',
+    center: [state.lng, state.lat],
+    zoom: 13.2,
+    pitch: 0,
+    bearing: 0,
+    attributionControl: true,
+    cooperativeGestures: false,
+  });
+
+  // Premium dark "night" light preset once the Standard style config is available.
+  map.instance.on('style.load', () => {
+    try {
+      map.instance.setConfigProperty('basemap', 'lightPreset', 'night');
+      map.instance.setConfigProperty('basemap', 'showPointOfInterestLabels', true);
+      map.instance.setConfigProperty('basemap', 'showPlaceLabels', true);
+      map.instance.setConfigProperty('basemap', 'showRoadLabels', true);
+      map.instance.setConfigProperty('basemap', 'showTransitLabels', true);
+    } catch (e) { /* config API absent — Standard style still renders dark */ }
+  });
+
+  // Hard-fail on token rejection — do NOT silently fall back.
+  map.instance.on('error', (e) => {
+    const msg = (e && e.error && e.error.message) ? e.error.message : '';
+    if (/access token|401|unauthor|forbidden|not authorized/i.test(msg)) {
+      showMapConfigError('Map unavailable', 'Mapbox rejected the token: ' + msg);
+    }
+  });
+
+  map.instance.on('load', onMapLoad);
+}
+
+function onMapLoad() {
+  map.loaded = true;
+
+  // Subject pin (label + leader + glow dot), anchored at the coordinate
+  const wrap = document.createElement('div');
+  wrap.className = 'subject-pin-wrap';
+  wrap.innerHTML =
+    `<div class="subject-pin">${escapeHtml(state.postcode || 'Subject')}</div>` +
+    `<div class="subject-pin-dot"></div>`;
+  map.subject = new mapboxgl.Marker({ element: wrap, anchor: 'bottom' })
+    .setLngLat([state.lng, state.lat])
+    .addTo(map.instance);
+
+  plotSchools(state.schoolPoints);
+  setupCrimeLayers(state.crimePoints);
+  setupAmenityLayers(state.amenityPoints);
+  setupTransportLayers(state.transportPoints);
+  applyLayerVisibility();
+  frameToData();
+}
+
+/* Frame the view on the subject + real markers so the map never feels empty.
+   Uses only real coordinates; caps zoom so dense urban areas stay readable
+   and spread-out rural markers still fit. */
+function frameToData() {
+  if (!map.instance || state.lat == null || state.lng == null) return;
+  try {
+    const pts = [[state.lng, state.lat]];
+    const add = (arr) => (arr || []).forEach(p => { if (p.lat != null && p.lng != null) pts.push([p.lng, p.lat]); });
+    if (state.layers.schools   && state.layerHasData.schools)   add(state.schoolPoints);
+    if (state.layers.crime     && state.layerHasData.crime)     add(state.crimePoints);
+    if (state.layers.amenities && state.layerHasData.amenities) add(state.amenityPoints);
+    if (state.layers.transport && state.layerHasData.transport) add(state.transportPoints);
+
+    if (pts.length <= 1) {
+      map.instance.easeTo({ center: [state.lng, state.lat], zoom: 13.2, duration: 600 });
+      return;
+    }
+    const b = pts.reduce((acc, c) => acc.extend(c), new mapboxgl.LngLatBounds(pts[0], pts[0]));
+    map.instance.fitBounds(b, { padding: { top: 70, bottom: 70, left: 60, right: 60 }, maxZoom: 14, duration: 600 });
+  } catch (e) { /* framing best-effort */ }
+}
+
+/* Schools — HTML markers (few; richer styling). Real coordinates only. */
+function plotSchools(points) {
+  (map.schoolMarkers || []).forEach(m => m.remove());
+  map.schoolMarkers = [];
+  if (!map.instance || !Array.isArray(points)) return;
+  points.forEach(p => {
+    if (p.lat == null || p.lng == null) return;
+    const el = document.createElement('div');
+    el.className = 'poi-marker schools';
+    const ofstCls  = ofstedClass(p.ofsted);
+    const ofstLbl  = ofstedLabel(p.ofsted);
+    const badgeCls = ofstCls === 'requires' ? 'warn' : (ofstCls === 'inadequate' ? 'bad' : (ofstCls === 'muted' ? 'mute' : 'good'));
+    const mi = (p.miles != null) ? `${Number(p.miles).toFixed(1)} mi` : '';
+    const popup = new mapboxgl.Popup({ offset: 12, closeButton: true })
+      .setHTML(
+        `<div class="pop-title">${escapeHtml(p.name || 'School')}</div>` +
+        `<div class="pop-meta">${escapeHtml(mi)}${p.ofsted ? ` <span class="pop-badge ${badgeCls}">${escapeHtml(ofstLbl)}</span>` : ''}</div>`
+      );
+    const m = new mapboxgl.Marker({ element: el, anchor: 'center' })
+      .setLngLat([p.lng, p.lat])
+      .setPopup(popup)
+      .addTo(map.instance);
+    map.schoolMarkers.push(m);
+  });
+}
+
+/* Crime — Mapbox native clustering on a GeoJSON source. Real coordinates only. */
+function setupCrimeLayers(points) {
+  if (!map.instance) return;
+  const features = (Array.isArray(points) ? points : [])
+    .filter(p => p.lat != null && p.lng != null)
+    .map(p => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+      properties: { cat: p.cat || 'unknown', street: p.street || '' },
+    }));
+  const data = { type: 'FeatureCollection', features };
+
+  if (map.instance.getSource('crime')) {
+    map.instance.getSource('crime').setData(data);
+    return;
+  }
+
+  map.instance.addSource('crime', {
+    type: 'geojson',
+    data,
+    cluster: true,
+    clusterMaxZoom: 15,
+    clusterRadius: 48,
+  });
+
+  map.instance.addLayer({
+    id: 'crime-clusters',
+    type: 'circle',
+    source: 'crime',
+    slot: 'top',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': '#e05c5c',
+      'circle-opacity': 0.9,
+      'circle-radius': ['step', ['get', 'point_count'], 14, 20, 18, 50, 23, 100, 29],
+      'circle-stroke-width': 2.5,
+      'circle-stroke-color': 'rgba(255,255,255,0.18)',
+    },
+  });
+  map.instance.addLayer({
+    id: 'crime-cluster-count',
+    type: 'symbol',
+    source: 'crime',
+    slot: 'top',
+    filter: ['has', 'point_count'],
+    layout: {
+      'text-field': ['get', 'point_count_abbreviated'],
+      'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+      'text-size': 11,
+    },
+    paint: { 'text-color': '#ffffff' },
+  });
+  map.instance.addLayer({
+    id: 'crime-point',
+    type: 'circle',
+    source: 'crime',
+    slot: 'top',
+    filter: ['!', ['has', 'point_count']],
+    paint: {
+      'circle-color': '#e05c5c',
+      'circle-opacity': 0.92,
+      'circle-radius': 5.5,
+      'circle-stroke-width': 2,
+      'circle-stroke-color': 'rgba(255,255,255,0.2)',
+    },
+  });
+
+  // Click cluster → expand zoom
+  map.instance.on('click', 'crime-clusters', (e) => {
+    const f = map.instance.queryRenderedFeatures(e.point, { layers: ['crime-clusters'] });
+    if (!f.length) return;
+    const clusterId = f[0].properties.cluster_id;
+    const src = map.instance.getSource('crime');
+    src.getClusterExpansionZoom(clusterId, (err, zoom) => {
+      if (err) return;
+      map.instance.easeTo({ center: f[0].geometry.coordinates, zoom });
+    });
+  });
+  // Click point → popup
+  map.instance.on('click', 'crime-point', (e) => {
+    const f = e.features[0];
+    const c = f.geometry.coordinates.slice();
+    new mapboxgl.Popup({ offset: 10, closeButton: true })
+      .setLngLat(c)
+      .setHTML(
+        `<div class="pop-title">${escapeHtml(humanizeCategory(f.properties.cat))}</div>` +
+        (f.properties.street ? `<div class="pop-meta">${escapeHtml(f.properties.street)}</div>` : '')
+      )
+      .addTo(map.instance);
+  });
+  ['crime-clusters', 'crime-point'].forEach(l => {
+    map.instance.on('mouseenter', l, () => { map.instance.getCanvas().style.cursor = 'pointer'; });
+    map.instance.on('mouseleave', l, () => { map.instance.getCanvas().style.cursor = ''; });
+  });
+}
+
+/* Generic clustered POI layer builder (amenities / transport) — real coords only.
+   Mirrors the crime native-clustering pattern with per-layer colour + popup. */
+function setupClusterLayers(opts) {
+  if (!map.instance) return;
+  const { sourceId, points, color, popupFor } = opts;
+  const features = (Array.isArray(points) ? points : [])
+    .filter(p => p.lat != null && p.lng != null)
+    .map(p => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+      properties: { cat: p.cat || '', kind: p.kind || '', name: p.name || '' },
+    }));
+  const data = { type: 'FeatureCollection', features };
+
+  if (map.instance.getSource(sourceId)) {
+    map.instance.getSource(sourceId).setData(data);
+    return;
+  }
+
+  map.instance.addSource(sourceId, {
+    type: 'geojson', data,
+    cluster: true, clusterMaxZoom: 15, clusterRadius: 46,
+  });
+  map.instance.addLayer({
+    id: sourceId + '-clusters', type: 'circle', source: sourceId, slot: 'top',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': color,
+      'circle-opacity': 0.9,
+      'circle-radius': ['step', ['get', 'point_count'], 14, 20, 18, 50, 23, 100, 29],
+      'circle-stroke-width': 2.5,
+      'circle-stroke-color': 'rgba(255,255,255,0.18)',
+    },
+  });
+  map.instance.addLayer({
+    id: sourceId + '-cluster-count', type: 'symbol', source: sourceId, slot: 'top',
+    filter: ['has', 'point_count'],
+    layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'], 'text-size': 11 },
+    paint: { 'text-color': '#ffffff' },
+  });
+  map.instance.addLayer({
+    id: sourceId + '-point', type: 'circle', source: sourceId, slot: 'top',
+    filter: ['!', ['has', 'point_count']],
+    paint: {
+      'circle-color': color,
+      'circle-opacity': 0.92,
+      'circle-radius': 5.5,
+      'circle-stroke-width': 2,
+      'circle-stroke-color': 'rgba(255,255,255,0.2)',
+    },
+  });
+
+  map.instance.on('click', sourceId + '-clusters', (e) => {
+    const f = map.instance.queryRenderedFeatures(e.point, { layers: [sourceId + '-clusters'] });
+    if (!f.length) return;
+    const clusterId = f[0].properties.cluster_id;
+    map.instance.getSource(sourceId).getClusterExpansionZoom(clusterId, (err, zoom) => {
+      if (err) return;
+      map.instance.easeTo({ center: f[0].geometry.coordinates, zoom });
+    });
+  });
+  map.instance.on('click', sourceId + '-point', (e) => {
+    const f = e.features[0];
+    new mapboxgl.Popup({ offset: 10, closeButton: true })
+      .setLngLat(f.geometry.coordinates.slice())
+      .setHTML(popupFor(f.properties))
+      .addTo(map.instance);
+  });
+  [sourceId + '-clusters', sourceId + '-point'].forEach(l => {
+    map.instance.on('mouseenter', l, () => { map.instance.getCanvas().style.cursor = 'pointer'; });
+    map.instance.on('mouseleave', l, () => { map.instance.getCanvas().style.cursor = ''; });
+  });
+}
+
+function setupAmenityLayers(points) {
+  setupClusterLayers({
+    sourceId: 'amenities',
+    points,
+    color: '#3ecf8e',
+    popupFor: (pr) => {
+      const label = amenityCatLabel(pr.cat);
+      return `<div class="pop-title">${escapeHtml(pr.name || label || 'Amenity')}</div>` +
+             (label ? `<div class="pop-meta">${escapeHtml(label)}</div>` : '');
+    },
+  });
+}
+
+function setupTransportLayers(points) {
+  setupClusterLayers({
+    sourceId: 'transport',
+    points,
+    color: '#4a9eff',
+    popupFor: (pr) => {
+      const k = pr.kind === 'rail' ? 'Rail station' : pr.kind === 'tram' ? 'Tram stop' : 'Bus stop';
+      return `<div class="pop-title">${escapeHtml(pr.name || k)}</div>` +
+             `<div class="pop-meta">${escapeHtml(k)}</div>`;
+    },
+  });
+}
+
+function amenityCatLabel(cat) {
+  const m = {
+    foodDrink: 'Food & drink', shopping: 'Shopping', healthcare: 'Healthcare',
+    education: 'Education', leisure: 'Leisure', services: 'Services', other: 'Other',
+  };
+  return m[cat] || '';
+}
+
+function applyLayerVisibility() {
+  if (!map.instance) return;
+  // Schools — HTML markers
+  const showSchools = state.layers.schools && state.layerHasData.schools;
+  (map.schoolMarkers || []).forEach(m => {
+    const el = m.getElement();
+    if (el) el.style.display = showSchools ? '' : 'none';
+  });
+  // Crime — GL layers (guard: layers only exist after style load)
+  const showCrime = state.layers.crime && state.layerHasData.crime;
+  ['crime-clusters', 'crime-cluster-count', 'crime-point'].forEach(id => {
+    if (map.instance.getLayer && map.instance.getLayer(id)) {
+      map.instance.setLayoutProperty(id, 'visibility', showCrime ? 'visible' : 'none');
+    }
+  });
+  // Amenities — GL layers
+  const showAmen = state.layers.amenities && state.layerHasData.amenities;
+  ['amenities-clusters', 'amenities-cluster-count', 'amenities-point'].forEach(id => {
+    if (map.instance.getLayer && map.instance.getLayer(id)) {
+      map.instance.setLayoutProperty(id, 'visibility', showAmen ? 'visible' : 'none');
+    }
+  });
+  // Transport — GL layers
+  const showTrans = state.layers.transport && state.layerHasData.transport;
+  ['transport-clusters', 'transport-cluster-count', 'transport-point'].forEach(id => {
+    if (map.instance.getLayer && map.instance.getLayer(id)) {
+      map.instance.setLayoutProperty(id, 'visibility', showTrans ? 'visible' : 'none');
+    }
+  });
+}
+
+/* ═══ COORDINATE PREPARATION ═══ */
+async function prepareSchoolPoints() {
+  const a = state.area || {};
+  const rows = Array.isArray(a.schools && a.schools.value) ? a.schools.value : [];
+  if (!rows.length) { state.schoolPoints = []; state.layerHasData.schools = false; return; }
+  const haveDirectLatLng = rows.some(r => r && r.lat != null && r.lng != null);
+  if (haveDirectLatLng) {
+    state.schoolPoints = rows
+      .filter(r => r.lat != null && r.lng != null)
+      .map(r => ({ name: r.school_name, miles: r.miles, ofsted: r.ofsted_rating, lat: Number(r.lat), lng: Number(r.lng) }));
+    state.layerHasData.schools = state.schoolPoints.length > 0;
+    return;
+  }
+  // Geocode via postcodes.io bulk
+  const pcs = Array.from(new Set(rows.map(r => r && r.postcode).filter(Boolean)));
+  if (!pcs.length) { state.schoolPoints = []; state.layerHasData.schools = false; return; }
+  const lookup = await postcodesBulk(pcs);
+  state.schoolPoints = rows.map(r => {
+    const key = String(r.postcode || '').toUpperCase().replace(/\s+/g,' ').trim();
+    const hit = lookup[key];
+    if (!hit) return null;
+    return { name: r.school_name, miles: r.miles, ofsted: r.ofsted_rating, lat: hit.latitude, lng: hit.longitude };
+  }).filter(Boolean);
+  state.layerHasData.schools = state.schoolPoints.length > 0;
+}
+
+function prepareCrimePoints() {
+  const a = state.area || {};
+  const rows = Array.isArray(a.crime && a.crime.value) ? a.crime.value : [];
+  state.crimePoints = rows
+    .filter(r => r && r.location && r.location.latitude != null && r.location.longitude != null)
+    .map(r => ({
+      cat:    r.category || 'unknown',
+      lat:    Number(r.location.latitude),
+      lng:    Number(r.location.longitude),
+      street: r.location.street && r.location.street.name ? r.location.street.name : '',
+    }));
+  state.layerHasData.crime = state.crimePoints.length > 0;
+}
+
+/* Amenities — real OSM coordinates already in payload (amenities.metrics.points). */
+function prepareAmenityPoints() {
+  const a = state.area || {};
+  const pts = ((a.amenities && a.amenities.metrics && a.amenities.metrics.points) || []);
+  state.amenityPoints = (Array.isArray(pts) ? pts : [])
+    .filter(p => p && p.lat != null && p.lng != null)
+    .map(p => ({ cat: p.cat || 'other', name: p.name || '', lat: Number(p.lat), lng: Number(p.lng) }));
+  state.layerHasData.amenities = state.amenityPoints.length > 0;
+}
+
+/* Transport — real OSM coordinates already in payload (transport.metrics.points). */
+function prepareTransportPoints() {
+  const a = state.area || {};
+  const pts = ((a.transport && a.transport.metrics && a.transport.metrics.points) || []);
+  state.transportPoints = (Array.isArray(pts) ? pts : [])
+    .filter(p => p && p.lat != null && p.lng != null)
+    .map(p => ({ kind: p.kind || 'bus', name: p.name || '', lat: Number(p.lat), lng: Number(p.lng) }));
+  state.layerHasData.transport = state.transportPoints.length > 0;
+}
+
+/* ═══ LAYER CHIPS (top-right of map) ═══ */
+function renderLayerChips() {
+  const layers = [
+    { key: 'schools',   label: 'Schools',   icon: 'M22 10L12 5 2 10l10 5 10-5z' },
+    { key: 'amenities', label: 'Amenities', icon: 'M3 9l9-6 9 6v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' },
+    { key: 'transport', label: 'Transport', icon: 'M4 7h16M4 12h16M4 17h10' },
+    { key: 'crime',     label: 'Crime',     icon: 'M12 2L4 6v6c0 5 3.5 9.5 8 10 4.5-.5 8-5 8-10V6l-8-4z' },
+    { key: 'flood',     label: 'Flood',     icon: 'M12 2c2 4 4 6 4 9a4 4 0 1 1-8 0c0-3 2-5 4-9z' },
+  ];
+  const host = document.getElementById('layerChips');
+  host.innerHTML = '';
+  layers.forEach(l => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'map-layer-chip layer-' + l.key;
+    chip.dataset.layer = l.key;
+    if (!state.layerHasData[l.key]) chip.classList.add('no-data');
+    chip.innerHTML = `<span class="dot"></span>${escapeHtml(l.label)}`;
+    chip.addEventListener('click', () => {
+      if (!state.layerHasData[l.key]) {
+        // Switch the lower strip to the corresponding tab (no fake marker)
+        const tabMap = { amenities: 'amenities', transport: 'transport', flood: 'environment' };
+        if (tabMap[l.key]) switchTab(tabMap[l.key]);
+        return;
+      }
+      state.layers[l.key] = !state.layers[l.key];
+      syncLayerUI();
+      applyLayerVisibility();
+    });
+    host.appendChild(chip);
+  });
+  syncLayerUI();
+}
+
+/* ═══ INTERACTION WIRING ═══ */
+function wireInteractions() {
+  // Tabs
+  document.querySelectorAll('.area-tab').forEach(btn => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  });
+  // Cards: tab-backed cards switch tab; rental/market/demographics drive
+  // their own lower strip without changing the tab (no generic fallback).
+  const TAB_BACKED = new Set(['transport', 'crime', 'amenities', 'schools', 'environment']);
+  const STRIP_ONLY = new Set(['rental', 'market', 'demographics']);
+  document.querySelectorAll('.area-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const t = card.dataset.card || 'overview';
+      if (TAB_BACKED.has(t)) {
+        switchTab(t);
+      } else if (STRIP_ONLY.has(t)) {
+        setActiveStripFromCard(t, card);
+      } else {
+        switchTab('overview');
+      }
+    });
+  });
+  // All layers
+  document.getElementById('allLayersBtn').addEventListener('click', () => {
+    const next = {};
+    Object.keys(state.layers).forEach(k => { next[k] = !!state.layerHasData[k]; });
+    setLayers(next);
+  });
+  // Filters popout
+  const fb = document.getElementById('filtersBtn');
+  const fp = document.getElementById('filtersPop');
+  fb.addEventListener('click', () => {
+    state.filtersOpen = !state.filtersOpen;
+    fp.classList.toggle('open', state.filtersOpen);
+  });
+  document.addEventListener('click', (e) => {
+    if (!state.filtersOpen) return;
+    if (fp.contains(e.target) || fb.contains(e.target)) return;
+    state.filtersOpen = false; fp.classList.remove('open');
+  });
+  // Filter checkboxes
+  document.querySelectorAll('.filters-pop-row input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.disabled) return;
+      const layer = cb.dataset.layer;
+      state.layers[layer] = cb.checked;
+      syncLayerUI();
+      applyLayerVisibility();
+    });
+  });
+  // Map controls
+  document.getElementById('mapLocate').addEventListener('click', () => {
+    if (map.instance && state.lat != null && state.lng != null) {
+      map.instance.flyTo({ center: [state.lng, state.lat], zoom: 14, essential: true });
+    }
+  });
+  document.getElementById('mapZoomIn').addEventListener('click', () => {
+    if (map.instance) map.instance.zoomIn();
+  });
+  document.getElementById('mapZoomOut').addEventListener('click', () => {
+    if (map.instance) map.instance.zoomOut();
+  });
+  // Explore full report — scroll back to top of cards
+  document.getElementById('exploreBtn').addEventListener('click', () => {
+    document.querySelector('.area-cards').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  // Save / Share — visual placeholders (no fake remote state)
+  document.getElementById('saveAreaBtn').addEventListener('click', (e) => {
+    e.currentTarget.textContent = '✓ Saved';
+    setTimeout(() => { e.currentTarget.innerHTML = `
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15 8.5 22 9.5 17 14.5 18 22 12 18.5 6 22 7 14.5 2 9.5 9 8.5"/></svg>
+      Save area`; }, 1600);
+  });
+  document.getElementById('shareAreaBtn').addEventListener('click', async (e) => {
+    const url = location.href;
+    try {
+      if (navigator.share) { await navigator.share({ title: document.title, url }); }
+      else { await navigator.clipboard.writeText(url); e.currentTarget.lastChild.textContent = ' Copied'; setTimeout(()=>{ e.currentTarget.innerHTML = `
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+        Share`; }, 1600); }
+    } catch (e2) {}
+  });
+}
+
+/* ═══ MAIN LOAD + POLL (preserves existing API contract) ═══ */
+async function loadDealAndArea() {
+  // 1) Load deal record
+  let deal, summary;
+  try {
+    const res = await fetch(`${API_BASE}/api/deals/${dealId}`, { headers });
+    const data = await res.json();
+    if (!res.ok || !data.deal) throw new Error('Deal not found');
+    deal = data.deal;
+    summary = deal.summary_json || {};
+  } catch (e) {
+    hideLoading();
+    document.getElementById('areaTitle').textContent = 'Area intelligence — deal not found';
+    document.getElementById('areaSummary').textContent = 'Could not load deal — please go back and try again.';
+    return;
+  }
+  state.deal = deal; state.summary = summary;
+  document.getElementById('navCtx').textContent = deal.address || (summary.property && summary.property.address) || '';
+
+  // 2) Resolve deal postcode
+  const { pc, src } = resolvePostcode(deal, summary);
+  state.postcode = pc;
+  state.postcodeSource = src;
+  document.getElementById('dealPostcodeInput').value = pc || '';
+  if (!pc) {
+    document.getElementById('areaTitle').textContent = 'Area intelligence — postcode unavailable';
+    document.getElementById('areaSummary').textContent = 'No postcode on this deal — area data unavailable.';
+    document.getElementById('dealPostcodeInput').placeholder = 'Postcode unavailable';
+    hideLoading();
+    return;
+  }
+
+  // 3) Fire POST then poll GET — preserved pattern
+  showLoading('Fetching area intelligence…');
+  try {
+    const postRes  = await fetch(`${API_BASE}/api/deals/${dealId}/area`, {
+      method: 'POST', headers, body: JSON.stringify({ postcode: pc })
+    });
+    const postJson = await postRes.json();
+    if (postJson.fetching === false && postJson.area && postJson.area.fetch_status === 'complete') {
+      await onAreaReady(postJson.area); return;
+    }
+    showLoading('Analysing area data — 20–40 seconds…');
+    let _retryFired = false;
+    for (let i = 0; i < 45; i++) {
+      await new Promise(r => setTimeout(r, 4000));
+      showLoading(`Loading area data… (${(i+1)*4}s)`);
+      try {
+        const pollRes  = await fetch(`${API_BASE}/api/deals/${dealId}/area`, { headers });
+        if (!pollRes.ok) continue;
+        const pollJson = await pollRes.json();
+        const area     = pollJson.area;
+        if (area && area.fetch_status === 'complete') { await onAreaReady(area); return; }
+        if (area && area.fetch_status === 'error')    {
+          document.getElementById('areaSummary').textContent = 'Area data could not be loaded.';
+          hideLoading(); return;
+        }
+        if (!_retryFired && i >= 9 && (!area || area.fetch_status === 'fetching')) {
+          _retryFired = true;
+          fetch(`${API_BASE}/api/deals/${dealId}/area`, {
+            method: 'POST', headers, body: JSON.stringify({ postcode: pc, forceRefresh: true })
+          }).catch(() => {});
+        }
+      } catch (e) {}
+    }
+    document.getElementById('areaSummary').textContent = 'Area data timed out — please retry.';
+    hideLoading();
+  } catch (e) {
+    hideLoading();
+  }
+}
+
+/* Demographics partial-failure auto-recovery.
+   When an earlier Census fetch ran with the old c2021_eth_8 / 1001..1018
+   cats config, religion + household populated successfully but ethnic
+   + age came back empty. The backend auto-enrich helper now skips any
+   deal with fetched_at already set, so those empty arrays persist
+   forever for affected deals. This trigger detects that exact partial
+   state and POSTs one refresh-census to force-repull with corrected
+   cats, then re-renders only the Demographics card.
+   Single-shot per page load. No backend touched, no other behaviour. */
+async function tryFixPartialCensus() {
+  if (!dealId || state._censusAutoFixed) return;
+  state._censusAutoFixed = true;
+  const d = ((state.area || {}).census || {}).demographics || {};
+  const has = (k) => Array.isArray(d[k]) && d[k].length > 0;
+  const partialFailure =
+    (has('religion') || has('household')) && (!has('ethnic') || !has('age'));
+  if (!partialFailure) return;
+  try {
+    const r = await fetch(`${API_BASE}/api/deals/${dealId}/area/refresh-census`, {
+      method: 'POST', headers,
+    });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!j || !j.demographics) return;
+    state.area = state.area || {};
+    state.area.census = state.area.census || {};
+    state.area.census.demographics = j.demographics;
+    renderCards();
+  } catch (_) {
+    /* silent — card stays as it was, no regression */
+  }
+}
+
+async function onAreaReady(area) {
+  state.area = area;
+  // lat/lng — from area first, else postcodes.io
+  let lat = area.lat != null ? Number(area.lat) : null;
+  let lng = area.lng != null ? Number(area.lng) : null;
+  let locality = '';
+  if (state.postcode) {
+    const pi = await postcodesLookup(state.postcode);
+    if (pi) {
+      if (lat == null) lat = pi.latitude;
+      if (lng == null) lng = pi.longitude;
+      const wards = [pi.admin_ward, pi.parish, pi.parliamentary_constituency].filter(Boolean);
+      const town  = pi.post_town || pi.admin_district || '';
+      const ward  = wards[0] || '';
+      locality = [ward, town].filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).join(', ');
+    }
+  }
+  state.lat = lat; state.lng = lng;
+  state.locality = locality;
+
+  // Render header / chips / cards / strip
+  renderHeader();
+  renderSummaryAndChips();
+  renderCards();
+  renderStrip();
+
+  // Demographics partial-failure auto-recovery — fire-and-forget.
+  // Detects the exact state where an earlier broken-cats Census fetch
+  // left religion+household populated but ethnic+age empty (and the
+  // backend auto-enrich helper now skips this deal because fetched_at
+  // is set). Triggers one refresh-census POST to force-repull, then
+  // re-renders only the Demographics card. Single-shot per page load.
+  tryFixPartialCensus();
+
+  // Prepare marker data + init Mapbox (plots on style load)
+  await prepareSchoolPoints();
+  prepareCrimePoints();
+  prepareAmenityPoints();
+  prepareTransportPoints();
+  // Initial layer state: every real layer on; layers without data stay off.
+  applyTabToLayers('overview');
+  renderLayerChips();
+
+  await initMapbox();
+
+  hideLoading();
+}
+
+/* ═══ BOOT ═══ */
+wireInteractions();
+loadDealAndArea();
+
+</script>
+</body>
+</html>
