@@ -2463,7 +2463,7 @@ def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
 (
   {selectors}
 );
-out body;
+out center;
 """.strip()
 
     status, text = _http_post_text(
@@ -2563,6 +2563,36 @@ nwr["public_transport"="platform"](around:{radius},{lat},{lng});
         named_tram = _dedup(named_tram)[:6]
         named_bus = _dedup(named_bus)[:8]
 
+        # Build points[] for map pins — real OSM coordinates only.
+        # Nodes: top-level lat/lon. Ways/relations: center.lat/center.lon (out center).
+        transport_points: List[Dict[str, Any]] = []
+        _seen_transport_coords: set = set()
+        for _e in elements:
+            _tags = (_e or {}).get("tags") or {}
+            if not isinstance(_tags, dict):
+                continue
+            _elat = _e.get("lat") or (_e.get("center") or {}).get("lat")
+            _elng = _e.get("lon") or (_e.get("center") or {}).get("lon")
+            if _elat is None or _elng is None:
+                continue
+            _elat = safe_float(_elat)
+            _elng = safe_float(_elng)
+            if _elat is None or _elng is None:
+                continue
+            _coord_key = (round(_elat, 6), round(_elng, 6))
+            if _coord_key in _seen_transport_coords:
+                continue
+            _seen_transport_coords.add(_coord_key)
+            _nm = _tags.get("name", "")
+            _nm = _nm.strip() if isinstance(_nm, str) else ""
+            if _tags.get("railway") == "station":
+                _kind = "rail"
+            elif _tags.get("railway") == "tram_stop":
+                _kind = "tram"
+            else:
+                _kind = "bus"
+            transport_points.append({"lat": _elat, "lng": _elng, "kind": _kind, "name": _nm})
+
         bullets: List[str] = []
         bullets.append(
             f"• Rail: {counts['stations']} station(s) within ~{radius}m"
@@ -2617,10 +2647,32 @@ nwr["highway"="bus_stop"](around:2500,{lat},{lng});
                     wbullets.append(f"• Bus: {wider_counts['bus_stops']} stop(s) within ~2500m" + (f" (e.g., {', '.join(wider_named_bus[:5])})" if wider_named_bus else ""))
                     wsummary = "Transport (OSM within ~2.5km):\n" + "\n".join(wbullets)
                     wout = metric_ok(wsummary, wbullets, base_sources, retrieved, 0.75)
+                    # Build points from wider elements too
+                    _wider_pts: List[Dict[str, Any]] = []
+                    _wider_seen: set = set()
+                    for _we2 in wider_elements:
+                        _wt2 = (_we2 or {}).get("tags") or {}
+                        _wlat = _we2.get("lat") or (_we2.get("center") or {}).get("lat")
+                        _wlng = _we2.get("lon") or (_we2.get("center") or {}).get("lon")
+                        if _wlat is None or _wlng is None:
+                            continue
+                        _wlat = safe_float(_wlat)
+                        _wlng = safe_float(_wlng)
+                        if _wlat is None or _wlng is None:
+                            continue
+                        _wck = (round(_wlat, 6), round(_wlng, 6))
+                        if _wck in _wider_seen:
+                            continue
+                        _wider_seen.add(_wck)
+                        _wnm = (_wt2.get("name") or "").strip()
+                        _wkind = "rail" if _wt2.get("railway") == "station" else (
+                                 "tram" if _wt2.get("railway") == "tram_stop" else "bus")
+                        _wider_pts.append({"lat": _wlat, "lng": _wlng, "kind": _wkind, "name": _wnm})
                     wout["metrics"] = {
                         "radiusMeters": 2500,
                         "counts": wider_counts,
                         "sample": {"stations": wider_named_stations[:3], "tram": [], "bus": wider_named_bus[:8]},
+                        "points": _wider_pts,
                     }
                     return wout
             except Exception:
@@ -2634,6 +2686,7 @@ nwr["highway"="bus_stop"](around:2500,{lat},{lng});
             "radiusMeters": radius,
             "counts": counts,
             "sample": {"stations": named_stations, "tram": named_tram, "bus": named_bus},
+            "points": transport_points,
         }
         return out
 
@@ -2735,6 +2788,29 @@ nwr["tourism"](around:{radius},{lat},{lng});
             name = nm.strip() if isinstance(nm, str) and nm.strip() else ""
             _push_top(bk, name)
 
+        # Build points[] for map pins — real OSM coordinates per element.
+        amenity_points: List[Dict[str, Any]] = []
+        _seen_amenity_coords: set = set()
+        for _ae in elements:
+            _atags = (_ae or {}).get("tags") or {}
+            if not isinstance(_atags, dict):
+                continue
+            _alat = _ae.get("lat") or (_ae.get("center") or {}).get("lat")
+            _alng = _ae.get("lon") or (_ae.get("center") or {}).get("lon")
+            if _alat is None or _alng is None:
+                continue
+            _alat = safe_float(_alat)
+            _alng = safe_float(_alng)
+            if _alat is None or _alng is None:
+                continue
+            _ack = (round(_alat, 6), round(_alng, 6))
+            if _ack in _seen_amenity_coords:
+                continue
+            _seen_amenity_coords.add(_ack)
+            _acat = _bucket_for(_atags)
+            _anm = (_atags.get("name") or "").strip()
+            amenity_points.append({"lat": _alat, "lng": _alng, "cat": _acat, "name": _anm})
+
         for k in buckets.keys():
             buckets[k]["top"] = buckets[k]["top"][:6]
 
@@ -2761,7 +2837,7 @@ nwr["tourism"](around:{radius},{lat},{lng});
 
         summary = f"Amenities (OSM within ~{radius}m): {total} mapped places.\n" + "\n".join(bullets)
         out = metric_ok(summary, bullets, base_sources, retrieved, 0.90)
-        out["metrics"] = {"radiusMeters": radius, "total": total, "buckets": buckets}
+        out["metrics"] = {"radiusMeters": radius, "total": total, "buckets": buckets, "points": amenity_points}
         return out
 
     except Exception as e:
@@ -5041,6 +5117,72 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
         out["metrics"]["pricingPower"] = _pricing_power_from_rows(rows)
         out["metrics"]["pricingPowerSoldCompsMomentum"] = build_pricing_power_sold_comps_momentum(rows, r_miles)
+
+        # ── SOLD COMP MAP POINTS ────────────────────────────────────────────
+        # Expose up to 10 sold comps with real coordinates for map pins.
+        # Priority: row already has lat/lng (from _enrich_housing_rows_with_latlng).
+        # Fallback: NSPL postcode centroid lookup (nspl_postcodes table).
+        # Postcode centroid is acceptable for a comp — the sale address and price
+        # are real; only the pin placement is approximated to postcode level.
+        # Never fabricate coordinates; skip rows with no resolvable position.
+        _map_pts: List[Dict[str, Any]] = []
+        _nspl_pc_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+        def _nspl_latlng_cached(pcode: str) -> Optional[Dict[str, Any]]:
+            """Look up postcode centroid from nspl_postcodes; cache per call."""
+            if not pcode:
+                return None
+            _pnorm = pcode.upper().replace(" ", "")
+            if _pnorm in _nspl_pc_cache:
+                return _nspl_pc_cache[_pnorm]
+            try:
+                _res = data_query(
+                    "SELECT lat, lng FROM public.nspl_postcodes WHERE pcd_nospace = %s LIMIT 1",
+                    (_pnorm,)
+                )
+                _hit = _res[0] if _res else None
+                _nspl_pc_cache[_pnorm] = _hit
+                return _hit
+            except Exception:
+                _nspl_pc_cache[_pnorm] = None
+                return None
+
+        for _cr in rows:
+            if not isinstance(_cr, dict):
+                continue
+            if len(_map_pts) >= 10:
+                break
+            _clat = safe_float(_cr.get("lat"))
+            _clng = safe_float(_cr.get("lng"))
+            # Fallback to NSPL postcode centroid if row lacks coordinates
+            if _clat is None or _clng is None:
+                _cpc = str(_cr.get("postcode") or "").strip()
+                _nspl = _nspl_latlng_cached(_cpc) if _cpc else None
+                if _nspl:
+                    _clat = safe_float(_nspl.get("lat"))
+                    _clng = safe_float(_nspl.get("lng"))
+            if _clat is None or _clng is None:
+                continue
+            # Build address string from available fields
+            _caddr = " ".join(filter(None, [
+                str(_cr.get("paon") or "").strip(),
+                str(_cr.get("saon") or "").strip(),
+                str(_cr.get("street") or "").strip(),
+                str(_cr.get("town") or "").strip(),
+                str(_cr.get("postcode") or "").strip(),
+            ])).strip() or str(_cr.get("address") or _cr.get("full_address") or "").strip()
+            _cprice = safe_float(_cr.get("price_paid") or _cr.get("price") or _cr.get("sale_price"))
+            _cdate = str(_cr.get("date_of_transfer") or _cr.get("date_sold") or _cr.get("date") or "")
+            _map_pts.append({
+                "lat":     _clat,
+                "lng":     _clng,
+                "address": _caddr,
+                "price":   _cprice,
+                "date":    _cdate[:10] if _cdate else "",
+            })
+
+        out["metrics"]["mapPoints"] = _map_pts
+        # ────────────────────────────────────────────────────────────────────
 
         out["soldComps"] = rows
         out["charts"] = charts
