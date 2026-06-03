@@ -7176,6 +7176,21 @@ def save_financials(deal_id: str):
     if not result.get("ok"):
         return jsonify(result), 400
 
+    # Preserve frontend-only flags that _calculate_financials doesn't echo back
+    # These are used by the frontend to know whether manual ceiling / purchase price
+    # were explicitly set by the user (not seeded from defaults)
+    _fe_flags = {}
+    if data.get("_ceiling_is_manual"):
+        _fe_flags["_ceiling_is_manual"] = True
+        if data.get("manual_ceiling") is not None:
+            _fe_flags["manual_ceiling"] = data["manual_ceiling"]
+    if data.get("_purchase_price_is_user_entered"):
+        _fe_flags["_purchase_price_is_user_entered"] = True
+
+    if _fe_flags:
+        result = dict(result)  # avoid mutating
+        result.update(_fe_flags)
+
     try:
         supabase.table("deals").update({
             "financials_json": result,
