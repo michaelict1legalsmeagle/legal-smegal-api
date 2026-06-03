@@ -7118,19 +7118,19 @@ def get_financials(deal_id: str):
             financials = {
                 "_seeded": True,
                 "inputs": {
-                    "purchase_price":    float(guide) if guide else None,
+                    # purchase_price intentionally omitted — must never pre-fill from guide price
+                    # monthly_rent intentionally omitted — must never pre-fill
                     "guide_price":       gpp / 100.0 if gpp else (float(guide) if guide else None),
                     "buyers_premium_pct": terms.get("buyers_premium_pct"),
-                    "monthly_rent":      None,
                     "renovation_cost":   None,
                     "target_yield":      6.0,
-                    "ltv_pct":           0.0,
-                    "finance_rate_pct":  0.0,
-                    "management_pct":    10.0,
+                    "ltv_pct":           75.0,
+                    "finance_rate_pct":  5.14,
+                    "management_pct":    12.0,
                     "maintenance_pct":   1.0,
                     "legal_fees":        1500.0,
                     "void_weeks":        2.0,
-                    "hold_years":        5.0,
+                    "hold_years":        10.0,
                 }
             }
         return jsonify({"ok": True, "financials": financials}), 200
