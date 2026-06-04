@@ -5674,9 +5674,16 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     print(f"[LLM] stop_reason={stop_reason} tokens_in={usage_in} tokens_out={usage_out} content_len={len(content)}", flush=True)
 
     if stop_reason == "max_tokens":
-        print(f"[LLM] WARNING: TRUNCATED at max_tokens — content_len={len(content)}", flush=True)
+        print(f"[LLM] WARNING: TRUNCATED at max_tokens=16000. Last 300 chars: {content[-300:]!r}", flush=True)
 
-    # Raw response block removed — content logged at character-count level only above
+    # Print the FULL raw LLM response before any processing.
+    # This is the ground truth — if flags are missing, this tells us why.
+    print(f"[LLM] RAW RESPONSE START >>>", flush=True)
+    print(content[:3000], flush=True)  # first 3000 chars
+    if len(content) > 3000:
+        print(f"[LLM] ... ({len(content) - 3000} more chars) ...", flush=True)
+        print(content[-500:], flush=True)  # last 500 chars
+    print(f"[LLM] RAW RESPONSE END <<<", flush=True)
 
     # Try direct parse first
     try:
@@ -6367,7 +6374,8 @@ def summarise_deal(deal_id: str):
         # Print to stdout so it's visible in Render logs regardless of log level
         print(
             f"[summarise] PROMPT SIZE: {len(truncated)} chars | "
-            f"{docs_with_text}/{len(documents)} docs have text",
+            f"{docs_with_text}/{len(documents)} docs have text | "
+            f"first_200: {truncated[:200]!r}",
             flush=True
         )
 
@@ -9505,6 +9513,13 @@ def auction_listing_convert(listing_id: str):
         deal_name = deal_name[:120]
 
         # ── Create deal (reuse Supabase insert directly) ──────────────────
+        # Normalise guide_price: Supabase/Postgres integer column rejects float strings ("55000.0")
+        _raw_gp = listing.get("guide_price")
+        try:
+            guide_price_int = int(float(_raw_gp)) if _raw_gp is not None else None
+        except (ValueError, TypeError):
+            guide_price_int = None
+
         deal_row = {
             "user_id":            request.user_id,
             "deal_name":          deal_name,
@@ -9512,7 +9527,7 @@ def auction_listing_convert(listing_id: str):
             "address":            listing.get("address"),
             "postcode":           listing.get("postcode"),
             "lot_number":         listing.get("lot_number"),
-            "guide_price":        listing.get("guide_price"),
+            "guide_price":        guide_price_int,
             "deal_type":          None,   # user sets after upload
             "auction_date":       listing.get("auction_date"),
             "status":             "active",
