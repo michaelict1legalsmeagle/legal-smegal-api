@@ -18,7 +18,9 @@ import psycopg2.extras
 import pandas as pd
 import os
 
-DB_URL  = "postgresql://postgres:Thesixkids68@db.qdgxmwdvmfrcicgpukhs.supabase.co:5432/postgres"
+DB_URL = os.environ.get("SUPABASE_DB_URL")
+if not DB_URL:
+    raise RuntimeError("SUPABASE_DB_URL is required")
 CSV_PATH = os.path.expanduser("~/Downloads/File_7_-_All_IoD2019_Scores__Ranks__Deciles_and_Population_Denominators_3.csv")
 
 print("Loading IMD CSV...")

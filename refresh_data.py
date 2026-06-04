@@ -33,10 +33,9 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Hetzner — price_paid_raw_2025 lives here, not on Supabase
-DATA_DATABASE_URL = os.environ.get(
-    "DATA_DATABASE_URL",
-    "postgresql://legalsmegal:Thesixkids68@159.69.27.104:5432/legalsmegal_data"
-)
+DATA_DATABASE_URL = os.environ.get("DATA_DATABASE_URL")
+if not DATA_DATABASE_URL:
+    raise RuntimeError("DATA_DATABASE_URL is required")
 
 BATCH_SIZE = 500  # rows per batch — keeps memory low on Render free tier
 

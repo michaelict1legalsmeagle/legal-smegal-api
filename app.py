@@ -220,10 +220,9 @@ else:
     print("🔴 Supabase env vars not set. Supabase features are DISABLED.")
 
 # ── Hetzner data connection ────────────────────────────────────────
-DATA_DATABASE_URL = os.environ.get(
-    "DATA_DATABASE_URL",
-    "postgresql://legalsmegal:Thesixkids68@159.69.27.104:5432/legalsmegal_data"
-)
+DATA_DATABASE_URL = os.environ.get("DATA_DATABASE_URL")
+if not DATA_DATABASE_URL:
+    raise RuntimeError("DATA_DATABASE_URL is required")
 
 def get_data_conn():
     """Get a psycopg v3 connection to Hetzner data database."""
