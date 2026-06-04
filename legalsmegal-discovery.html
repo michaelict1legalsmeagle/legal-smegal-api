@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Discovery — LegalSmegal</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#080c10;--surface:#0d1219;--surface-2:#111820;--surface-3:#161e28;
+  --border:#1c2530;--border-2:#243040;
+  --text-pri:#e8edf2;--text-sec:#9aafc4;--text-ter:#526882;
+  --accent:#c8a84b;--accent-dim:rgba(200,168,75,0.12);
+  --green:#3ecf8e;--green-dim:rgba(62,207,142,0.12);
+  --red:#e05c5c;--amber:#e8943a;--blue:#4a9eff;
+  --font-mono:'IBM Plex Mono',monospace;
+  --font-sans:'IBM Plex Sans',sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{min-height:100vh;font-family:var(--font-sans);background:var(--bg);color:var(--text-pri);-webkit-font-smoothing:antialiased}
+
+/* ── NAV ── */
+nav{height:44px;background:var(--surface);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 20px;gap:12px;position:sticky;top:0;z-index:100}
+.nav-logo{font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text-pri);text-decoration:none;display:flex;align-items:center}
+.nav-logo span{color:var(--accent)}
+.nav-div{width:1px;height:20px;background:var(--border-2)}
+.nav-greeting{font-family:var(--font-mono);font-size:11px;color:var(--text-ter);letter-spacing:.04em}
+.nav-right{display:flex;align-items:center;gap:8px;margin-left:auto}
+.nbtn{font-family:var(--font-mono);font-size:10px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-sec);text-decoration:none;padding:4px 10px;border:1px solid var(--border-2);
+  border-radius:3px;cursor:pointer;background:none;transition:border-color .15s,color .15s;white-space:nowrap}
+.nbtn:hover{border-color:var(--text-sec);color:var(--text-pri)}
+.nbtn.active{border-color:var(--accent);color:var(--accent)}
+.nbtn.accent{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+.nbtn.accent:hover{background:var(--accent);color:#080c10}
+
+/* ── PAGE LAYOUT ── */
+.page{max-width:1200px;margin:0 auto;padding:28px 20px 60px}
+
+/* ── PAGE HEADER ── */
+.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap}
+.page-eyebrow{font-family:var(--font-mono);font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:6px}
+.page-title{font-size:22px;font-weight:600;color:var(--text-pri);line-height:1.2}
+.page-sub{font-size:13px;color:var(--text-sec);margin-top:4px}
+.head-stats{display:flex;gap:20px;flex-shrink:0}
+.stat-pill{font-family:var(--font-mono);font-size:11px;color:var(--text-ter);
+  background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:6px 12px;text-align:center}
+.stat-pill strong{display:block;font-size:18px;font-weight:600;color:var(--text-pri);letter-spacing:-.02em}
+
+/* ── FILTER BAR ── */
+.filter-bar{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
+.filter-bar select,.filter-bar input[type=text],.filter-bar input[type=number]{
+  font-family:var(--font-mono);font-size:11px;color:var(--text-pri);
+  background:var(--surface);border:1px solid var(--border-2);border-radius:4px;
+  padding:6px 10px;outline:none;transition:border-color .15s;height:32px}
+.filter-bar select:focus,.filter-bar input:focus{border-color:var(--accent)}
+.filter-bar select{cursor:pointer;min-width:130px}
+.filter-bar input[type=number]{width:110px}
+.filter-bar input[type=text]{min-width:180px}
+.filter-sep{font-family:var(--font-mono);font-size:10px;color:var(--text-ter)}
+.filter-count{font-family:var(--font-mono);font-size:11px;color:var(--text-ter);margin-left:auto;align-self:center}
+
+/* ── LISTING GRID ── */
+.listing-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}
+
+/* ── LISTING CARD ── */
+.listing-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;
+  padding:16px;display:flex;flex-direction:column;gap:10px;
+  transition:border-color .15s,background .15s;position:relative;overflow:hidden}
+.listing-card:hover{border-color:var(--border-2);background:var(--surface-2)}
+.listing-card.converted{opacity:.55;pointer-events:none}
+.lc-address-link{text-decoration:none;color:inherit;display:block}
+.lc-address-link:hover .lc-address{color:var(--accent)}
+
+.lc-source{display:flex;align-items:center;justify-content:space-between}
+.lc-house{font-family:var(--font-mono);font-size:9px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--text-ter)}
+.lc-lot{font-family:var(--font-mono);font-size:9px;color:var(--accent);letter-spacing:.06em}
+
+.lc-address{font-size:13px;font-weight:600;color:var(--text-pri);line-height:1.35;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+.lc-postcode{font-family:var(--font-mono);font-size:10px;color:var(--text-ter);margin-top:2px}
+
+.lc-metrics{display:flex;gap:12px}
+.lc-metric{flex:1}
+.lc-metric-lbl{font-size:9px;font-family:var(--font-mono);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--text-ter);margin-bottom:3px}
+.lc-metric-val{font-family:var(--font-mono);font-size:14px;font-weight:600;color:var(--text-pri)}
+.lc-metric-val.accent{color:var(--accent)}
+
+.lc-tags{display:flex;gap:6px;flex-wrap:wrap}
+.lc-tag{font-family:var(--font-mono);font-size:9px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-ter);background:var(--surface-2);border:1px solid var(--border);
+  border-radius:3px;padding:2px 6px}
+.lc-tag.date{color:var(--amber);border-color:rgba(232,148,58,.3)}
+.lc-tag.pack{color:var(--green);border-color:rgba(62,207,142,.3)}
+
+.lc-actions{display:flex;gap:6px;margin-top:2px}
+.lc-btn-convert{flex:1;font-family:var(--font-mono);font-size:10px;font-weight:600;
+  letter-spacing:.06em;text-transform:uppercase;cursor:pointer;
+  background:var(--accent-dim);border:1px solid var(--accent);color:var(--accent);
+  border-radius:4px;padding:7px 12px;transition:background .15s,color .15s}
+.lc-btn-convert:hover{background:var(--accent);color:#080c10}
+.lc-btn-convert:disabled{opacity:.4;cursor:not-allowed}
+.lc-btn-area{opacity:.7}
+.lc-btn-link{font-family:var(--font-mono);font-size:9px;letter-spacing:.06em;
+  color:var(--text-ter);background:none;border:1px solid var(--border);border-radius:4px;
+  padding:7px 10px;text-decoration:none;display:flex;align-items:center;gap:4px;
+  transition:border-color .15s,color .15s;cursor:pointer;white-space:nowrap}
+.lc-btn-link:hover{border-color:var(--text-sec);color:var(--text-pri)}
+
+.lc-converting{position:absolute;inset:0;background:rgba(8,12,16,.85);
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--font-mono);font-size:11px;color:var(--accent);
+  letter-spacing:.08em;border-radius:8px;opacity:0;pointer-events:none;transition:opacity .2s}
+.lc-converting.show{opacity:1;pointer-events:all}
+
+/* ── EMPTY / LOADING ── */
+.state-msg{text-align:center;padding:80px 20px;color:var(--text-ter)}
+.state-msg .icon{font-size:32px;margin-bottom:12px;opacity:.5}
+.state-msg strong{display:block;font-size:16px;color:var(--text-sec);margin-bottom:6px}
+.state-msg p{font-size:13px;max-width:360px;margin:0 auto}
+
+/* ── PAGINATION ── */
+.pagination{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:28px}
+.pg-btn{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-sec);background:var(--surface);border:1px solid var(--border);border-radius:4px;
+  padding:6px 12px;cursor:pointer;transition:border-color .15s,color .15s}
+.pg-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.pg-btn:disabled{opacity:.3;cursor:not-allowed}
+.pg-info{font-family:var(--font-mono);font-size:11px;color:var(--text-ter)}
+
+/* ── TOAST ── */
+.toast{position:fixed;bottom:24px;right:24px;z-index:999;
+  font-family:var(--font-mono);font-size:11px;padding:10px 16px;border-radius:6px;
+  border:1px solid;transform:translateY(8px);opacity:0;transition:all .25s;pointer-events:none}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.ok{background:var(--green-dim);border-color:var(--green);color:var(--green)}
+.toast.err{background:var(--red-dim, rgba(224,92,92,.1));border-color:var(--red);color:var(--red)}
+
+@media(max-width:680px){
+  .page-head{flex-direction:column}
+  .head-stats{gap:10px}
+  .filter-bar{gap:6px}
+  .filter-count{display:none}
+  .listing-grid{grid-template-columns:1fr}
+}
+
+/* ── Enrichment panel ─────────────────────────────────────────────────────── */
+.lc-enrich{border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:5px}
+.lc-enrich-signals{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px}
+.enrich-row{display:flex;justify-content:space-between;align-items:baseline;gap:4px;min-width:0}
+.enrich-lbl{font-family:var(--font-mono);font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-ter);flex-shrink:0}
+.enrich-val{font-family:var(--font-mono);font-size:11px;font-weight:600;color:var(--text-pri);text-align:right;white-space:nowrap}
+.enrich-val.pos{color:var(--green)}.enrich-val.neg{color:var(--red)}.enrich-val.neu{color:var(--amber)}
+.enrich-summary{font-size:10px;color:var(--text-sec);line-height:1.45;font-style:italic}
+.enrich-conf{font-family:var(--font-mono);font-size:8px;letter-spacing:.06em;text-align:right;margin-top:1px}
+.enrich-pending{font-family:var(--font-mono);font-size:9px;color:var(--text-ter);letter-spacing:.06em;padding-top:2px;opacity:.6}
+.lc-btn-pack{color:var(--green) !important;border-color:rgba(62,207,142,.35) !important}
+.lc-btn-pack:hover{background:var(--green-dim) !important}
+
+/* ── Signal layer ─────────────────────────────────────────────────────────── */
+.listing-card[data-deal="arb"]        { border-left:3px solid rgba(62,207,142,.4) }
+.listing-card[data-deal="discount"]   { border-left:3px solid rgba(232,148,58,.4) }
+.listing-card[data-deal="yield"]      { border-left:3px solid rgba(62,207,142,.35) }
+.listing-card[data-deal="distressed"] { border-left:3px solid rgba(224,92,92,.4) }
+.listing-card[data-deal="neutral"]    { border-left:3px solid var(--border) }
+
+.lc-triage{display:flex;justify-content:space-between;align-items:center}
+.deal-label{font-family:var(--font-mono);font-size:9px;font-weight:700;
+  letter-spacing:.1em;padding:3px 8px;border-radius:3px;text-transform:uppercase;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:78%}
+.deal-arb{background:rgba(62,207,142,.08);color:var(--green);border:1px solid rgba(62,207,142,.2)}
+.deal-discount{background:rgba(232,148,58,.08);color:var(--amber);border:1px solid rgba(232,148,58,.22)}
+.deal-yield{background:rgba(62,207,142,.07);color:#2fa870;border:1px solid rgba(62,207,142,.18)}
+.deal-distressed{background:rgba(224,92,92,.08);color:var(--red);border:1px solid rgba(224,92,92,.2)}
+.deal-neutral{color:var(--text-ter);border:1px solid var(--border);background:transparent}
+.deal-score-badge{font-family:var(--font-mono);font-size:8px;color:var(--text-ter);
+  padding:2px 5px;border:1px solid var(--border);border-radius:2px;flex-shrink:0}
+
+.lc-thumb{height:130px;border-radius:4px;overflow:hidden;
+  background:var(--surface-2);margin-bottom:6px;border:1px solid var(--border)}
+.lc-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.lc-anchor{display:flex;align-items:baseline;gap:5px;flex-wrap:wrap;
+  padding:9px 0 6px;border-top:1px solid var(--border);margin-top:4px}
+.an-lbl,.an-rlbl{font-family:var(--font-mono);font-size:8px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-ter)}
+.an-val{font-family:var(--font-mono);font-size:14px;font-weight:700;
+  color:var(--text-pri);letter-spacing:-.01em}
+.an-sep{font-family:var(--font-mono);font-size:9px;color:var(--text-ter)}
+.an-disc{font-family:var(--font-mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:2px}
+.an-disc.pos{color:var(--green);background:rgba(62,207,142,.09)}
+.an-disc.neg{color:var(--red);background:rgba(224,92,92,.08)}
+
+/* Evidence row — the core Moneyball layer */
+.lc-ev{font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text-pri);
+  padding:11px 0 10px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);
+  margin-top:6px;line-height:1.3;letter-spacing:-.01em}
+
+/* Context line — one line, restrained */
+.lc-ctx{font-size:10px;color:var(--text-sec);padding:7px 0 0;line-height:1.4}
+
+/* Conviction */
+.lc-conv{display:flex;align-items:center;justify-content:space-between;padding:8px 0 0}
+.cv-l{display:flex;align-items:center;gap:5px;min-width:0}
+.cv-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.cv-dot.h{background:var(--green)}.cv-dot.m{background:var(--amber)}
+.cv-dot.l{background:var(--text-ter);opacity:.4}
+.cv-lbl{font-family:var(--font-mono);font-size:9px;letter-spacing:.03em;
+  color:var(--text-ter);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cv-type{font-family:var(--font-mono);font-size:9px;color:var(--text-ter);
+  text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+
+/* suppress old enrichment panel */
+.lc-enrich{display:none}
+
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="index.html" class="nav-logo">Legal<span>Smegal</span></a>
+  <div class="nav-div"></div>
+  <span class="nav-greeting">Auction Discovery</span>
+  <div class="nav-right">
+    <a href="legalsmegal-dashboard.html" class="nbtn">Dashboard</a>
+    <a href="legalsmegal-discovery.html" class="nbtn active">Discovery</a>
+    <a href="legalsmegal-upload.html" class="nbtn accent">+ New analysis</a>
+    <div class="nav-div"></div>
+    <button class="nbtn" onclick="signOut()">Sign out</button>
+  </div>
+</nav>
+
+<main class="page">
+
+  <!-- Page header -->
+  <div class="page-head">
+    <div>
+      <div class="page-eyebrow">Live auction feed</div>
+      <div class="page-title">Discovery</div>
+      <div class="page-sub">Auction listings with pricing context · Ranked by signal strength</div>
+    </div>
+    <div class="head-stats">
+      <div class="stat-pill"><strong id="statTotal">—</strong>Total lots</div>
+      <div class="stat-pill"><strong id="statNew">—</strong>Last 7 days</div>
+      <div class="stat-pill" id="statLastScan">
+        <strong>—</strong>Last scan
+      </div>
+    </div>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="filter-bar">
+    <select id="filterSource" onchange="resetAndLoad()">
+      <option value="">All sources</option>
+    </select>
+    <input type="text" id="filterPostcode" placeholder="Postcode prefix…" maxlength="4"
+           oninput="resetAndLoad()">
+    <span class="filter-sep">£</span>
+    <input type="number" id="filterMin" placeholder="Min price" min="0" step="1000"
+           onchange="resetAndLoad()">
+    <input type="number" id="filterMax" placeholder="Max price" min="0" step="1000"
+           onchange="resetAndLoad()">
+    <span class="filter-count" id="filterCount"></span>
+  </div>
+
+  <!-- Listing grid -->
+  <div class="listing-grid" id="listingGrid">
+    <div class="state-msg">
+      <div class="icon">⟳</div>
+      <strong>Loading lots…</strong>
+      <p>Fetching latest auction listings from the discovery feed.</p>
+    </div>
+  </div>
+
+  <!-- Pagination -->
+  <div class="pagination" id="paginationBar" style="display:none">
+    <button class="pg-btn" id="pgPrev" onclick="changePage(-1)" disabled>← Prev</button>
+    <span class="pg-info" id="pgInfo"></span>
+    <button class="pg-btn" id="pgNext" onclick="changePage(1)">Next →</button>
+  </div>
+
+</main>
+
+<!-- Toast notification -->
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+
+const SUPABASE_URL  = 'https://qdgxmwdvmfrcicgpukhs.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkZ3htd2R2bWZyY2ljZ3B1a2hzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk1MTY3MzIsImV4cCI6MjA3NTA5MjczMn0.Xpw9u14JWCcTkhkxgt5YzeLfNMG5rGWo4R_C7zRwz-c';
+const API_BASE      = 'https://legal-smegal-api-final.onrender.com';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
+window._supabase = supabase;
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+const { data: { session } } = await supabase.auth.getSession();
+if (!session) { window.location.href = 'legalsmegal-signin.html'; throw new Error('unauthenticated'); }
+window.signOut = async () => { await supabase.auth.signOut(); window.location.href = 'legalsmegal-signin.html'; };
+
+const token = session.access_token;
+const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+// ── State ────────────────────────────────────────────────────────────────────
+let currentPage = 1;
+const PER_PAGE  = 24;
+let totalPages  = 1;
+let totalCount  = 0;
+
+// ── Formatters ───────────────────────────────────────────────────────────────
+function fmtPrice(v) {
+  if (v == null) return '—';
+  return '£' + Number(v).toLocaleString('en-GB', { maximumFractionDigits: 0 });
+}
+
+function fmtDate(v) {
+  if (!v) return null;
+  try {
+    const d = new Date(v);
+    const yr = d.getFullYear();
+    // Reject clearly invalid dates (year outside 2024-2028)
+    if (yr < 2024 || yr > 2028) return null;
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  } catch { return null; }
+}
+
+function daysUntil(v) {
+  if (!v) return null;
+  try {
+    const dt = new Date(v);
+    const yr = dt.getFullYear();
+    if (yr < 2024 || yr > 2028) return null; // reject invalid dates
+    const ms = dt - new Date();
+    const d  = Math.ceil(ms / 86400000);
+    if (d < 0)  return 'Passed';
+    if (d === 0) return 'Today';
+    if (d === 1) return 'Tomorrow';
+    if (d > 365) return null; // reject dates more than a year out
+    return `${d} days`;
+  } catch { return null; }
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function showToast(msg, type = 'ok') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className   = `toast ${type} show`;
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.className = 'toast'; }, 3200);
+}
+
+// ── Load sources into filter dropdown ────────────────────────────────────────
+async function loadSources() {
+  try {
+    const res  = await fetch(`${API_BASE}/api/auction/sources`, { headers });
+    const data = await res.json();
+    const sel  = document.getElementById('filterSource');
+    (data.sources || []).forEach(s => {
+      const opt = document.createElement('option');
+      opt.value       = s.slug;
+      opt.textContent = s.name;
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    console.warn('Could not load sources:', e);
+  }
+}
+
+// ── Build query string from filter state ─────────────────────────────────────
+function buildQuery() {
+  const params = new URLSearchParams({ page: currentPage, per_page: PER_PAGE });
+  const src    = document.getElementById('filterSource').value;
+  const pc     = document.getElementById('filterPostcode').value.trim().toUpperCase();
+  const minP   = document.getElementById('filterMin').value;
+  const maxP   = document.getElementById('filterMax').value;
+  if (src)  params.set('source', src);
+  if (minP) params.set('min_price', minP);
+  if (maxP) params.set('max_price', maxP);
+  return { params, postcode: pc };
+}
+
+
+// ── Signal engine ────────────────────────────────────────────────────────────
+function _ds(inv) {
+  if (!inv || !inv.inference) return 0;
+  var s = inv.inference.signals || [];
+  var c = Number(inv.inference.confidence || 0);
+  var sc = 40;
+  s.forEach(function(x) {
+    if (x.id === 'yield_above_benchmark')   sc += 18;
+    if (x.id === 'price_below_comps')       sc += 22;
+    if (x.id === 'price_deep_discount_hpi') sc += 14;
+    if (x.id === 'rental_growth_strong')    sc +=  8;
+    if (x.id === 'epc_mees_risk')           sc -= 14;
+    if (x.id === 'thin_comp_market')        sc -=  8;
+    if (x.id === 'yield_below_benchmark')   sc -= 10;
+    if (x.id === 'price_above_comps')       sc -= 12;
+  });
+  sc = 40 + (sc - 40) * (0.3 + c * 0.7);
+  return Math.round(Math.max(0, Math.min(99, sc)));
+}
+
+function _signal(s, inv, guide) {
+  var hy =s.some(function(x){return x.id==='yield_above_benchmark';});
+  var hd =s.some(function(x){return x.id==='price_below_comps';});
+  var hD =s.some(function(x){return x.id==='price_deep_discount_hpi';});
+  var he =s.some(function(x){return x.id==='epc_mees_risk';});
+  var ht =s.some(function(x){return x.id==='thin_comp_market';});
+  var hab=s.some(function(x){return x.id==='price_above_comps';});
+  var hyl=s.some(function(x){return x.id==='yield_below_benchmark';});
+  var hrg=s.some(function(x){return x.id==='rental_growth_strong';});
+  var hie=s.some(function(x){return x.id==='insufficient_evidence';});
+  var compsAvg=inv&&inv.comps&&inv.comps.avg_price?inv.comps.avg_price:null;
+  var guideN=Number(guide)||0;
+  var compsPct=(compsAvg&&guideN>0)?Math.round((1-guideN/compsAvg)*100):null;
+  var ha4=inv&&inv.planning&&inv.planning.article_4;
+  var hca=inv&&inv.planning&&inv.planning.conservation_area;
+  if(hie)                       return{k:'neutral',   l:'LIMITED EVIDENCE AVAILABLE'};
+  if(ha4&&(hd||hD))             return{k:'discount',  l:'POSSIBLE REPOSITIONING ANGLE'};
+  if(hd&&hy&&compsPct>=25)      return{k:'arb',       l:'POSSIBLE VALUE GAP'};
+  if(hd&&hy)                    return{k:'arb',       l:'COMPRESSED AUCTION PRICING'};
+  if(hD&&hy)                    return{k:'arb',       l:'PRICING BELOW REGIONAL AVERAGE'};
+  if(hd&&compsPct>=25)          return{k:'discount',  l:'PRICING BELOW LOCAL EVIDENCE'};
+  if(hd)                        return{k:'discount',  l:'COMPRESSED AUCTION PRICING'};
+  if(hD)                        return{k:'discount',  l:'PRICING BELOW REGIONAL AVERAGE'};
+  if(hy)                        return{k:'yield',     l:'RENTAL YIELD ABOVE AREA'};
+  if(he)                        return{k:'distressed',l:'LETTABILITY RESTRICTED'};
+  if(hca)                       return{k:'neutral',   l:'PLANNING CONSTRAINTS PRESENT'};
+  if(hyl)                       return{k:'neutral',   l:'YIELD BELOW AREA AVERAGE'};
+  if(ht)                        return{k:'neutral',   l:'LIMITED LOCAL EVIDENCE'};
+  return                               {k:'neutral',   l:'MARKET PRICED'};
+}
+
+
+function _context(s, inv) {
+  var hy  = s.some(function(x){ return x.id === 'yield_above_benchmark'; });
+  var hd  = s.some(function(x){ return x.id === 'price_below_comps'; });
+  var hD  = s.some(function(x){ return x.id === 'price_deep_discount_hpi'; });
+  var he  = s.some(function(x){ return x.id === 'epc_mees_risk'; });
+  var ht  = s.some(function(x){ return x.id === 'thin_comp_market'; });
+  var hab = s.some(function(x){ return x.id === 'price_above_comps'; });
+  var hyl = s.some(function(x){ return x.id === 'yield_below_benchmark'; });
+  var hrg = s.some(function(x){ return x.id === 'rental_growth_strong'; });
+  var hie = s.some(function(x){ return x.id === 'insufficient_evidence'; });
+  var ha4 = inv && inv.planning && inv.planning.article_4;
+  var hca = inv && inv.planning && inv.planning.conservation_area;
+  if (ha4 && (hd || hD)) return 'Article 4 direction present. HMO conversion likely restricted.';
+  if ((hd || hD) && hy)  return 'Low guide may reflect auction strategy. Legal pack review required.';
+  if (hd)                return 'Low guide pricing is common auction technique. Verify condition and title.';
+  if (hD && hca)         return 'Conservation area applies. Alteration scope may be limited.';
+  if (hD)                return 'Regional evidence stronger than guide. Possible auction pricing strategy.';
+  if (hy && hrg)         return 'Local rental growth supports income case. Regional benchmark applied.';
+  if (hy)                return 'Yield estimate uses regional rental benchmark. Verify locally.';
+  if (he)                return 'EPC F/G \u2014 cannot be let without upgrade. Factor cost into offer.';
+  if (hyl)               return 'Yield appears uncompetitive at current guide relative to area.';
+  if (ht)                return 'Transaction density low. Local agent verification recommended.';
+  if (hie)               return 'Comparable evidence limited in this postcode.';
+  if (hca)               return 'Conservation area designation. Planning constraints likely.';
+  if (hab)               return 'Competitive bidding likely. Guide aligned with market evidence.';
+  return                        'No material pricing divergence detected against available evidence.';
+}
+
+function _anchor(inv, guide) {
+  var g=Number(guide)||0; if(!g||!inv) return null;
+  var c=inv.comps&&inv.comps.avg_price?inv.comps:null;
+  var h=inv.hpi&&inv.hpi.regional_avg_price?inv.hpi:null;
+  var y=inv.yield_estimate&&inv.yield_estimate.gross_yield_pct!=null?inv.yield_estimate:null;
+  var r=inv.rental&&inv.rental.avg_rent_gbp?inv.rental:null;
+  if(c){var pct=Math.round((1-g/c.avg_price)*100);
+    return{left:'\u00a3'+g.toLocaleString('en-GB'),right:'\u00a3'+Number(c.avg_price).toLocaleString('en-GB')+(c.count?'\u00a0('+c.count+')':''),lbl:'Guide',rlbl:'Comps avg',disc:pct};}
+  if(h){var hp=Math.round((1-g/h.regional_avg_price)*100);
+    return{left:'\u00a3'+g.toLocaleString('en-GB'),right:'\u00a3'+Number(h.regional_avg_price).toLocaleString('en-GB'),lbl:'Guide',rlbl:'Area avg',disc:hp};}
+  if(y){var bm=(h&&r)?Math.round((r.avg_rent_gbp*12/h.regional_avg_price)*1000)/10:null;
+    return{left:y.gross_yield_pct.toFixed(1)+'%',right:bm?bm.toFixed(1)+'%':null,lbl:'Est. yield',rlbl:bm?'Benchmark':null,disc:null};}
+  return null;
+}
+
+function _evstrip(inv, guide, auctionDate, sigs) {
+  // Evidence row. Guide + comps suppressed when pricing anchor is present.
+  // EPC suppressed when EPC signal flag carries the context.
+  var parts = [];
+  var g = Number(guide);
+  var hasAnch = !!_anchor(inv, guide);
+  var hasEPCSig = (sigs||[]).some(function(x){return x.id==='epc_mees_risk';});
+
+  // Guide: once per card — anchor row takes priority
+  if (!hasAnch && g > 0)
+    parts.push('Guide \u00a3' + g.toLocaleString('en-GB'));
+
+  // Comps/area avg: shown in strip only when anchor absent
+  if (!hasAnch) {
+    if (inv.comps && inv.comps.avg_price) {
+      parts.push('Comps \u00a3' + Number(inv.comps.avg_price).toLocaleString('en-GB')
+        + (inv.comps.count ? ' (' + inv.comps.count + ')' : ''));
+    } else if (inv.hpi && inv.hpi.regional_avg_price) {
+      parts.push('Area avg \u00a3' + Number(inv.hpi.regional_avg_price).toLocaleString('en-GB'));
+    }
+  }
+
+  if (inv.yield_estimate && inv.yield_estimate.gross_yield_pct != null)
+    parts.push('Yield ' + inv.yield_estimate.gross_yield_pct.toFixed(1) + '%');
+
+  // EPC: suppressed when signal flag carries it (flag has more context)
+  if (!hasEPCSig && inv.epc && inv.epc.rating)
+    parts.push('EPC ' + inv.epc.rating.toUpperCase());
+
+  if (auctionDate) {
+    var d = Math.ceil((new Date(auctionDate) - new Date()) / 86400000);
+    if (d === 0) parts.push('Today');
+    else if (d === 1) parts.push('1 day');
+    else if (d > 0 && d <= 30) parts.push(d + ' days');
+  }
+  return parts.join(' \u00b7 ');
+}
+
+function _conv(conf, band) {
+  // Source count suppressed — conviction dot encodes confidence visually.
+  if (band === 'high'   || conf >= 0.70) return {d:'h', l:'High confidence'};
+  if (band === 'medium' || conf >= 0.40) return {d:'m', l:'Medium confidence'};
+  return {d:'l', l:'Low confidence'};
+}
+
+// ── Render listing card ───────────────────────────────────────────────────────
+// ── Enrichment panel renderer ─────────────────────────────────────────────────
+// Degrades gracefully: returns '' when investment_json is absent or pending.
+function _enrichPanel(l) {
+  // Wrapped in try/catch — a rendering error must never crash a card.
+  try {
+    var st  = l.enrichment_status;
+    var inv = l.investment_json;
+
+    // No enrichment data yet — show pending indicator only when status is
+    // explicitly 'pending'. If the status field is absent from the API
+    // response (app.py not yet deployed), silently return nothing.
+    if (!inv) {
+      return (st === 'pending')
+        ? '<div class="lc-enrich"><div class="enrich-pending">⟳ ENRICHING</div></div>'
+        : '';
+    }
+
+    // Enrichment ran but inference is missing (step 7 failed) — still show
+    // whatever partial data is available rather than hiding everything.
+    var inf  = (inv.inference      && typeof inv.inference  === 'object') ? inv.inference  : {};
+    var yld  = (inv.yield_estimate && typeof inv.yield_estimate === 'object') ? inv.yield_estimate : {};
+    var comp = (inv.comps          && typeof inv.comps      === 'object') ? inv.comps      : {};
+    var epc  = (inv.epc            && typeof inv.epc        === 'object') ? inv.epc        : {};
+    var hpi  = (inv.hpi            && typeof inv.hpi        === 'object') ? inv.hpi        : {};
+
+    var rows = '';
+
+    if (yld.gross_yield_pct != null && isFinite(yld.gross_yield_pct)) {
+      rows += '<div class="enrich-row"><span class="enrich-lbl">Est. yield</span>'
+            + '<span class="enrich-val pos">' + Number(yld.gross_yield_pct).toFixed(1) + '%</span></div>';
+    }
+    if (comp.avg_price && comp.count) {
+      rows += '<div class="enrich-row"><span class="enrich-lbl">Comps avg</span>'
+            + '<span class="enrich-val">£' + Number(comp.avg_price).toLocaleString('en-GB')
+            + ' <small style="color:var(--text-ter);font-size:8px">×' + comp.count + '</small></span></div>';
+    }
+    if (epc.rating && typeof epc.rating === 'string') {
+      var ec = (['F','G'].indexOf(epc.rating.toUpperCase()) >= 0) ? 'neg'
+             : (['D','E'].indexOf(epc.rating.toUpperCase()) >= 0) ? 'neu' : 'pos';
+      rows += '<div class="enrich-row"><span class="enrich-lbl">EPC</span>'
+            + '<span class="enrich-val ' + ec + '">' + epc.rating.toUpperCase()
+            + (epc.rooms ? ' <small style="color:var(--text-ter);font-size:8px">' + epc.rooms + 'rm</small>' : '')
+            + '</span></div>';
+    }
+    if (hpi.regional_avg_price && isFinite(hpi.regional_avg_price)) {
+      rows += '<div class="enrich-row"><span class="enrich-lbl">Area avg</span>'
+            + '<span class="enrich-val">£' + Number(hpi.regional_avg_price).toLocaleString('en-GB') + '</span></div>';
+    }
+
+    // If no signals and no summary, show nothing rather than an empty panel
+    if (!rows && !inf.summary) return '';
+
+    var confColor = inf.confidence_band === 'high'   ? 'var(--green)'
+                  : inf.confidence_band === 'medium' ? 'var(--amber)'
+                  : 'var(--text-ter)';
+
+    var html = '<div class="lc-enrich">';
+    if (rows) html += '<div class="lc-enrich-signals">' + rows + '</div>';
+    if (inf.summary) html += '<div class="enrich-summary">' + String(inf.summary) + '</div>';
+    if (inf.confidence_band) {
+      html += '<div class="enrich-conf" style="color:' + confColor + '">● '
+            + String(inf.confidence_band).toUpperCase() + ' CONFIDENCE</div>';
+    }
+    html += '</div>';
+    return html;
+
+  } catch (err) {
+    // Never propagate — a broken enrichment payload must not crash the card.
+    return '';
+  }
+}
+
+function renderCard(l) {
+  const isConverted = l.status === 'converted';
+  const inv  = l.investment_json || {};
+  const inf  = inv.inference || {};
+  const sigs = inf.signals   || [];
+  const conf = Number(inf.confidence || 0);
+  const band = inf.confidence_band || '';
+  const hasEnr = !!(inf.confidence_band);
+
+  const score  = _ds(inv);
+  const arch   = _signal(sigs, inv, l.guide_price);
+  const ctx    = hasEnr ? _context(sigs, inv) : '';
+  const ev     = hasEnr ? _evstrip(inv, l.guide_price, l.auction_date, sigs) : '';
+  const cv     = _conv(conf, band);
+
+  return `
+    <div class="listing-card${isConverted ? ' converted' : ''}" id="card-${l.id}"
+         data-deal="${arch.k}" data-score="${score}">
+
+      <div class="lc-triage">
+        <span class="deal-label deal-${arch.k}">${arch.l}</span>
+        <span class="deal-score-badge">${hasEnr
+          ? (sigs.length + (sigs.length === 1 ? ' signal' : ' signals'))
+          : 'pending'}</span>
+      </div>
+
+      <div class="lc-source" style="margin-top:4px">
+        <span class="lc-house">${l.auction_house || 'Auction'}</span>
+        ${l.lot_number ? `<span class="lc-lot">Lot ${l.lot_number}</span>` : ''}
+      </div>
+
+      ${l.image_url ? `<div class="lc-thumb"><img src="${l.image_url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentNode.remove()"></div>` : ''}
+
+      <a href="${l.source_url}" target="_blank" rel="noopener" class="lc-address-link">
+        <div class="lc-address">${l.address || 'Address not available'}</div>
+        ${l.postcode ? `<div class="lc-postcode">${l.postcode}</div>` : ''}
+      </a>
+
+      ${hasEnr?(function(){var a=_anchor(inv,l.guide_price);return a?`<div class="lc-anchor"><span class="an-lbl">${a.lbl}</span> <span class="an-val">${a.left}</span>${a.right?` <span class="an-sep">vs</span> <span class="an-rlbl">${a.rlbl}</span> <span class="an-val">${a.right}</span>`:''}${a.disc&&Math.abs(a.disc)>=5?` <span class="an-disc ${a.disc>0?'pos':'neg'}">${a.disc>0?a.disc+'% below':Math.abs(a.disc)+'% above'}</span>`:''}</div>`:'';})():''}
+      ${ev ? `<div class="lc-ev">${ev}</div>` : ''}
+
+      ${ctx ? `<div class="lc-ctx">${ctx}</div>` : ''}
+
+      <div class="lc-conv">
+        <div class="cv-l">
+          <div class="cv-dot ${cv.d}"></div>
+        </div>
+        ${l.property_type ? `<span class="cv-type">${l.property_type}</span>` : ''}
+      </div>
+
+      <div class="lc-actions" style="margin-top:6px">
+        <a href="${l.source_url}" target="_blank" rel="noopener" class="lc-btn-link">View listing ↗</a>
+        ${l.postcode ? `<a href="legalsmegal-area.html?postcode=${encodeURIComponent(l.postcode)}&guide=${l.guide_price||""}&comps=${inv.comps&&inv.comps.avg_price?inv.comps.avg_price:inv.hpi&&inv.hpi.regional_avg_price?inv.hpi.regional_avg_price:""}&pct=${(function(){var a=_anchor(inv,l.guide_price);return a&&a.disc?a.disc:0;})()}" class="lc-btn-link lc-btn-area">View area →</a>` : ''}
+        ${l.legal_pack_url
+          ? `<a href="${l.legal_pack_url}" target="_blank" rel="noopener" class="lc-btn-link lc-btn-pack">Legal pack ↗</a>`
+          : ''}
+      </div>
+
+      <div class="lc-converting" id="converting-${l.id}"></div>
+    </div>`;
+}
+
+// ── Load listings ─────────────────────────────────────────────────────────────
+async function loadListings() {
+  const grid  = document.getElementById('listingGrid');
+  const pgBar = document.getElementById('paginationBar');
+  grid.innerHTML = '<div class="state-msg"><div class="icon">⟳</div><strong>Loading lots…</strong></div>';
+  pgBar.style.display = 'none';
+
+  try {
+    const { params, postcode } = buildQuery();
+    const res  = await fetch(`${API_BASE}/api/auction/listings?${params}`, { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    let listings = data.listings || [];
+
+    // Client-side postcode prefix filter (not on the API yet — simple enough)
+    if (postcode) {
+      listings = listings.filter(l => l.postcode && l.postcode.toUpperCase().startsWith(postcode));
+    }
+
+    totalCount = data.total || listings.length;
+    totalPages = data.pages || 1;
+
+    document.getElementById('filterCount').textContent =
+      `${totalCount.toLocaleString('en-GB')} lots`;
+
+    if (listings.length === 0) {
+      grid.innerHTML = `
+        <div class="state-msg" style="grid-column:1/-1">
+          <div class="icon">🔍</div>
+          <strong>No listings found</strong>
+          <p>Try adjusting your filters, or check back after the next daily scan.</p>
+        </div>`;
+      return;
+    }
+
+    listings.sort((a,b) => _ds(b.investment_json||{}) - _ds(a.investment_json||{}));
+    grid.innerHTML = listings.map(renderCard).join('');
+
+    // Pagination
+    document.getElementById('pgInfo').textContent =
+      `Page ${currentPage} of ${totalPages}`;
+    document.getElementById('pgPrev').disabled = currentPage <= 1;
+    document.getElementById('pgNext').disabled = currentPage >= totalPages;
+    pgBar.style.display = totalPages > 1 ? 'flex' : 'none';
+
+    // Header stats (only on page 1, filter-unaffected)
+    if (currentPage === 1 && !document.getElementById('filterSource').value) {
+      document.getElementById('statTotal').textContent =
+        totalCount.toLocaleString('en-GB');
+    }
+
+  } catch (e) {
+    console.error('loadListings error:', e);
+    // 401 = session expired — redirect to sign-in
+    if (e.message && e.message.includes('401')) {
+      await supabase.auth.signOut();
+      window.location.href = 'legalsmegal-signin.html';
+      return;
+    }
+    grid.innerHTML = `
+      <div class="state-msg" style="grid-column:1/-1">
+        <div class="icon">⚠</div>
+        <strong>Could not load listings</strong>
+        <p>${e.message || 'Check your connection and try again.'}</p>
+      </div>`;
+  }
+}
+
+// ── Convert listing to deal ───────────────────────────────────────────────────
+// ── Pagination ────────────────────────────────────────────────────────────────
+window.changePage = function(delta) {
+  const next = currentPage + delta;
+  if (next < 1 || next > totalPages) return;
+  currentPage = next;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  loadListings();
+};
+
+window.resetAndLoad = function() {
+  currentPage = 1;
+  loadListings();
+};
+
+// ── Load scan stats ───────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    // Last scan time from sources list
+    const srcRes  = await fetch(`${API_BASE}/api/auction/sources`, { headers });
+    const srcData = await srcRes.json();
+    const sources = srcData.sources || [];
+    const scanned = sources
+      .map(s => s.last_scanned_at)
+      .filter(Boolean)
+      .sort()
+      .reverse()[0];
+    if (scanned) {
+      const el = document.getElementById('statLastScan');
+      el.querySelector('strong').textContent =
+        new Date(scanned).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+    }
+  } catch (e) {
+    console.warn('Stats load failed:', e);
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+await loadSources();
+await Promise.all([loadListings(), loadStats()]);
+</script>
+</body>
+</html>
