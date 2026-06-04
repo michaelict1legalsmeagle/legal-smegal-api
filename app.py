@@ -6013,7 +6013,7 @@ def update_deal(deal_id: str):
         "deal_type", "auction_date", "status", "bid_ceiling", "hammer_price", "outcome",
         "completion_period", "completion_deadline", "completion_actions",
         "summary_json", "analysis_json", "area_json", "financials_json",
-        "deal_score", "address",
+        "deal_score", "address", "product_type",
     }
     updates = {k: v for k, v in data.items() if k in allowed}
     if not updates:
