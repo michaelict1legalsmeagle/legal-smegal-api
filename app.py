@@ -220,9 +220,10 @@ else:
     print("🔴 Supabase env vars not set. Supabase features are DISABLED.")
 
 # ── Hetzner data connection ────────────────────────────────────────
-DATA_DATABASE_URL = os.environ.get("DATA_DATABASE_URL")
-if not DATA_DATABASE_URL:
-    raise RuntimeError("DATA_DATABASE_URL is required")
+DATA_DATABASE_URL = os.environ.get(
+    "DATA_DATABASE_URL",
+    "postgresql://legalsmegal:Thesixkids68@159.69.27.104:5432/legalsmegal_data"
+)
 
 def get_data_conn():
     """Get a psycopg v3 connection to Hetzner data database."""
@@ -5673,16 +5674,9 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     print(f"[LLM] stop_reason={stop_reason} tokens_in={usage_in} tokens_out={usage_out} content_len={len(content)}", flush=True)
 
     if stop_reason == "max_tokens":
-        print(f"[LLM] WARNING: TRUNCATED at max_tokens=16000. Last 300 chars: {content[-300:]!r}", flush=True)
+        print(f"[LLM] WARNING: TRUNCATED at max_tokens — content_len={len(content)}", flush=True)
 
-    # Print the FULL raw LLM response before any processing.
-    # This is the ground truth — if flags are missing, this tells us why.
-    print(f"[LLM] RAW RESPONSE START >>>", flush=True)
-    print(content[:3000], flush=True)  # first 3000 chars
-    if len(content) > 3000:
-        print(f"[LLM] ... ({len(content) - 3000} more chars) ...", flush=True)
-        print(content[-500:], flush=True)  # last 500 chars
-    print(f"[LLM] RAW RESPONSE END <<<", flush=True)
+    # Raw response block removed — content logged at character-count level only above
 
     # Try direct parse first
     try:
@@ -6373,8 +6367,7 @@ def summarise_deal(deal_id: str):
         # Print to stdout so it's visible in Render logs regardless of log level
         print(
             f"[summarise] PROMPT SIZE: {len(truncated)} chars | "
-            f"{docs_with_text}/{len(documents)} docs have text | "
-            f"first_200: {truncated[:200]!r}",
+            f"{docs_with_text}/{len(documents)} docs have text",
             flush=True
         )
 
