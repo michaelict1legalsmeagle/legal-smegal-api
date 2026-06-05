@@ -222,7 +222,7 @@ else:
 # ── Hetzner data connection ────────────────────────────────────────
 DATA_DATABASE_URL = os.environ.get(
     "DATA_DATABASE_URL",
-    "postgresql://legalsmegal:Thesixkids68@159.69.27.104:5432/legalsmegal_data"
+    "postgresql://legalsmegal:hCPNA3HHNaaq@159.69.27.104:5432/legalsmegal_data"
 )
 
 def get_data_conn():
