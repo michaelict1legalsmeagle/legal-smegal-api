@@ -133,6 +133,7 @@ SUPABASE_KEY_FALLBACK = (os.getenv("SUPABASE_KEY") or "").strip()
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
+_CACHE_MAX = 500  # max entries; oldest evicted on insert when exceeded
 CACHE_TTL_SECONDS = int(os.getenv("MARKET_INSIGHTS_CACHE_TTL_SECONDS", "21600"))
 
 APP_CACHE_BUSTER = (os.getenv("APP_CACHE_BUSTER", "") or "").strip()
@@ -228,6 +229,7 @@ NOMIS_TS054_CATS = os.getenv("NOMIS_TS054_CATS", "").strip()
 POSTCODES_IO_TIMEOUT = int(os.getenv("POSTCODES_IO_TIMEOUT", "10"))
 POSTCODES_IO_CACHE_TTL_SECONDS = int(os.getenv("POSTCODES_IO_CACHE_TTL_SECONDS", "2592000"))
 _GEO_CACHE: Dict[str, Dict[str, Any]] = {}
+_GEO_CACHE_MAX = 2000  # postcodes are small; higher limit is fine
 
 GEOCODE_CACHE_TABLE = os.getenv("GEOCODE_CACHE_TABLE", "geocode_cache").strip()
 GEOCODE_BATCH_LIMIT = int(os.getenv("GEOCODE_BATCH_LIMIT", "10"))
@@ -433,6 +435,10 @@ def cache_get(key: str) -> Optional[Dict[str, Any]]:
 
 
 def cache_set(key: str, value: Dict[str, Any]) -> None:
+    if len(_CACHE) >= _CACHE_MAX:
+        # Evict oldest entry by _cached_at
+        oldest = min(_CACHE, key=lambda k: _CACHE[k].get("_cached_at", 0))
+        _CACHE.pop(oldest, None)
     _CACHE[key] = {"_cached_at": time.time(), "value": value}
 
 
@@ -447,6 +453,9 @@ def geo_cache_get(key: str) -> Optional[Dict[str, Any]]:
 
 
 def geo_cache_set(key: str, value: Dict[str, Any]) -> None:
+    if len(_GEO_CACHE) >= _GEO_CACHE_MAX:
+        oldest = min(_GEO_CACHE, key=lambda k: _GEO_CACHE[k].get("_cached_at", 0))
+        _GEO_CACHE.pop(oldest, None)
     _GEO_CACHE[key] = {"_cached_at": time.time(), "value": value}
 
 
