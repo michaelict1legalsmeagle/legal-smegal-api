@@ -108,6 +108,26 @@ GOOGLE_MAPS_API_KEY = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
 ENVIRONMENT = (os.getenv("ENVIRONMENT") or "development").strip().lower()
 DEV_BYPASS_LIMITS = ENVIRONMENT != "production"  # Set ENVIRONMENT=production in Render to enforce limits
+
+# ── Internal diagnostic endpoint guard ────────────────────────────────────────
+# Set INTERNAL_API_SECRET on Render to protect /llm/json, /market-insights,
+# /api/test-llm, /api/test-hpi, /api/diag/runtime-health.
+# If not set, those endpoints return 404 (fail closed).
+INTERNAL_API_SECRET = (os.getenv("INTERNAL_API_SECRET") or "").strip()
+
+def _require_internal(f):
+    """Decorator: require X-Internal-Key header matching INTERNAL_API_SECRET.
+    If INTERNAL_API_SECRET is not configured, endpoint returns 404 unconditionally.
+    """
+    from functools import wraps as _wraps
+    @_wraps(f)
+    def _wrapped(*args, **kwargs):
+        if not INTERNAL_API_SECRET:
+            return jsonify({"error": "not found"}), 404
+        if request.headers.get("X-Internal-Key", "") != INTERNAL_API_SECRET:
+            return jsonify({"error": "not found"}), 404
+        return f(*args, **kwargs)
+    return _wrapped
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 SUPABASE_KEY_FALLBACK = (os.getenv("SUPABASE_KEY") or "").strip()
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
@@ -5265,6 +5285,7 @@ def adapter_nomis():
 
 @app.route("/market-insights", methods=["POST"])
 @app.route("/market_insights", methods=["POST"])  # alias for any legacy/underscore callers
+@_require_internal
 def market_insights():
     data = request.get_json(silent=True) or {}
     postcode = normalize_postcode(data.get("postcode", "") or "")
@@ -5477,6 +5498,7 @@ def qa_clarify():
 
 
 @app.route("/llm/json", methods=["POST"])
+@_require_internal
 def llm_json_route():
     """
     Dual-mode endpoint:
@@ -7314,6 +7336,7 @@ def get_dashboard():
 
 # ── HPI DATA DIAGNOSTIC ENDPOINT ─────────────────────────────
 @app.route("/api/test-hpi", methods=["GET", "OPTIONS"])
+@_require_internal
 def test_hpi_endpoint():
     """
     GET /api/test-hpi
@@ -8627,6 +8650,7 @@ FLAG EXTRACTION RULES — YOU MUST FOLLOW ALL OF THEM:
     return response
 
 @app.route("/api/test-llm", methods=["GET"])
+@_require_internal
 def test_llm():
     """Diagnostic endpoint — tests Anthropic client directly. No auth required.
     Returns the exact error if something is wrong with the key or model."""
@@ -8736,6 +8760,7 @@ def auction_triangulation():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @app.route("/api/diag/runtime-health", methods=["GET", "OPTIONS"])
+@_require_internal
 def diag_runtime_health():
     """
     Forensic runtime health check. NO AUTH — read-only, no PII, no deal data.
