@@ -5660,7 +5660,7 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     client = _get_anthropic_client()
     message = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=8192,
+        max_tokens=20000,
         temperature=float(temperature),
         system=system,
         messages=[{"role": "user", "content": prompt}],
@@ -6395,21 +6395,20 @@ def summarise_deal(deal_id: str):
                 "docs_with_text": docs_with_text,
             }), 400
 
-        COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be thorough but concise — return at most 20 flags, prioritise critical and missing items.
+        COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be aggressive and thorough — an investor's money is at stake.
 
-Return ONLY valid JSON. No prose, no markdown fences. Maximum 20 flags total. Keep all string fields SHORT to stay within token limits.
-Exactly this structure (flags MUST come first):
+Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (flags MUST come first):
 {
   "flags": [
     {
       "severity": "critical|high|missing|note",
-      "title": "risk title max 8 words",
-      "summation": "max 15 words: buyer impact",
-      "evidence": "verbatim quote max 20 words",
-      "implication": "max 12 words",
-      "action": "max 10 words",
-      "source_document": "filename",
-      "source_clause": "clause or null",
+      "title": "specific risk title — max 10 words",
+      "summation": "one sentence: what this means for the investor",
+      "evidence": "verbatim quote from document — max 30 words",
+      "implication": "financial or legal impact — max 20 words",
+      "action": "what investor must do — max 15 words",
+      "source_document": "document filename",
+      "source_clause": "clause number or null",
       "source_page": null,
       "legal_risk_weight": 7
     }
@@ -8477,21 +8476,20 @@ def summarise_stream(deal_id: str):
                 # ── Single LLM call — extract + classify + score in one pass ──
                 yield ev("progress", msg="Reading clauses and identifying risks…", step=4, total=4)
 
-                COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be thorough but concise — return at most 20 flags, prioritise critical and missing items.
+                COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be aggressive and thorough — an investor's money is at stake.
 
-Return ONLY valid JSON. No prose, no markdown fences. Maximum 20 flags total. Keep all string fields SHORT to stay within token limits.
-Exactly this structure (flags MUST come first):
+Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (flags MUST come first):
 {
   "flags": [
     {
       "severity": "critical|high|missing|note",
-      "title": "risk title max 8 words",
-      "summation": "max 15 words: buyer impact",
-      "evidence": "verbatim quote max 20 words",
-      "implication": "max 12 words",
-      "action": "max 10 words",
-      "source_document": "filename",
-      "source_clause": "clause or null",
+      "title": "specific risk title — max 10 words",
+      "summation": "one sentence: what this means for the investor",
+      "evidence": "verbatim quote from document — max 30 words",
+      "implication": "financial or legal impact — max 20 words",
+      "action": "what investor must do — max 15 words",
+      "source_document": "document filename",
+      "source_clause": "clause number or null",
       "source_page": null,
       "legal_risk_weight": 7
     }
@@ -8676,6 +8674,458 @@ def client_config():
     return jsonify({
         "mapbox_token": os.environ.get("MAPBOX_PUBLIC_TOKEN")
     }), 200
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ONE-OFF REPORT FLOW — guest (no account) endpoints
+# Completely separate from the authenticated platform flow.
+# POST /api/guest/create-deal  — no auth, creates deal under GUEST_USER_ID
+# POST /api/guest/upload       — no auth, uploads doc to guest deal
+# POST /api/guest/checkout     — no auth, creates Stripe checkout session
+# POST /api/webhooks/stripe    — no auth, receives Stripe events
+# GET  /api/guest/report       — no auth, validates report token, returns deal
+# Existing /api/deals, /api/documents/upload, /api/deals/<id>/summarise
+# are NOT modified.
+# ════════════════════════════════════════════════════════════════════════════
+
+GUEST_USER_ID    = (os.getenv("GUEST_USER_ID") or "").strip()
+STRIPE_SECRET    = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+STRIPE_WH_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+RESEND_API_KEY   = (os.getenv("RESEND_API_KEY") or "").strip()
+RESEND_FROM      = (os.getenv("RESEND_FROM_EMAIL") or "reports@legalsmegal.com").strip()
+REPORT_JWT_SECRET = (os.getenv("REPORT_JWT_SECRET") or "").strip()
+REPORT_PRICE_GBP  = int(os.getenv("REPORT_PRICE_GBP", "29"))
+FRONTEND_BASE     = (os.getenv("FRONTEND_BASE_URL") or "https://legalsmegal-frontend.onrender.com").strip()
+
+
+def _sign_report_token(deal_id: str) -> str:
+    """Sign a 72-hour report access token."""
+    import jwt as _jwt, time as _time
+    secret = REPORT_JWT_SECRET or "dev-secret-replace-in-prod"
+    return _jwt.encode(
+        {"deal_id": deal_id, "exp": int(_time.time()) + 72 * 3600},
+        secret, algorithm="HS256"
+    )
+
+
+def _verify_report_token(token: str) -> str | None:
+    """Return deal_id if token valid, None otherwise."""
+    import jwt as _jwt
+    secret = REPORT_JWT_SECRET or "dev-secret-replace-in-prod"
+    try:
+        payload = _jwt.decode(token, secret, algorithms=["HS256"])
+        return payload.get("deal_id")
+    except Exception:
+        return None
+
+
+def _send_report_email(to_email: str, deal_name: str, report_url: str) -> bool:
+    """Send report delivery email via Resend. Returns True on success."""
+    if not RESEND_API_KEY:
+        app.logger.warning("[resend] RESEND_API_KEY not set — skipping email")
+        return False
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={
+                "from": RESEND_FROM,
+                "to": [to_email],
+                "subject": f"Your LegalSmegal Report — {deal_name}",
+                "html": f"""
+<div style="font-family:'IBM Plex Sans',sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;background:#0d1219;color:#e8edf2">
+  <div style="font-family:'IBM Plex Mono',monospace;font-size:18px;font-weight:600;margin-bottom:4px">Legal<span style="color:#c8a84b">Smegal</span></div>
+  <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#3d5068;letter-spacing:.1em;text-transform:uppercase;margin-bottom:28px">Auction Legal Pack Intelligence</div>
+  <div style="font-size:14px;color:#e8edf2;margin-bottom:8px;font-weight:600">Your report is ready</div>
+  <div style="font-size:13px;color:#7a8fa3;margin-bottom:24px;line-height:1.6">{deal_name}</div>
+  <a href="{report_url}" style="display:inline-block;padding:12px 24px;background:#c8a84b;color:#080c10;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;text-decoration:none;border-radius:4px">View Report →</a>
+  <div style="margin-top:24px;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#3d5068;line-height:1.7">
+    Link valid for 72 hours.<br>
+    Not legal advice. LegalSmegal Technologies Ltd.
+  </div>
+</div>""",
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            app.logger.info(f"[resend] Email sent to {to_email}")
+            return True
+        app.logger.warning(f"[resend] HTTP {resp.status_code}: {resp.text[:200]}")
+        return False
+    except Exception as e:
+        app.logger.warning(f"[resend] Exception: {e}")
+        return False
+
+
+def _trigger_guest_summarise(deal_id: str, user_id: str, guest_email: str, deal_name: str) -> None:
+    """Background thread: run analysis then email the report link."""
+    import threading
+    def _worker():
+        try:
+            app.logger.info(f"[guest-summarise] Starting for deal {deal_id}")
+            # Call the existing summarise logic directly via internal HTTP
+            # to avoid duplicating the LLM pipeline
+            import time as _t
+            resp = requests.post(
+                f"{os.getenv('API_INTERNAL_BASE', 'http://localhost:10000')}/api/deals/{deal_id}/summarise",
+                headers={
+                    "Authorization": f"Bearer {_build_service_jwt(user_id)}",
+                    "Content-Type": "application/json",
+                },
+                json={},
+                timeout=300,
+            )
+            app.logger.info(f"[guest-summarise] Summarise returned {resp.status_code}")
+
+            # Poll until done (max 5 min)
+            for _ in range(60):
+                _t.sleep(5)
+                row = supabase.table("deals").select("status,summary_json,deal_name,address").eq("id", deal_id).single().execute()
+                d = row.data or {}
+                if d.get("status") in ("analysed", "error"):
+                    break
+
+            if d.get("status") == "analysed":
+                token = _sign_report_token(deal_id)
+                name  = d.get("address") or d.get("deal_name") or deal_name
+                url   = f"{FRONTEND_BASE}/legalsmegal-report.html?deal_id={deal_id}&token={token}"
+                _send_report_email(guest_email, name, url)
+            else:
+                app.logger.warning(f"[guest-summarise] Analysis did not complete for {deal_id}")
+        except Exception as e:
+            app.logger.error(f"[guest-summarise] Worker failed: {e}")
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
+def _build_service_jwt(user_id: str) -> str:
+    """Build a short-lived JWT signed with SUPABASE_JWT_SECRET for internal calls."""
+    import jwt as _jwt, time as _t
+    secret = os.getenv("SUPABASE_JWT_SECRET", "")
+    if not secret:
+        return ""
+    return _jwt.encode(
+        {"sub": user_id, "role": "authenticated",
+         "iat": int(_t.time()), "exp": int(_t.time()) + 600},
+        secret, algorithm="HS256"
+    )
+
+
+# ── GUEST: CREATE DEAL ────────────────────────────────────────────────────
+@app.route("/api/guest/create-deal", methods=["POST", "OPTIONS"])
+def guest_create_deal():
+    """No-auth endpoint. Creates a deal under GUEST_USER_ID.
+    Body: { email }
+    Returns: { deal_id }"""
+    if request.method == "OPTIONS":
+        return "", 204
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    if not GUEST_USER_ID:
+        return jsonify({"error": "One-off report flow not configured (GUEST_USER_ID missing)"}), 503
+
+    data  = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return jsonify({"error": "Valid email required"}), 400
+
+    from datetime import datetime as _dt
+    deal_name = f"Report — {_dt.now().strftime('%d %b %Y %H:%M')}"
+    try:
+        result = supabase.table("deals").insert({
+            "user_id":      GUEST_USER_ID,
+            "deal_name":    deal_name,
+            "title":        deal_name,
+            "status":       "pending_payment",
+            "product_type": "report",
+            "user_notes":   email,   # store email in user_notes for webhook retrieval
+        }).execute()
+        deal_id = result.data[0]["id"]
+        app.logger.info(f"[guest] Deal created: {deal_id} for {email}")
+        return jsonify({"ok": True, "deal_id": deal_id}), 201
+    except Exception as e:
+        app.logger.exception("guest_create_deal failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── GUEST: UPLOAD DOCUMENT ───────────────────────────────────────────────
+@app.route("/api/guest/upload", methods=["POST", "OPTIONS"])
+def guest_upload_document():
+    """No-auth endpoint. Uploads a PDF to a guest deal.
+    Multipart: file (PDF), deal_id.
+    Validates deal belongs to GUEST_USER_ID and status=pending_payment.
+    Returns: { document_id }"""
+    if request.method == "OPTIONS":
+        return "", 204
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    if not GUEST_USER_ID:
+        return jsonify({"error": "Guest flow not configured"}), 503
+
+    deal_id = (request.form.get("deal_id") or "").strip()
+    if not deal_id:
+        return jsonify({"error": "deal_id required"}), 400
+
+    file = request.files.get("file")
+    if not file:
+        return jsonify({"error": "No file"}), 400
+    if not (file.filename or "").lower().endswith(".pdf"):
+        return jsonify({"error": "PDF only"}), 400
+
+    # Verify deal is a guest deal with pending_payment status
+    try:
+        row = supabase.table("deals") \
+            .select("id, status") \
+            .eq("id", deal_id) \
+            .eq("user_id", GUEST_USER_ID) \
+            .single().execute()
+        if not row.data:
+            return jsonify({"error": "Deal not found"}), 404
+        if row.data.get("status") not in ("pending_payment", "active"):
+            return jsonify({"error": "Deal not in uploadable state"}), 400
+    except Exception:
+        return jsonify({"error": "Deal verification failed"}), 403
+
+    # Reuse existing document upload logic by calling it with a service JWT
+    # Build multipart request internally
+    try:
+        file_bytes = file.read()
+        file_size  = len(file_bytes)
+        if file_size > 50 * 1024 * 1024:
+            return jsonify({"error": "File too large (max 50 MB)"}), 413
+
+        import io as _io
+        fname = file.filename or "document.pdf"
+
+        # Extract text using existing helpers
+        extracted_text = ""
+        try:
+            import pdfplumber as _pdp
+            with _pdp.open(_io.BytesIO(file_bytes)) as pdf:
+                pages = []
+                for pg in pdf.pages[:120]:
+                    t = (pg.extract_text() or "").strip()
+                    if t:
+                        pages.append(t)
+                extracted_text = "\n\n".join(pages)[:500_000]
+        except Exception as ex:
+            app.logger.warning(f"[guest-upload] pdfplumber failed: {ex}")
+
+        page_count = 0
+        try:
+            import fitz as _fitz
+            doc = _fitz.open(stream=file_bytes, filetype="pdf")
+            page_count = doc.page_count
+            doc.close()
+        except Exception:
+            pass
+
+        # Store in Supabase storage
+        storage_path = f"guest/{deal_id}/{fname}"
+        try:
+            supabase.storage.from_("documents").upload(
+                storage_path, file_bytes,
+                file_options={"content-type": "application/pdf", "upsert": "true"}
+            )
+        except Exception as se:
+            app.logger.warning(f"[guest-upload] storage upload failed: {se} — continuing without storage")
+            storage_path = None
+
+        # Insert document record
+        doc_row = supabase.table("documents").insert({
+            "deal_id":        deal_id,
+            "user_id":        GUEST_USER_ID,
+            "file_name":      fname,
+            "file_size":      file_size,
+            "page_count":     page_count or None,
+            "storage_path":   storage_path,
+            "extracted_text": extracted_text,
+            "doc_type":       "unknown",
+            "extraction_status": "done" if extracted_text else "failed",
+        }).execute()
+
+        doc_id = doc_row.data[0]["id"]
+        return jsonify({"ok": True, "document_id": doc_id, "page_count": page_count}), 201
+
+    except Exception as e:
+        app.logger.exception("guest_upload_document failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── GUEST: CREATE STRIPE CHECKOUT ────────────────────────────────────────
+@app.route("/api/guest/checkout", methods=["POST", "OPTIONS"])
+def guest_checkout():
+    """No-auth endpoint. Creates a Stripe Checkout session for a guest deal.
+    Body: { deal_id }
+    Returns: { checkout_url }"""
+    if request.method == "OPTIONS":
+        return "", 204
+    if not STRIPE_SECRET:
+        return jsonify({"error": "Payment not configured (STRIPE_SECRET_KEY missing)"}), 503
+
+    data    = request.get_json(silent=True) or {}
+    deal_id = (data.get("deal_id") or "").strip()
+    if not deal_id:
+        return jsonify({"error": "deal_id required"}), 400
+
+    # Verify it's a guest deal
+    try:
+        row = supabase.table("deals") \
+            .select("id, status, user_notes") \
+            .eq("id", deal_id) \
+            .eq("user_id", GUEST_USER_ID) \
+            .single().execute()
+        if not row.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+
+    email = row.data.get("user_notes") or ""
+
+    try:
+        resp = requests.post(
+            "https://api.stripe.com/v1/checkout/sessions",
+            auth=(STRIPE_SECRET, ""),
+            data={
+                "mode": "payment",
+                "line_items[0][price_data][currency]": "gbp",
+                "line_items[0][price_data][unit_amount]": str(REPORT_PRICE_GBP * 100),
+                "line_items[0][price_data][product_data][name]": "LegalSmegal Legal Pack Report",
+                "line_items[0][price_data][product_data][description]": "One-off auction legal pack intelligence report",
+                "line_items[0][quantity]": "1",
+                "customer_email": email,
+                "metadata[deal_id]": deal_id,
+                "metadata[guest_email]": email,
+                "success_url": f"{FRONTEND_BASE}/legalsmegal-report.html?deal_id={deal_id}&paid=1",
+                "cancel_url":  f"{FRONTEND_BASE}/legalsmegal-upload-report.html?cancelled=1",
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            app.logger.error(f"[stripe] Checkout failed: {resp.text[:300]}")
+            return jsonify({"error": "Payment setup failed"}), 502
+
+        session = resp.json()
+        checkout_url = session.get("url")
+        if not checkout_url:
+            return jsonify({"error": "No checkout URL returned"}), 502
+
+        # Update deal status to awaiting_payment
+        supabase.table("deals").update({
+            "status": "awaiting_payment",
+            "updated_at": now_iso(),
+        }).eq("id", deal_id).execute()
+
+        return jsonify({"ok": True, "checkout_url": checkout_url}), 200
+
+    except Exception as e:
+        app.logger.exception("guest_checkout failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── STRIPE WEBHOOK ────────────────────────────────────────────────────────
+@app.route("/api/webhooks/stripe", methods=["POST"])
+def stripe_webhook():
+    """Stripe webhook. Triggers analysis after successful payment.
+    No auth — verified via Stripe-Signature header."""
+    payload = request.get_data()
+    sig     = request.headers.get("Stripe-Signature", "")
+
+    # Verify signature if webhook secret is set
+    if STRIPE_WH_SECRET:
+        try:
+            import hmac as _hmac, hashlib as _hl, time as _t
+            # Parse Stripe-Signature header
+            parts = {k: v for k, v in (p.split("=", 1) for p in sig.split(",") if "=" in p)}
+            ts    = parts.get("t", "0")
+            v1    = parts.get("v1", "")
+            signed_payload = f"{ts}.{payload.decode('utf-8')}"
+            expected = _hmac.new(
+                STRIPE_WH_SECRET.encode(), signed_payload.encode(), _hl.sha256
+            ).hexdigest()
+            if not _hmac.compare_digest(expected, v1):
+                return jsonify({"error": "Invalid signature"}), 400
+            if abs(int(_t.time()) - int(ts)) > 300:
+                return jsonify({"error": "Timestamp too old"}), 400
+        except Exception as e:
+            app.logger.warning(f"[stripe-wh] Signature check failed: {e}")
+            return jsonify({"error": "Signature error"}), 400
+
+    try:
+        event = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    event_type = event.get("type", "")
+    app.logger.info(f"[stripe-wh] Event: {event_type}")
+
+    if event_type == "checkout.session.completed":
+        session  = (event.get("data") or {}).get("object") or {}
+        deal_id  = (session.get("metadata") or {}).get("deal_id", "")
+        email    = (session.get("metadata") or {}).get("guest_email", "") or session.get("customer_email", "")
+        paid     = session.get("payment_status") == "paid"
+
+        if not deal_id:
+            app.logger.warning("[stripe-wh] No deal_id in metadata")
+            return jsonify({"ok": True}), 200
+
+        if paid and GUEST_USER_ID:
+            # Mark deal as paid and active
+            supabase.table("deals").update({
+                "status":     "active",
+                "updated_at": now_iso(),
+            }).eq("id", deal_id).eq("user_id", GUEST_USER_ID).execute()
+
+            # Fetch deal name for email
+            try:
+                row = supabase.table("deals").select("deal_name, address").eq("id", deal_id).single().execute()
+                deal_name = (row.data or {}).get("address") or (row.data or {}).get("deal_name") or "Legal Pack"
+            except Exception:
+                deal_name = "Legal Pack"
+
+            # Trigger analysis in background
+            _trigger_guest_summarise(deal_id, GUEST_USER_ID, email, deal_name)
+            app.logger.info(f"[stripe-wh] Payment confirmed, analysis started: {deal_id}")
+
+    return jsonify({"ok": True}), 200
+
+
+# ── GUEST: FETCH REPORT (token-gated) ────────────────────────────────────
+@app.route("/api/guest/report", methods=["GET", "OPTIONS"])
+def guest_get_report():
+    """No-auth endpoint. Returns deal data for a valid report token.
+    Query: ?token=<signed_jwt>
+    Returns: { deal } — same shape as GET /api/deals/<id>"""
+    if request.method == "OPTIONS":
+        return "", 204
+
+    token = (request.args.get("token") or "").strip()
+    if not token:
+        return jsonify({"error": "Token required"}), 401
+
+    deal_id = _verify_report_token(token)
+    if not deal_id:
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    try:
+        row = supabase.table("deals") \
+            .select("id, deal_name, address, status, summary_json, financials_json, area_json, deal_score, guide_price, auction_date, deal_type, documents(id, file_name, doc_type, page_count)") \
+            .eq("id", deal_id) \
+            .eq("user_id", GUEST_USER_ID) \
+            .single().execute()
+        if not row.data:
+            return jsonify({"error": "Report not found"}), 404
+        return jsonify({"ok": True, "deal": row.data}), 200
+    except Exception as e:
+        app.logger.exception("guest_get_report failed")
+        return jsonify({"error": str(e)}), 500
+
+# ════════════════════════════════════════════════════════════════════════════
+# END ONE-OFF REPORT FLOW
+# ════════════════════════════════════════════════════════════════════════════
 
 
 @app.route("/", methods=["GET"])
