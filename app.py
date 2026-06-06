@@ -108,32 +108,11 @@ GOOGLE_MAPS_API_KEY = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
 ENVIRONMENT = (os.getenv("ENVIRONMENT") or "development").strip().lower()
 DEV_BYPASS_LIMITS = ENVIRONMENT != "production"  # Set ENVIRONMENT=production in Render to enforce limits
-
-# ── Internal diagnostic endpoint guard ────────────────────────────────────────
-# Set INTERNAL_API_SECRET on Render to protect /llm/json, /market-insights,
-# /api/test-llm, /api/test-hpi, /api/diag/runtime-health.
-# If not set, those endpoints return 404 (fail closed).
-INTERNAL_API_SECRET = (os.getenv("INTERNAL_API_SECRET") or "").strip()
-
-def _require_internal(f):
-    """Decorator: require X-Internal-Key header matching INTERNAL_API_SECRET.
-    If INTERNAL_API_SECRET is not configured, endpoint returns 404 unconditionally.
-    """
-    from functools import wraps as _wraps
-    @_wraps(f)
-    def _wrapped(*args, **kwargs):
-        if not INTERNAL_API_SECRET:
-            return jsonify({"error": "not found"}), 404
-        if request.headers.get("X-Internal-Key", "") != INTERNAL_API_SECRET:
-            return jsonify({"error": "not found"}), 404
-        return f(*args, **kwargs)
-    return _wrapped
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 SUPABASE_KEY_FALLBACK = (os.getenv("SUPABASE_KEY") or "").strip()
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
-_CACHE_MAX = 500  # max entries; oldest evicted on insert when exceeded
 CACHE_TTL_SECONDS = int(os.getenv("MARKET_INSIGHTS_CACHE_TTL_SECONDS", "21600"))
 
 APP_CACHE_BUSTER = (os.getenv("APP_CACHE_BUSTER", "") or "").strip()
@@ -229,7 +208,6 @@ NOMIS_TS054_CATS = os.getenv("NOMIS_TS054_CATS", "").strip()
 POSTCODES_IO_TIMEOUT = int(os.getenv("POSTCODES_IO_TIMEOUT", "10"))
 POSTCODES_IO_CACHE_TTL_SECONDS = int(os.getenv("POSTCODES_IO_CACHE_TTL_SECONDS", "2592000"))
 _GEO_CACHE: Dict[str, Dict[str, Any]] = {}
-_GEO_CACHE_MAX = 2000  # postcodes are small; higher limit is fine
 
 GEOCODE_CACHE_TABLE = os.getenv("GEOCODE_CACHE_TABLE", "geocode_cache").strip()
 GEOCODE_BATCH_LIMIT = int(os.getenv("GEOCODE_BATCH_LIMIT", "10"))
@@ -435,10 +413,6 @@ def cache_get(key: str) -> Optional[Dict[str, Any]]:
 
 
 def cache_set(key: str, value: Dict[str, Any]) -> None:
-    if len(_CACHE) >= _CACHE_MAX:
-        # Evict oldest entry by _cached_at
-        oldest = min(_CACHE, key=lambda k: _CACHE[k].get("_cached_at", 0))
-        _CACHE.pop(oldest, None)
     _CACHE[key] = {"_cached_at": time.time(), "value": value}
 
 
@@ -453,9 +427,6 @@ def geo_cache_get(key: str) -> Optional[Dict[str, Any]]:
 
 
 def geo_cache_set(key: str, value: Dict[str, Any]) -> None:
-    if len(_GEO_CACHE) >= _GEO_CACHE_MAX:
-        oldest = min(_GEO_CACHE, key=lambda k: _GEO_CACHE[k].get("_cached_at", 0))
-        _GEO_CACHE.pop(oldest, None)
     _GEO_CACHE[key] = {"_cached_at": time.time(), "value": value}
 
 
@@ -5294,7 +5265,6 @@ def adapter_nomis():
 
 @app.route("/market-insights", methods=["POST"])
 @app.route("/market_insights", methods=["POST"])  # alias for any legacy/underscore callers
-@_require_internal
 def market_insights():
     data = request.get_json(silent=True) or {}
     postcode = normalize_postcode(data.get("postcode", "") or "")
@@ -5507,7 +5477,6 @@ def qa_clarify():
 
 
 @app.route("/llm/json", methods=["POST"])
-@_require_internal
 def llm_json_route():
     """
     Dual-mode endpoint:
@@ -5705,9 +5674,16 @@ def _llm_json_anthropic(*, system: str, prompt: str, temperature: float = 0.1) -
     print(f"[LLM] stop_reason={stop_reason} tokens_in={usage_in} tokens_out={usage_out} content_len={len(content)}", flush=True)
 
     if stop_reason == "max_tokens":
-        print(f"[LLM] WARNING: TRUNCATED at max_tokens=8192 — content_len={len(content)}", flush=True)
+        print(f"[LLM] WARNING: TRUNCATED at max_tokens=16000. Last 300 chars: {content[-300:]!r}", flush=True)
 
-    # Raw content not logged — legal-pack text must not appear in Render logs
+    # Print the FULL raw LLM response before any processing.
+    # This is the ground truth — if flags are missing, this tells us why.
+    print(f"[LLM] RAW RESPONSE START >>>", flush=True)
+    print(content[:3000], flush=True)  # first 3000 chars
+    if len(content) > 3000:
+        print(f"[LLM] ... ({len(content) - 3000} more chars) ...", flush=True)
+        print(content[-500:], flush=True)  # last 500 chars
+    print(f"[LLM] RAW RESPONSE END <<<", flush=True)
 
     # Try direct parse first
     try:
@@ -6398,7 +6374,8 @@ def summarise_deal(deal_id: str):
         # Print to stdout so it's visible in Render logs regardless of log level
         print(
             f"[summarise] PROMPT SIZE: {len(truncated)} chars | "
-            f"{docs_with_text}/{len(documents)} docs have text",
+            f"{docs_with_text}/{len(documents)} docs have text | "
+            f"first_200: {truncated[:200]!r}",
             flush=True
         )
 
@@ -6418,20 +6395,21 @@ def summarise_deal(deal_id: str):
                 "docs_with_text": docs_with_text,
             }), 400
 
-        COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be aggressive and thorough — an investor's money is at stake.
+        COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be thorough but concise — return at most 20 flags, prioritise critical and missing items.
 
-Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (flags MUST come first):
+Return ONLY valid JSON. No prose, no markdown fences. Maximum 20 flags total. Keep all string fields SHORT to stay within token limits.
+Exactly this structure (flags MUST come first):
 {
   "flags": [
     {
       "severity": "critical|high|missing|note",
-      "title": "specific risk title — max 10 words",
-      "summation": "one sentence: what this means for the investor",
-      "evidence": "verbatim quote from document — max 30 words",
-      "implication": "financial or legal impact — max 20 words",
-      "action": "what investor must do — max 15 words",
-      "source_document": "document filename",
-      "source_clause": "clause number or null",
+      "title": "risk title max 8 words",
+      "summation": "max 15 words: buyer impact",
+      "evidence": "verbatim quote max 20 words",
+      "implication": "max 12 words",
+      "action": "max 10 words",
+      "source_document": "filename",
+      "source_clause": "clause or null",
       "source_page": null,
       "legal_risk_weight": 7
     }
@@ -7345,7 +7323,6 @@ def get_dashboard():
 
 # ── HPI DATA DIAGNOSTIC ENDPOINT ─────────────────────────────
 @app.route("/api/test-hpi", methods=["GET", "OPTIONS"])
-@_require_internal
 def test_hpi_endpoint():
     """
     GET /api/test-hpi
@@ -8500,20 +8477,21 @@ def summarise_stream(deal_id: str):
                 # ── Single LLM call — extract + classify + score in one pass ──
                 yield ev("progress", msg="Reading clauses and identifying risks…", step=4, total=4)
 
-                COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be aggressive and thorough — an investor's money is at stake.
+                COMBINED_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be thorough but concise — return at most 20 flags, prioritise critical and missing items.
 
-Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (flags MUST come first):
+Return ONLY valid JSON. No prose, no markdown fences. Maximum 20 flags total. Keep all string fields SHORT to stay within token limits.
+Exactly this structure (flags MUST come first):
 {
   "flags": [
     {
       "severity": "critical|high|missing|note",
-      "title": "specific risk title — max 10 words",
-      "summation": "one sentence: what this means for the investor",
-      "evidence": "verbatim quote from document — max 30 words",
-      "implication": "financial or legal impact — max 20 words",
-      "action": "what investor must do — max 15 words",
-      "source_document": "document filename",
-      "source_clause": "clause number or null",
+      "title": "risk title max 8 words",
+      "summation": "max 15 words: buyer impact",
+      "evidence": "verbatim quote max 20 words",
+      "implication": "max 12 words",
+      "action": "max 10 words",
+      "source_document": "filename",
+      "source_clause": "clause or null",
       "source_page": null,
       "legal_risk_weight": 7
     }
@@ -8659,7 +8637,6 @@ FLAG EXTRACTION RULES — YOU MUST FOLLOW ALL OF THEM:
     return response
 
 @app.route("/api/test-llm", methods=["GET"])
-@_require_internal
 def test_llm():
     """Diagnostic endpoint — tests Anthropic client directly. No auth required.
     Returns the exact error if something is wrong with the key or model."""
@@ -8769,7 +8746,6 @@ def auction_triangulation():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @app.route("/api/diag/runtime-health", methods=["GET", "OPTIONS"])
-@_require_internal
 def diag_runtime_health():
     """
     Forensic runtime health check. NO AUTH — read-only, no PII, no deal data.
