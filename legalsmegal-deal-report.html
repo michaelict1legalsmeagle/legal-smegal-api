@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Deal Report — LegalSmegal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#080c10;--s1:#0d1219;--s2:#111820;--s3:#161e28;
+  --b1:#1c2530;--b2:#243040;
+  --tp:#e8edf2;--ts:#7a8fa3;--tt:#3d5068;
+  --acc:#c8a84b;--ad:rgba(200,168,75,.10);--ag:rgba(200,168,75,.05);
+  --grn:#3ecf8e;--gd:rgba(62,207,142,.10);
+  --red:#e05c5c;--rd:rgba(224,92,92,.10);
+  --amb:#e8943a;--amd:rgba(232,148,58,.10);
+  --blu:#4a9eff;
+  --mono:'IBM Plex Mono',monospace;
+  --sans:'IBM Plex Sans',sans-serif;
+  --r:4px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;font-family:var(--sans);font-size:12px;background:var(--bg);color:var(--tp);-webkit-font-smoothing:antialiased;overflow:hidden}
+button{cursor:pointer;font-family:var(--mono)}
+
+/* ── NAV ── */
+nav{position:fixed;top:0;left:0;right:0;z-index:300;height:44px;background:var(--s1);border-bottom:1px solid var(--b1);display:flex;align-items:center;justify-content:space-between;padding:0 20px}
+.nav-logo{font-family:var(--sans);font-size:13px;font-weight:600;color:var(--tp);text-decoration:none}
+.nav-logo span{color:var(--acc)}
+.nav-ctx-addr{font-family:var(--mono);font-size:10px;color:var(--tt);letter-spacing:.04em;margin-left:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px;text-transform:uppercase}
+.nav-right{display:flex;align-items:center;gap:5px}
+.nav-btn{font-family:var(--mono);font-size:9px;font-weight:500;height:26px;padding:0 10px;border-radius:var(--r);border:1px solid var(--b2);background:transparent;color:var(--tt);letter-spacing:.06em;text-transform:uppercase;transition:border-color .15s,color .15s;text-decoration:none;display:inline-flex;align-items:center;white-space:nowrap}
+.nav-btn:hover{border-color:var(--acc);color:var(--ts)}
+.nav-btn.active{border-color:var(--acc);color:var(--acc);background:var(--ad)}
+
+/* ── STEP BAR ── */
+.step-bar{position:fixed;top:44px;left:0;right:0;z-index:199;background:var(--bg);border-bottom:1px solid var(--b1);height:28px;display:flex;align-items:center;padding:0 20px;gap:0;overflow-x:auto;scrollbar-width:none}
+.step-bar::-webkit-scrollbar{display:none}
+.step-item{display:flex;align-items:center;gap:5px;padding:0 12px 0 0;font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;flex-shrink:0}
+.step-dot{width:4px;height:4px;border-radius:50%}
+.step-dot.done{background:var(--ts)}
+.step-dot.active{background:var(--acc);box-shadow:0 0 0 3px var(--ad)}
+.step-dot.pending{background:var(--tt)}
+.step-lbl.done{color:var(--ts)}.step-lbl.active{color:var(--acc)}.step-lbl.pending{color:var(--tt)}
+.step-sep{color:var(--tt);font-size:9px;padding:0 3px}
+
+/* ── SHELL ── */
+.shell{display:flex;flex-direction:column;height:calc(100vh - 44px - 28px);overflow:hidden;margin-top:72px}
+
+/* ── HEADER BAND ── */
+.hband{background:var(--s1);border-bottom:1px solid var(--b1);padding:8px 16px;display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-shrink:0}
+.hb-l{display:flex;flex-direction:column;gap:3px;min-width:0}
+.hb-eye{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--acc)}
+.hb-addr{font-family:var(--mono);font-size:16px;font-weight:400;letter-spacing:-.3px;color:var(--tp);line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:460px}
+.hb-tags{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.hbt{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;border-radius:2px;background:var(--s3);border:1px solid var(--b1);color:var(--tt)}
+.hbt.won{color:var(--grn);border-color:rgba(62,207,142,.3);background:var(--gd)}
+.hbt.lost{color:var(--red);border-color:rgba(224,92,92,.3);background:var(--rd)}
+.hbt.watch{color:var(--acc);border-color:rgba(200,168,75,.3);background:var(--ad)}
+.hb-r{display:flex;align-items:stretch;gap:0;flex-shrink:0}
+.hbs{display:flex;flex-direction:column;justify-content:center;gap:2px;padding:0 14px;border-left:1px solid var(--b1)}
+.hbs-l{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--tt)}
+.hbs-v{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--tp)}
+.hbs-v.acc{color:var(--acc)}.hbs-v.grn{color:var(--grn)}
+.sdot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:4px;vertical-align:middle}
+
+/* ── COCKPIT ── */
+.cockpit{flex:1;display:grid;grid-template-columns:240px 1fr 240px;overflow:hidden}
+
+/* ── SECTIONS ── */
+.sect-hd{padding:7px 10px 6px;border-bottom:1px solid var(--b1);background:var(--s2);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.sect-lbl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--tt);display:flex;align-items:center;gap:5px}
+.sect-lbl::before{content:'';width:2px;height:8px;border-radius:1px;background:var(--acc);flex-shrink:0}
+.sect-meta{font-family:var(--mono);font-size:7px;color:var(--tt)}
+
+/* ── LEFT COLUMN ── */
+.lcol{border-right:1px solid var(--b1);display:flex;flex-direction:column;overflow:hidden}
+
+/* USER + BID */
+.bid-sect{padding:12px 12px 10px;border-bottom:1px solid var(--b1);flex-shrink:0}
+.bid-user{display:flex;align-items:center;gap:7px;margin-bottom:8px}
+.bid-avatar{width:24px;height:24px;border-radius:50%;background:var(--ad);border:1px solid rgba(200,168,75,.3);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:9px;font-weight:700;color:var(--acc);flex-shrink:0}
+.bid-username{font-family:var(--mono);font-size:9px;color:var(--ts);letter-spacing:.03em}
+
+.bid-lbl-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.bid-lbl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--tt)}
+.bid-badge{font-family:var(--mono);font-size:7px;font-weight:700;padding:2px 6px;border-radius:2px}
+.bid-badge.locked{background:var(--gd);border:1px solid rgba(62,207,142,.3);color:var(--grn)}
+.bid-badge.unlocked{background:var(--s3);border:1px solid var(--b1);color:var(--tt)}
+
+.bid-num{font-family:var(--mono);font-size:38px;font-weight:300;letter-spacing:-2px;line-height:1;transition:color .2s}
+.bid-num.live{color:var(--acc)}
+.bid-num.prev{color:var(--ts)}
+.bid-num.empty{color:var(--b2);font-size:32px}
+.bid-sub{font-family:var(--mono);font-size:8px;color:var(--tt);min-height:12px;margin-top:2px}
+
+.bid-inp-row{display:flex;align-items:center;gap:6px;margin-top:8px}
+.bid-inp{font-family:var(--mono);font-size:14px;font-weight:300;color:var(--tp);background:var(--s2);border:1px solid var(--b2);border-radius:var(--r);padding:7px 9px;flex:1;outline:none;letter-spacing:-.3px;transition:border-color .15s}
+.bid-inp:focus{border-color:var(--acc)}
+.bid-inp::placeholder{color:var(--b2);font-size:11px}
+.bid-lock-btn{height:32px;padding:0 10px;border-radius:var(--r);border:1px solid rgba(200,168,75,.4);background:var(--ad);color:var(--acc);font-size:8px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;transition:all .15s}
+.bid-lock-btn:hover{background:rgba(200,168,75,.18)}
+.bid-unlock-btn{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:3px 8px;border-radius:var(--r);background:var(--s3);border:1px solid var(--b2);color:var(--tt);transition:all .15s}
+.bid-unlock-btn:hover{border-color:var(--acc);color:var(--acc)}
+
+/* WATCH STATE */
+.ws-pills{display:flex;gap:5px;margin-top:10px}
+.wsp{flex:1;padding:6px 0;border-radius:var(--r);border:1px solid var(--b1);background:var(--s2);font-family:var(--mono);font-size:8px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--tt);text-align:center;transition:all .15s}
+.wsp:hover{border-color:var(--b2);color:var(--ts)}
+.wsp.on.watch{background:var(--ad);border-color:rgba(200,168,75,.4);color:var(--acc)}
+.wsp.on.won{background:var(--gd);border-color:rgba(62,207,142,.4);color:var(--grn)}
+.wsp.on.lost{background:var(--rd);border-color:rgba(224,92,92,.4);color:var(--red)}
+
+/* HAMMER */
+.hammer-sect{padding:10px 12px;border-bottom:1px solid var(--b1);flex-shrink:0}
+.hbtn{width:100%;padding:8px;border-radius:var(--r);border:none;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .2s}
+.hbtn.pre{background:var(--rd);border:1px solid rgba(224,92,92,.35);color:var(--red)}
+.hbtn.pre:hover{background:rgba(224,92,92,.18)}
+.hbtn.post{background:var(--gd);border:1px solid rgba(62,207,142,.35);color:var(--grn)}
+.win-row{display:flex;align-items:center;gap:6px;margin-top:7px}
+.win-inp{font-family:var(--mono);font-size:13px;font-weight:300;color:var(--tp);background:var(--s2);border:1px solid var(--b2);border-radius:var(--r);padding:6px 8px;flex:1;outline:none;letter-spacing:-.3px;transition:border-color .15s}
+.win-inp:focus{border-color:var(--grn)}
+.win-inp::placeholder{color:var(--b2);font-size:10px}
+.win-save-btn{height:30px;padding:0 9px;border-radius:var(--r);border:1px solid rgba(62,207,142,.4);background:var(--gd);color:var(--grn);font-size:7px;font-weight:700;letter-spacing:.07em;text-transform:uppercase}
+.win-locked-num{font-family:var(--mono);font-size:20px;font-weight:300;letter-spacing:-.8px;color:var(--grn);margin:4px 0 1px}
+.win-locked-sub{font-family:var(--mono);font-size:7px;color:var(--tt)}
+.op-row{display:flex;gap:5px;margin-top:7px}
+.op{flex:1;padding:5px 0;border-radius:var(--r);border:1px solid var(--b1);background:var(--s2);font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--tt);text-align:center;transition:all .15s}
+.op.on.won{background:var(--gd);border-color:rgba(62,207,142,.4);color:var(--grn)}
+.op.on.lost{background:var(--rd);border-color:rgba(224,92,92,.4);color:var(--red)}
+
+/* WHAT NEXT — hidden until hammer */
+.wn-sect{padding:10px 12px;flex:1;overflow-y:auto;display:none}
+.wn-sect.visible{display:block}
+.wn-dates{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
+.wnd{display:flex;flex-direction:column;gap:1px}
+.wndv{font-family:var(--mono);font-size:11px;color:var(--tp)}
+.wndl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt)}
+.countdown{border-radius:var(--r);padding:7px 9px;display:flex;align-items:center;justify-content:space-between;border:1px solid var(--b1);background:var(--s2);margin-bottom:7px}
+.countdown.g{background:var(--gd);border-color:rgba(62,207,142,.25)}
+.countdown.a{background:var(--amd);border-color:rgba(232,148,58,.25)}
+.countdown.r{background:var(--rd);border-color:rgba(224,92,92,.25)}
+.cd-days{font-family:var(--mono);font-size:22px;font-weight:300;letter-spacing:-.8px;line-height:1}
+.cd-lbl{font-family:var(--mono);font-size:7px;color:var(--tt);margin-top:1px}
+.comp-tasks{display:flex;flex-direction:column;gap:0}
+.comp-task{display:flex;align-items:center;gap:5px;padding:3px 0;border-bottom:1px solid var(--b1);font-family:var(--mono);font-size:8px;color:var(--ts)}
+.comp-task:last-child{border-bottom:none}
+.ct-dot{width:4px;height:4px;border-radius:50%;flex-shrink:0;background:var(--tt)}
+.comp-period-sel{font-family:var(--mono);font-size:8px;color:var(--tp);background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:3px 6px;width:100%;outline:none;margin-top:6px;cursor:pointer}
+
+/* ── CENTRE — IFRAME ── */
+.ccol{display:flex;flex-direction:column;overflow:hidden;background:var(--s2)}
+.iframe-wrap{flex:1;position:relative;overflow:hidden}
+.iframe-wrap iframe{width:100%;height:100%;border:none;background:#fff}
+.iframe-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:var(--s2)}
+.iframe-loading-txt{font-family:var(--mono);font-size:10px;color:var(--tt);letter-spacing:.04em}
+.doc-footer{height:26px;border-top:1px solid var(--b1);background:var(--s1);display:flex;align-items:center;padding:0 12px;gap:8px;font-family:var(--mono);font-size:8px;color:var(--tt);flex-shrink:0}
+
+/* ── RIGHT COLUMN ── */
+.rcol{border-left:1px solid var(--b1);display:flex;flex-direction:column;overflow:hidden}
+.rs-body{overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:var(--b2) transparent;min-height:0}
+.rs-body::-webkit-scrollbar{width:3px}
+.rs-body::-webkit-scrollbar-thumb{background:var(--b2);border-radius:2px}
+
+/* VERDICT WATERFALL (mini) */
+.wf-mini{padding:10px 10px 6px}
+.wf-svg-wrap{width:100%;overflow:visible}
+
+/* FINANCIALS */
+.fin-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px}
+.fin-c{display:flex;flex-direction:column;gap:1px}
+.fin-v{font-family:var(--mono);font-size:16px;font-weight:300;letter-spacing:-.8px;line-height:1;color:var(--tp)}
+.fin-v.pos{color:var(--grn)}.fin-v.neg{color:var(--red)}.fin-v.acc{color:var(--acc)}
+.fin-l{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt)}
+.fin-signal{display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:var(--r);margin:0 10px 8px}
+.fin-signal.pos{background:var(--gd)}.fin-signal.neg{background:var(--rd)}.fin-signal.neu{background:var(--s2)}
+.sig-dot{width:4px;height:4px;border-radius:50%;flex-shrink:0}
+.fin-sig-txt{font-family:var(--mono);font-size:7px;color:var(--ts)}
+
+/* AREA / COMPS */
+.comp-block{padding:8px 10px}
+.comp-list{display:flex;flex-direction:column;gap:3px;margin-bottom:8px}
+.comp-row{display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid var(--b1)}
+.comp-row:last-child{border-bottom:none}
+.comp-num{font-family:var(--mono);font-size:8px;color:var(--tt);width:12px;flex-shrink:0}
+.comp-type{font-family:var(--mono);font-size:7px;text-transform:uppercase;letter-spacing:.05em;color:var(--ts);width:50px;flex-shrink:0}
+.comp-price{font-family:var(--mono);font-size:9px;font-weight:500;color:var(--tp);flex:1;text-align:right}
+.comp-dist{font-family:var(--mono);font-size:7px;color:var(--tt);width:30px;text-align:right;flex-shrink:0}
+
+/* Donut chart */
+.donut-wrap{display:flex;align-items:center;gap:8px;padding:0 10px 8px}
+.donut-legend{display:flex;flex-direction:column;gap:3px;flex:1}
+.dl-row{display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:8px;color:var(--ts)}
+.dl-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+
+/* DRILL LINKS */
+.drill-link{font-family:var(--mono);font-size:7px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--tt);text-decoration:none;border:1px solid var(--b1);border-radius:var(--r);padding:3px 7px;display:inline-flex;align-items:center;gap:3px;transition:all .15s;margin:0 10px 8px}
+.drill-link:hover{border-color:var(--acc);color:var(--acc)}
+
+/* FLAGS */
+.flag-block{padding:10px 10px 6px}
+.flag-counts{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:8px}
+.fc{display:flex;flex-direction:column;gap:1px}
+.fcn{font-family:var(--mono);font-size:22px;font-weight:300;letter-spacing:-1.5px;line-height:1}
+.fcn.c{color:var(--red)}.fcn.h{color:var(--amb)}.fcn.m{color:#e07830}.fcn.n{color:var(--ts)}
+.fcl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt)}
+.sev-bar{display:flex;height:3px;border-radius:2px;overflow:hidden;gap:1px;margin-bottom:8px}
+.sev-bar-seg{border-radius:1px;transition:width .4s}
+
+/* ── FOOTER ── */
+.fbar{height:36px;border-top:1px solid var(--b1);background:var(--s1);padding:0 16px;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.fb{font-family:var(--mono);font-size:8px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:5px 10px;border-radius:var(--r);display:inline-flex;align-items:center;gap:5px;transition:all .2s;white-space:nowrap;flex-shrink:0}
+.fb svg{width:10px;height:10px}
+.fb-ghost{background:none;border:1px solid var(--b2);color:var(--ts)}
+.fb-ghost:hover{border-color:var(--ts);color:var(--tp)}
+.fb-acc{background:var(--ad);border:1px solid rgba(200,168,75,.4);color:var(--acc)}
+.fb-acc:hover{background:rgba(200,168,75,.15)}
+.note-inp{flex:1;height:24px;font-family:var(--mono);font-size:9px;color:var(--tp);background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:0 8px;outline:none;transition:border-color .15s}
+.note-inp:focus{border-color:var(--acc)}
+.note-inp::placeholder{color:var(--tt)}
+.fb-saved{font-family:var(--mono);font-size:7px;color:var(--tt);flex-shrink:0}
+.sep{width:1px;height:18px;background:var(--b1);flex-shrink:0}
+
+@media print{
+  nav,.step-bar,.fbar{display:none!important}
+  html,body{overflow:visible;height:auto;background:#fff;color:#000}
+  .shell{height:auto;overflow:visible;margin-top:0}
+  .cockpit{grid-template-columns:220px 1fr 220px;overflow:visible}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+</style>
+</head>
+<body>
+
+<script>
+(function(){
+  var did=new URLSearchParams(window.location.search).get('deal_id');
+  if(!did)return;
+  function wire(){document.querySelectorAll('a[href*="legalsmegal-"]').forEach(function(a){var h=a.getAttribute('href')||'';if(h.includes('deal_id=')||h.includes('signin'))return;a.href=h+(h.includes('?')?'&':'?')+'deal_id='+did;});}
+  wire();
+  if(window.MutationObserver)new MutationObserver(wire).observe(document.body,{childList:true,subtree:true});
+})();
+</script>
+
+<nav>
+  <div style="display:flex;align-items:center;min-width:0">
+    <a href="legalsmegal-dashboard.html" class="nav-logo">Legal<span>Smegal</span></a>
+    <span class="nav-ctx-addr" id="navCtxAddr"></span>
+  </div>
+  <div class="nav-right">
+    <a href="legalsmegal-dashboard.html"   class="nav-btn" id="navDash">Dashboard</a>
+    <a href="legalsmegal-verdict.html"     class="nav-btn" id="navVerdict">Verdict</a>
+    <a href="legalsmegal-workbench.html"   class="nav-btn" id="navWork">Flag Workbench</a>
+    <a href="legalsmegal-financials.html"  class="nav-btn" id="navFin">Financial Model</a>
+    <a href="legalsmegal-area.html"        class="nav-btn" id="navArea">Area Intelligence</a>
+    <a href="legalsmegal-deal-report.html" class="nav-btn active">Deal Report</a>
+  </div>
+</nav>
+
+<div class="step-bar">
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Upload</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Verdict</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Flag Workbench</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Financial Model</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Area Intelligence</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot active"></span><span class="step-lbl active">Deal Report</span></span>
+</div>
+
+<div class="shell">
+
+  <!-- HEADER BAND -->
+  <div class="hband">
+    <div class="hb-l">
+      <div class="hb-eye">Deal Report Finalisation</div>
+      <div class="hb-addr" id="dhAddr">—</div>
+      <div class="hb-tags" id="dhTags"></div>
+    </div>
+    <div class="hb-r">
+      <div class="hbs"><div class="hbs-l">Auction date</div><div class="hbs-v" id="dhDate">—</div></div>
+      <div class="hbs"><div class="hbs-l">Pack score</div><div class="hbs-v acc" id="dhScore">—</div></div>
+      <div class="hbs"><div class="hbs-l">Status</div><div class="hbs-v" id="dhStat"><span class="sdot" id="dhDot" style="background:var(--tt)"></span><span id="dhStatTxt">—</span></div></div>
+      <div class="hbs"><div class="hbs-l">Guide price</div><div class="hbs-v" id="dhGuide">—</div></div>
+    </div>
+  </div>
+
+  <!-- COCKPIT -->
+  <div class="cockpit">
+
+    <!-- ════ LEFT ════ -->
+    <div class="lcol">
+      <div class="sect-hd">
+        <div class="sect-lbl">Max Bid</div>
+        <span class="bid-badge unlocked" id="bidBadge">Unlocked</span>
+      </div>
+
+      <div class="bid-sect">
+        <!-- User -->
+        <div class="bid-user">
+          <div class="bid-avatar" id="bidAvatar">—</div>
+          <span class="bid-username" id="bidUsername">Loading…</span>
+        </div>
+
+        <!-- Number -->
+        <div class="bid-lbl-row">
+          <span class="bid-lbl">Max bid</span>
+        </div>
+        <div class="bid-num empty" id="bidNum">—</div>
+        <div class="bid-sub" id="bidSub"></div>
+
+        <!-- Unlocked -->
+        <div id="bidUnlocked">
+          <div class="bid-inp-row">
+            <input type="number" class="bid-inp" id="bcInput" placeholder="Enter max bid" min="1000" step="1000" oninput="previewBid()">
+            <button class="bid-lock-btn" onclick="lockBid()">Lock</button>
+          </div>
+        </div>
+        <!-- Locked -->
+        <div id="bidLocked" style="display:none;margin-top:7px">
+          <button class="bid-unlock-btn" onclick="unlockBid()">Unlock bid</button>
+        </div>
+
+        <!-- Watch state pills -->
+        <div class="ws-pills">
+          <button class="wsp watch on" id="pill-watch" onclick="setWatchState('watch')">Watch</button>
+          <button class="wsp won"       id="pill-won"   onclick="setWatchState('won')">Won</button>
+          <button class="wsp lost"      id="pill-lost"  onclick="setWatchState('lost')">Lost</button>
+        </div>
+      </div>
+
+      <!-- HAMMER -->
+      <div class="sect-hd">
+        <div class="sect-lbl">Hammer Result</div>
+        <span class="bid-badge" id="hammerBadge" style="background:var(--s3);border:1px solid var(--b1);color:var(--tt)">Pre-hammer</span>
+      </div>
+      <div class="hammer-sect">
+        <div id="hPre">
+          <button class="hbtn pre" onclick="toggleHammer()">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 4l5 5-11 11H4v-5z"/></svg>
+            Hammer has fallen
+          </button>
+        </div>
+        <div id="hPost" style="display:none">
+          <button class="hbtn post" onclick="toggleHammer()">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            Hammer confirmed
+          </button>
+          <div id="wUnlocked" style="margin-top:7px">
+            <div style="font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--tt);margin-bottom:4px">Hammer price</div>
+            <div class="win-row">
+              <input type="number" class="win-inp" id="winInput" placeholder="Hammer price" min="1000" step="1000" oninput="previewWin()">
+              <button class="win-save-btn" onclick="saveWin()">Save</button>
+            </div>
+            <div style="font-family:var(--mono);font-size:7px;color:var(--tt);margin-top:3px" id="winPrev"></div>
+          </div>
+          <div id="wLocked" style="display:none;margin-top:7px">
+            <div class="win-locked-num" id="wLockedAmt">—</div>
+            <div class="win-locked-sub" id="wLockedSub"></div>
+            <button class="bid-unlock-btn" style="margin-top:5px" onclick="unlockWin()">Edit</button>
+          </div>
+          <div class="op-row">
+            <button class="op won on" id="opWon"  onclick="setOutcome('won')">Won</button>
+            <button class="op lost"   id="opLost" onclick="setOutcome('lost')">Lost</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- WHAT NEXT — only after hammer -->
+      <div class="sect-hd" id="wnHd" style="display:none">
+        <div class="sect-lbl">What Next</div>
+        <span class="sect-meta" id="wnBadge">In completion</span>
+      </div>
+      <div class="wn-sect" id="wnSect">
+        <div class="wn-dates">
+          <div class="wnd"><div class="wndv" id="wnAuct">—</div><div class="wndl">Auction date</div></div>
+          <div class="wnd"><div class="wndv" id="wnDl">—</div><div class="wndl">Comp. deadline</div></div>
+        </div>
+        <div class="countdown" id="cdBlock">
+          <div><div class="cd-days" id="cdDays">—</div><div class="cd-lbl" id="cdLbl">days to completion</div></div>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--tt)" id="cdDlFmt"></div>
+        </div>
+        <div class="comp-tasks">
+          <div class="comp-task"><div class="ct-dot"></div>Solicitor instructed</div>
+          <div class="comp-task"><div class="ct-dot"></div>10% deposit paid</div>
+          <div class="comp-task"><div class="ct-dot"></div>Insurance from exchange arranged</div>
+          <div class="comp-task"><div class="ct-dot"></div>Mortgage offer received</div>
+        </div>
+        <select class="comp-period-sel" id="compPeriod" onchange="applyCompPeriod()">
+          <option value="28">28 calendar days</option>
+          <option value="20">20 working days</option>
+          <option value="14">14 calendar days</option>
+          <option value="42">42 calendar days</option>
+          <option value="56">56 calendar days</option>
+        </select>
+      </div>
+    </div><!-- /lcol -->
+
+    <!-- ════ CENTRE — IFRAME ════ -->
+    <div class="ccol">
+      <div class="sect-hd">
+        <div class="sect-lbl">Legal Pack Report</div>
+        <span class="sect-meta" id="docMeta">Loading…</span>
+      </div>
+      <div class="iframe-wrap">
+        <div class="iframe-loading" id="iframeLoading">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
+          <span class="iframe-loading-txt" id="iframeLoadingTxt">Loading report…</span>
+        </div>
+        <iframe id="reportFrame" title="Legal Pack Report" style="display:none"
+          onload="onFrameLoad()" onerror="onFrameError()"></iframe>
+      </div>
+      <div class="doc-footer">
+        <span id="docFooterAddr" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        <span>·</span>
+        <span id="docFooterScore"></span>
+        <span style="margin-left:auto;color:var(--tt)">↕ scroll to read all 4 pages</span>
+      </div>
+    </div><!-- /ccol -->
+
+    <!-- ════ RIGHT ════ -->
+    <div class="rcol">
+      <div class="sect-hd"><div class="sect-lbl">Verdict — Value Reduction</div></div>
+      <div class="rs-body">
+
+        <!-- MINI WATERFALL -->
+        <div class="wf-mini">
+          <svg id="wfMiniSvg" class="wf-svg-wrap" viewBox="0 0 220 120" preserveAspectRatio="xMidYMid meet">
+            <text x="110" y="60" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9" fill="#3d5068">Load financial model to populate</text>
+          </svg>
+        </div>
+
+        <div style="height:1px;background:var(--b1);margin:0 10px"></div>
+        <div class="sect-hd" style="border-top:none"><div class="sect-lbl">Financial Indicators</div></div>
+
+        <!-- FINANCIALS GRID -->
+        <div class="fin-grid" id="finGrid">
+          <div class="fin-c"><div class="fin-v acc" id="fROI">—</div><div class="fin-l">Ann. ROI</div></div>
+          <div class="fin-c"><div class="fin-v" id="fCash">—</div><div class="fin-l">Cash on cash</div></div>
+          <div class="fin-c"><div class="fin-v" id="fGY">—</div><div class="fin-l">Gross yield</div></div>
+          <div class="fin-c"><div class="fin-v" id="fNY">—</div><div class="fin-l">Net yield</div></div>
+          <div class="fin-c"><div class="fin-v" id="fCF">—</div><div class="fin-l">Net CF / mo</div></div>
+          <div class="fin-c"><div class="fin-v" id="fPb">—</div><div class="fin-l">Payback yrs</div></div>
+        </div>
+        <div class="fin-signal neu" id="finSignal" style="display:none">
+          <div class="sig-dot" id="finSigDot"></div>
+          <span class="fin-sig-txt" id="finSigTxt"></span>
+        </div>
+        <a id="finLink" href="legalsmegal-financials.html" class="drill-link">Open Financial Model →</a>
+
+        <div style="height:1px;background:var(--b1)"></div>
+        <div class="sect-hd" style="border-top:none"><div class="sect-lbl">Area Intelligence — Comps</div></div>
+
+        <!-- COMPS LIST -->
+        <div class="comp-block">
+          <div class="comp-list" id="compList">
+            <div style="font-family:var(--mono);font-size:8px;color:var(--tt)">Loading comps…</div>
+          </div>
+          <!-- Donut: property type mix -->
+          <div class="donut-wrap" id="donutWrap" style="display:none">
+            <svg id="donutSvg" width="56" height="56" viewBox="0 0 56 56"></svg>
+            <div class="donut-legend" id="donutLegend"></div>
+          </div>
+        </div>
+        <a id="areaLink" href="legalsmegal-area.html" class="drill-link">Open Area Intelligence →</a>
+
+        <div style="height:1px;background:var(--b1)"></div>
+        <div class="sect-hd" style="border-top:none"><div class="sect-lbl">Disclosure Flags</div></div>
+
+        <!-- FLAGS -->
+        <div class="flag-block">
+          <div class="flag-counts">
+            <div class="fc"><div class="fcn c" id="fcC">—</div><div class="fcl">Critical</div></div>
+            <div class="fc"><div class="fcn h" id="fcH">—</div><div class="fcl">Clarification</div></div>
+            <div class="fc"><div class="fcn m" id="fcM">—</div><div class="fcl">Missing</div></div>
+            <div class="fc"><div class="fcn n" id="fcN">—</div><div class="fcl">Notes</div></div>
+          </div>
+          <div class="sev-bar" id="sevBar">
+            <div class="sev-bar-seg" id="sevC" style="background:var(--red);width:0%"></div>
+            <div class="sev-bar-seg" id="sevH" style="background:var(--amb);width:0%"></div>
+            <div class="sev-bar-seg" id="sevM" style="background:#e07830;width:0%"></div>
+            <div class="sev-bar-seg" id="sevN" style="background:var(--ts);width:0%"></div>
+          </div>
+        </div>
+        <a id="wbLink" href="legalsmegal-workbench.html" class="drill-link">Open Workbench →</a>
+
+      </div><!-- /rs-body -->
+    </div><!-- /rcol -->
+
+  </div><!-- /cockpit -->
+
+  <!-- FOOTER -->
+  <div class="fbar">
+    <button class="fb fb-ghost" onclick="window.print()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6z"/></svg>
+      Print / Download PDF
+    </button>
+    <div class="sep"></div>
+    <input type="text" class="note-inp" id="noteInp" placeholder="Notepad — notes for this deal…" oninput="scheduleNoteSave()">
+    <div class="sep"></div>
+    <span class="fb-saved" id="fbSaved"></span>
+    <button class="fb fb-acc" id="lockSaveBtn" onclick="lockAndSave()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+      Lock &amp; Save
+    </button>
+  </div>
+
+</div><!-- /shell -->
+
+<!-- ════ NON-MODULE JS ════ -->
+<script>
+const fmt    = n=>n!=null&&!isNaN(n)?'£'+Math.round(n).toLocaleString('en-GB'):'—';
+const fmtP   = n=>n!=null&&!isNaN(n)?parseFloat(n).toFixed(1)+'%':'—';
+
+// BID
+function previewBid(){
+  const v=parseFloat(document.getElementById('bcInput').value)||0;
+  const num=document.getElementById('bidNum');const sub=document.getElementById('bidSub');
+  if(v>1000){num.textContent=fmt(v);num.className='bid-num prev';sub.textContent='Preview — confirm before auction';}
+  else{num.textContent='—';num.className='bid-num empty';sub.textContent='';}
+}
+function lockBid(){
+  const v=parseFloat(document.getElementById('bcInput').value)||0;if(v<1000)return;
+  document.getElementById('bidNum').textContent=fmt(v);document.getElementById('bidNum').className='bid-num live';
+  document.getElementById('bidSub').textContent='Locked — do not bid above this figure';
+  const b=document.getElementById('bidBadge');b.textContent='Locked';b.className='bid-badge locked';
+  document.getElementById('bidUnlocked').style.display='none';document.getElementById('bidLocked').style.display='block';
+  try{localStorage.setItem('ls_bid_'+(window._dealId||'x'),v);}catch(e){}
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({bid_ceiling:v})}).catch(()=>{});
+}
+function unlockBid(){
+  document.getElementById('bidUnlocked').style.display='block';document.getElementById('bidLocked').style.display='none';
+  const b=document.getElementById('bidBadge');b.textContent='Unlocked';b.className='bid-badge unlocked';
+  const v=parseFloat(document.getElementById('bcInput').value)||0;
+  const num=document.getElementById('bidNum');
+  if(v>1000){num.textContent=fmt(v);num.className='bid-num prev';}
+}
+
+// WATCH STATE
+function setWatchState(s){
+  ['watch','won','lost'].forEach(p=>{const el=document.getElementById('pill-'+p);if(el)el.classList.remove('on');});
+  const el=document.getElementById('pill-'+s);if(el)el.classList.add('on');
+  const tags=document.getElementById('dhTags');
+  if(tags){const old=tags.querySelector('.hbt.watch,.hbt.won,.hbt.lost');if(old){old.className='hbt '+s;old.textContent=s.charAt(0).toUpperCase()+s.slice(1);}}
+}
+
+// HAMMER
+let _hConfirmed=false;
+function toggleHammer(){
+  _hConfirmed=!_hConfirmed;
+  const pre=document.getElementById('hPre');const post=document.getElementById('hPost');
+  const badge=document.getElementById('hammerBadge');
+  const wnHd=document.getElementById('wnHd');const wnSect=document.getElementById('wnSect');
+  if(_hConfirmed){
+    pre.style.display='none';post.style.display='block';
+    badge.textContent='Fallen';badge.style.cssText='background:var(--rd);border:1px solid rgba(224,92,92,.3);color:var(--red);font-size:7px;font-weight:700;padding:2px 6px;border-radius:2px;font-family:var(--mono)';
+    wnHd.style.display='';wnSect.classList.add('visible');
+    window._hammerDate=window._hammerDate||new Date().toISOString().slice(0,10);
+    updateCountdown();
+    if(window._API_BASE&&window._headers&&window._dealId)
+      fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({outcome:'won',status:'won',hammer_date:window._hammerDate})}).catch(()=>{});
+    try{localStorage.setItem('ls_comp_'+(window._dealId||'x'),'true');}catch(e){}
+  }else{
+    pre.style.display='block';post.style.display='none';
+    badge.textContent='Pre-hammer';badge.style.cssText='background:var(--s3);border:1px solid var(--b1);color:var(--tt);font-size:7px;font-weight:700;padding:2px 6px;border-radius:2px;font-family:var(--mono)';
+    wnHd.style.display='none';wnSect.classList.remove('visible');
+    if(window._API_BASE&&window._headers&&window._dealId)
+      fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({outcome:null,status:'active'})}).catch(()=>{});
+    try{localStorage.removeItem('ls_comp_'+(window._dealId||'x'));}catch(e){}
+  }
+}
+function previewWin(){const v=parseFloat(document.getElementById('winInput').value)||0;const el=document.getElementById('winPrev');if(el)el.textContent=v>1000?fmt(v)+' · Deposit: '+fmt(Math.round(v*.05)):'';}
+function saveWin(){
+  const v=parseFloat(document.getElementById('winInput').value)||0;if(v<1000)return;
+  document.getElementById('wLockedAmt').textContent=fmt(v);
+  document.getElementById('wLockedSub').textContent='Deposit: '+fmt(Math.round(v*.05));
+  document.getElementById('wUnlocked').style.display='none';document.getElementById('wLocked').style.display='block';
+  try{localStorage.setItem('ls_wb_'+(window._dealId||'x'),v);}catch(e){}
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({hammer_price:v})}).catch(()=>{});
+}
+function unlockWin(){document.getElementById('wUnlocked').style.display='block';document.getElementById('wLocked').style.display='none';}
+function setOutcome(o){
+  ['won','lost'].forEach(p=>{const el=document.getElementById('op'+p.charAt(0).toUpperCase()+p.slice(1));if(el)el.classList.remove('on');});
+  const el=document.getElementById('op'+o.charAt(0).toUpperCase()+o.slice(1));if(el)el.classList.add('on');
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({outcome:o})}).catch(()=>{});
+}
+
+// COUNTDOWN
+function applyCompPeriod(){updateCountdown();
+  const d=parseInt(document.getElementById('compPeriod').value)||28;
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({completion_period:d})}).catch(()=>{});
+  try{localStorage.setItem('ls_cp_'+(window._dealId||'x'),d);}catch(e){}
+}
+function updateCountdown(){
+  const hammer=window._hammerDate?new Date(window._hammerDate):null;
+  if(!hammer||isNaN(hammer.getTime())){return;}
+  const period=parseInt(document.getElementById('compPeriod').value)||28;
+  const dl=new Date(hammer);dl.setDate(hammer.getDate()+period);
+  const today=new Date();today.setHours(0,0,0,0);
+  const diff=Math.ceil((dl-today)/86400000);
+  const wnDl=document.getElementById('wnDl');if(wnDl)wnDl.textContent=dl.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+  const daysEl=document.getElementById('cdDays');
+  if(daysEl){daysEl.textContent=diff>0?diff:'Overdue';daysEl.style.color=diff<=3?'var(--red)':diff<=7?'var(--amb)':'var(--grn)';}
+  const lblEl=document.getElementById('cdLbl');if(lblEl)lblEl.textContent=diff>0?'days to completion':'';
+  const dlEl=document.getElementById('cdDlFmt');if(dlEl)dlEl.textContent=dl.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
+  const block=document.getElementById('cdBlock');if(block)block.className='countdown '+(diff<=3?'r':diff<=7?'a':'g');
+}
+
+// IFRAME
+function onFrameLoad(){
+  document.getElementById('iframeLoading').style.display='none';
+  document.getElementById('reportFrame').style.display='block';
+  document.getElementById('docMeta').textContent='Loaded';
+}
+function onFrameError(){
+  document.getElementById('iframeLoadingTxt').textContent='Could not load report — open separately';
+}
+
+// LOCK & SAVE
+function lockAndSave(){
+  const btn=document.getElementById('lockSaveBtn');const sv=document.getElementById('fbSaved');
+  btn.textContent='Saving…';
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({status:'active'})})
+      .then(()=>{btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg> Lock &amp; Save';if(sv)sv.textContent='Saved '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});})
+      .catch(()=>{btn.innerHTML='Save failed';});
+  else btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg> Lock &amp; Save';
+}
+
+// NOTEPAD
+let _nst=null;
+function scheduleNoteSave(){clearTimeout(_nst);document.getElementById('fbSaved').textContent='Unsaved…';_nst=setTimeout(saveNote,1800);}
+function saveNote(){
+  const txt=document.getElementById('noteInp').value||'';
+  try{localStorage.setItem('ls_note_'+(window._dealId||'x'),txt);const el=document.getElementById('fbSaved');if(el)el.textContent='Saved '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});}catch(e){}
+}
+function loadNote(){
+  try{const txt=localStorage.getItem('ls_note_'+(window._dealId||'x'))||'';document.getElementById('noteInp').value=txt;}catch(e){}
+}
+
+// MINI WATERFALL (from summary_json.ceiling.decomposition.waterfall)
+function renderMiniWF(ceiling,base){
+  const svg=document.getElementById('wfMiniSvg');if(!svg)return;
+  const decomp=(ceiling&&ceiling.decomposition)||null;
+  const wf=(decomp&&Array.isArray(decomp.waterfall))?decomp.waterfall:[];
+  const items=[];
+  wf.forEach(function(s){
+    const imp=Math.abs(Number((s&&s.impact_gbp)||0));
+    if(imp>0)items.push({label:String((s&&s.label)||'Adj'),impact:imp});
+  });
+  if(!base||base<=0||items.length===0){
+    svg.innerHTML='<text x="110" y="60" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="8" fill="#3d5068">No ceiling data available</text>';
+    return;
+  }
+  const MAX=5;
+  let visible=items.slice();
+  if(visible.length>MAX){
+    const sorted=items.slice().sort((a,b)=>b.impact-a.impact);
+    const keep=new Set(sorted.slice(0,MAX-1).map((_,i)=>i));
+    const residual=items.filter((_,i)=>!keep.has(i)).reduce((s,x)=>s+x.impact,0);
+    visible=sorted.slice(0,MAX-1);
+    if(residual>0)visible.push({label:'Other risks',impact:residual});
+  }
+  const lo=(ceiling&&ceiling.low)||0,hi=(ceiling&&ceiling.high)||0;
+  const finalMid=((lo+hi)/2)||0;
+  const sumImp=visible.reduce((s,v)=>s+v.impact,0);
+  if(sumImp>0&&finalMid>0){
+    const target=base-finalMid;
+    if(target>0&&Math.abs(sumImp-target)>1){const sc=target/sumImp;visible.forEach(v=>{v.impact*=sc;});}
+  }
+
+  const W=220,H=110,padL=2,padT=10,axisY=78,padR=2;
+  const chartW=W-padL-padR;
+  const chartH=axisY-padT;
+  const yMax=Math.max(base,(finalMid>0?finalMid:base*0.5))*1.1;
+  const pxPU=chartH/yMax;
+  const yOf=v=>axisY-(v*pxPU);
+  const nBars=visible.length+2; // start + steps + final
+  const barW=Math.max(14,Math.min(26,(chartW/nBars)*0.7));
+  const slotW=chartW/nBars;
+  const xOf=i=>padL+i*slotW+(slotW-barW)/2;
+
+  const fmtK=v=>v>=1000?'£'+Math.round(v/1000)+'k':'£'+Math.round(v);
+
+  let out='';
+  // Gridlines (subtle)
+  for(let g=1;g<=4;g++){
+    const gy=yOf(yMax*(g/5));
+    out+=`<line x1="${padL}" y1="${gy}" x2="${W-padR}" y2="${gy}" stroke="#1c2530" stroke-width="0.5"/>`;
+  }
+  // Axis
+  out+=`<line x1="${padL}" y1="${axisY}" x2="${W-padR}" y2="${axisY}" stroke="#243040" stroke-width="0.5"/>`;
+
+  // Starting value bar
+  const sx=xOf(0),sy=yOf(base),sh=base*pxPU;
+  out+=`<rect x="${sx}" y="${sy}" width="${barW}" height="${sh}" fill="#c8a84b" rx="1" opacity="0.85"/>`;
+  out+=`<text x="${sx+barW/2}" y="${sy-3}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="7" fill="#c8a84b">${fmtK(base)}</text>`;
+  out+=`<text x="${sx+barW/2}" y="${axisY+9}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="6" fill="#3d5068">Start</text>`;
+
+  // Step bars (descending from base)
+  let running=base;
+  const stepCols=['#e05c5c','#e8943a','#e07830','#d45050','#c04040'];
+  visible.forEach(function(item,i){
+    const top=running;const bot=running-item.impact;running=bot;
+    const bx=xOf(i+1);const by=yOf(top);const bh=item.impact*pxPU;
+    const col=stepCols[i%stepCols.length];
+    out+=`<rect x="${bx}" y="${by}" width="${barW}" height="${bh}" fill="${col}" rx="1" opacity="0.8"/>`;
+    // Drop label (impact)
+    out+=`<text x="${bx+barW/2}" y="${by-3}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="6" fill="${col}">-${fmtK(item.impact)}</text>`;
+    // Connector line
+    const prevX=xOf(i)+barW;
+    out+=`<line x1="${prevX}" y1="${yOf(top)}" x2="${bx}" y2="${yOf(top)}" stroke="#243040" stroke-width="0.5" stroke-dasharray="2,1"/>`;
+    // Label truncated
+    const lbl=item.label.length>12?item.label.slice(0,11)+'…':item.label;
+    out+=`<text x="${bx+barW/2}" y="${axisY+9}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="6" fill="#3d5068">${lbl}</text>`;
+  });
+
+  // Final ceiling bar
+  if(finalMid>0){
+    const fx=xOf(visible.length+1);const fy=yOf(finalMid);const fh=finalMid*pxPU;
+    out+=`<rect x="${fx}" y="${fy}" width="${barW}" height="${fh}" fill="#c8a84b" rx="1" opacity="0.5"/>`;
+    const loK=lo>0?fmtK(lo):'';const hiK=hi>0?fmtK(hi):'';
+    const rangeStr=loK&&hiK?loK+'–'+hiK:fmtK(finalMid);
+    out+=`<text x="${fx+barW/2}" y="${fy-3}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="6" fill="#c8a84b">${rangeStr}</text>`;
+    out+=`<text x="${fx+barW/2}" y="${axisY+9}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="6" fill="#3d5068">Ceiling</text>`;
+    // Connector
+    const lastRunX=xOf(visible.length)+barW;
+    out+=`<line x1="${lastRunX}" y1="${yOf(running)}" x2="${fx}" y2="${yOf(running)}" stroke="#243040" stroke-width="0.5" stroke-dasharray="2,1"/>`;
+  }
+
+  svg.innerHTML=out;
+}
+
+// DONUT
+function renderDonut(ptCounts){
+  const svg=document.getElementById('donutSvg');const leg=document.getElementById('donutLegend');const wrap=document.getElementById('donutWrap');
+  if(!svg||!ptCounts)return;
+  const abbrev=k=>{const s=(k||'').toLowerCase();if(s.includes('detach')&&!s.includes('semi'))return'Detached';if(s.includes('semi'))return'Semi-det';if(s.includes('terrace'))return'Terraced';if(s.includes('flat')||s.includes('maisonette'))return'Flat';return k.slice(0,8);};
+  const entries=Object.entries(ptCounts).map(([k,v])=>[abbrev(k),Number(v)||0]).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+  if(!entries.length)return;
+  const total=entries.reduce((s,[,v])=>s+v,0);
+  const COLS=['#c8a84b','#3ecf8e','#4a9eff','#e8943a','#e05c5c'];
+  const CX=28,CY=28,R=22,IR=14;
+  let svgOut='';let legOut='';let angle=-Math.PI/2;
+  entries.forEach(([lbl,cnt],i){
+    const slice=(cnt/total)*Math.PI*2;
+    const x1=CX+R*Math.cos(angle);const y1=CY+R*Math.sin(angle);
+    const x2=CX+R*Math.cos(angle+slice);const y2=CY+R*Math.sin(angle+slice);
+    const xi1=CX+IR*Math.cos(angle);const yi1=CY+IR*Math.sin(angle);
+    const xi2=CX+IR*Math.cos(angle+slice);const yi2=CY+IR*Math.sin(angle+slice);
+    const large=slice>Math.PI?1:0;
+    const col=COLS[i%COLS.length];
+    svgOut+=`<path d="M${xi1.toFixed(1)},${yi1.toFixed(1)} L${x1.toFixed(1)},${y1.toFixed(1)} A${R},${R} 0 ${large},1 ${x2.toFixed(1)},${y2.toFixed(1)} L${xi2.toFixed(1)},${yi2.toFixed(1)} A${IR},${IR} 0 ${large},0 ${xi1.toFixed(1)},${yi1.toFixed(1)} Z" fill="${col}" opacity="0.85"/>`;
+    legOut+=`<div class="dl-row"><div class="dl-dot" style="background:${col}"></div>${lbl} <span style="margin-left:auto;color:var(--ts)">${Math.round(cnt/total*100)}%</span></div>`;
+    angle+=slice;
+  });
+  svg.innerHTML=svgOut;if(leg)leg.innerHTML=legOut;if(wrap)wrap.style.display='flex';
+}
+</script>
+
+<!-- MODULE: DATA LOAD -->
+<script type="module">
+import{createClient}from'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+const SUPABASE_URL='https://qdgxmwdvmfrcicgpukhs.supabase.co';
+const SUPABASE_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkZ3htd2R2bWZyY2ljZ3B1a2hzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk1MTY3MzIsImV4cCI6MjA3NTA5MjczMn0.Xpw9u14JWCcTkhkxgt5YzeLfNMG5rGWo4R_C7zRwz-c';
+const API_BASE='https://legal-smegal-api-final.onrender.com';
+window._API_BASE=API_BASE;
+const sb=createClient(SUPABASE_URL,SUPABASE_ANON);
+const{data:{session}}=await sb.auth.getSession();
+if(!session){window.location.href='legalsmegal-signin.html';}
+const headers={'Authorization':'Bearer '+session.access_token};
+window._headers=headers;
+window.signOut=async()=>{await sb.auth.signOut();window.location.href='legalsmegal-signin.html';};
+const params=new URLSearchParams(window.location.search);
+const dealId=params.get('deal_id');
+window._dealId=dealId;
+const fmt=n=>n!=null&&!isNaN(n)?'£'+Math.round(n).toLocaleString('en-GB'):'—';
+const fmtP=n=>n!=null&&!isNaN(n)?parseFloat(n).toFixed(1)+'%':'—';
+const ptPct=n=>n!=null&&!isNaN(n)?parseFloat(n).toFixed(1)+'%':'—';
+
+function wireLinks(){document.querySelectorAll('a[href*="legalsmegal-"]').forEach(a=>{const h=a.getAttribute('href')||'';if(!h.includes('deal_id=')&&!h.includes('signin')&&dealId)a.href=h+(h.includes('?')?'&':'?')+'deal_id='+dealId;});}
+
+async function load(){
+  if(!dealId){window.location.href='legalsmegal-dashboard.html';return;}
+  let deal;
+  try{
+    const r=await fetch(`${API_BASE}/api/deals/${dealId}`,{headers});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();deal=d.deal||d;
+    if(!deal)throw new Error('no data');
+  }catch(e){document.getElementById('dhAddr').textContent='Could not load: '+e.message;return;}
+
+  window._currentDeal=deal;
+  const sj=deal.summary_json||{};const prop=sj.property||{};
+  const area=deal.area_json||{};const fj=deal.financials_json||{};
+  const addr=prop.address||deal.address||deal.deal_name||'—';
+  window._hammerDate=deal.hammer_date||deal.auction_date;
+
+  // HEADER
+  const nc=document.getElementById('navCtxAddr');if(nc)nc.textContent=addr;
+  document.title='Deal Report — '+addr;
+  document.getElementById('dhAddr').textContent=addr;
+  const tags=document.getElementById('dhTags');
+  if(tags){
+    const ts=[prop.lot_number?'Lot '+prop.lot_number:null,prop.tenure,prop.type].filter(Boolean);
+    const oc=deal.outcome||'watch';
+    tags.innerHTML=ts.map(t=>`<span class="hbt">${t}</span>`).join('')+`<span class="hbt ${oc}">${oc.charAt(0).toUpperCase()+oc.slice(1)}</span>`;
+  }
+  if(deal.auction_date){
+    const ds=new Date(deal.auction_date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+    const el=document.getElementById('dhDate');if(el)el.textContent=ds;
+    const wa=document.getElementById('wnAuct');if(wa)wa.textContent=ds;
+  }
+  document.getElementById('dhScore').textContent=deal.deal_score??'—';
+  if(deal.guide_price)document.getElementById('dhGuide').textContent=fmt(deal.guide_price);
+  const oc=deal.outcome;
+  document.getElementById('dhStatTxt').textContent=oc?oc.charAt(0).toUpperCase()+oc.slice(1):'Active';
+  document.getElementById('dhDot').style.background=oc==='won'?'var(--grn)':oc==='lost'?'var(--red)':'var(--acc)';
+
+  // USER
+  const email=session.user?.email||'';
+  const initials=email?email.slice(0,2).toUpperCase():'—';
+  const uname=email||'Analyst';
+  document.getElementById('bidAvatar').textContent=initials;
+  document.getElementById('bidUsername').textContent=uname;
+
+  // BID
+  const savedBid=parseFloat(localStorage.getItem('ls_bid_'+dealId))||deal.bid_ceiling||0;
+  if(savedBid>0){document.getElementById('bcInput').value=savedBid;lockBid();}
+  if(oc==='won')setWatchState('won');else if(oc==='lost')setWatchState('lost');else setWatchState('watch');
+
+  // HAMMER/COMPLETION STATE
+  const sp=localStorage.getItem('ls_cp_'+dealId)||deal.completion_period;
+  if(sp){const sel=document.getElementById('compPeriod');if(sel){const o=Array.from(sel.options).find(x=>x.value===String(sp));if(o)sel.value=o.value;}}
+  if(oc==='won'||localStorage.getItem('ls_comp_'+dealId)==='true'){
+    _hConfirmed=false;toggleHammer();
+    const sw=parseFloat(localStorage.getItem('ls_wb_'+dealId))||deal.hammer_price||0;
+    if(sw>0){const wi=document.getElementById('winInput');if(wi){wi.value=sw;saveWin();}}
+    if(oc==='won')setOutcome('won');else if(oc==='lost')setOutcome('lost');
+  }
+  updateCountdown();
+
+  // WATERFALL (from summary_json.ceiling)
+  const ceiling=sj.ceiling||null;
+  const base=(ceiling&&ceiling.base_value)||0;
+  if(ceiling&&base>0)renderMiniWF(ceiling,base);
+
+  // FINANCIALS
+  const fRet=fj.returns||{};const fAcq=fj.acquisition||{};
+  const setFin=(id,v,cls)=>{const el=document.getElementById(id);if(el){el.textContent=v;if(cls)el.className='fin-v '+cls;}};
+  const roi=fRet.annualised_roi_pct;const cf=fRet.net_cashflow_pm;
+  setFin('fROI',roi!=null?fmtP(roi):'—',roi!=null?(roi>=0?'acc':'neg'):'acc');
+  setFin('fCash',fRet.cash_on_cash_pct!=null?fmtP(fRet.cash_on_cash_pct):'—','');
+  setFin('fGY',fRet.gross_yield_pct!=null?fmtP(fRet.gross_yield_pct):'—','');
+  setFin('fNY',fRet.net_yield_pct!=null?fmtP(fRet.net_yield_pct):'—','');
+  setFin('fCF',cf!=null?fmt(cf)+'/mo':'—',cf!=null?(cf>=0?'pos':'neg'):'');
+  setFin('fPb',fRet.payback_years!=null?parseFloat(fRet.payback_years).toFixed(1)+' yrs':'—','');
+  if(cf!=null){
+    const sig=document.getElementById('finSignal');const sdt=document.getElementById('finSigDot');const stxt=document.getElementById('finSigTxt');
+    if(sig&&sdt&&stxt){
+      sig.style.display='flex';
+      if(cf>=0){sig.className='fin-signal pos';sdt.style.background='var(--grn)';stxt.textContent='Positive cashflow · '+fmt(cf)+'/mo';}
+      else{sig.className='fin-signal neg';sdt.style.background='var(--red)';stxt.textContent='Negative cashflow · '+fmt(Math.abs(cf))+'/mo shortfall';}
+    }
+  }
+
+  // COMPS
+  const housing=area.housing||{};
+  const comps=(housing.soldComps||[]).slice(0,5);
+  const clEl=document.getElementById('compList');
+  if(clEl){
+    if(comps.length){
+      const typeAbbrev=t=>{const s=(t||'').toLowerCase();if(s==='d')return'Detached';if(s==='s')return'Semi-det';if(s==='t')return'Terraced';if(s==='f')return'Flat';return t||'—';};
+      clEl.innerHTML=comps.map((c,i)=>`<div class="comp-row"><span class="comp-num">${i+1}</span><span class="comp-type">${typeAbbrev(c.property_type||c.type||'')}</span><span class="comp-price">${c.price?fmt(c.price):'—'}</span><span class="comp-dist">${c.distance_miles!=null?parseFloat(c.distance_miles).toFixed(1)+'mi':'—'}</span></div>`).join('');
+    } else {
+      clEl.innerHTML='<div style="font-family:var(--mono);font-size:8px;color:var(--tt)">No comps available — run Area Intelligence</div>';
+    }
+  }
+  // Donut
+  const ptCounts=(housing.metrics&&housing.metrics.property_type_counts)||null;
+  if(ptCounts)renderDonut(ptCounts);
+
+  // COMP MEDIAN
+  const prices=comps.map(c=>c.price).filter(Boolean);
+  const docFa=document.getElementById('docFooterAddr');const docFs=document.getElementById('docFooterScore');
+  if(docFa)docFa.textContent=addr;
+  if(docFs&&prices.length){const med=Math.round(prices.reduce((a,b)=>a+b,0)/prices.length);docFs.textContent='Comps avg: '+fmt(med);}
+
+  // FLAGS
+  const counts=sj.flag_counts||{};
+  const c=counts.critical||0,h=counts.high||0,m=counts.missing||0,n=counts.note||0;
+  const setFc=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v??0;};
+  setFc('fcC',c);setFc('fcH',h);setFc('fcM',m);setFc('fcN',n);
+  const ft=c+h+m+n;
+  if(ft>0){
+    ['C','H','M','N'].forEach((k,i)=>{const vals=[c,h,m,n];const el=document.getElementById('sev'+k);if(el)el.style.width=Math.round(vals[i]/ft*100)+'%';});
+  }
+
+  // IFRAME — load report
+  const frame=document.getElementById('reportFrame');
+  if(frame){
+    frame.src=`legalsmegal-report.html?deal_id=${encodeURIComponent(dealId)}&embedded=1`;
+  }
+
+  // NOTEPAD
+  loadNote();
+  wireLinks();
+}
+load();
+</script>
+</body>
+</html>
