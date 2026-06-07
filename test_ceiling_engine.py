@@ -584,3 +584,330 @@ def test_rpc_duration_F_matches_freehold_subject():
     result  = calculate_ceiling([], {}, sold_comps=rpc_freehold, subject=subject)
     assert result["base"]["valid_comparable_count"] == 5
     assert result["valuation_range"]["midpoint"] is not None
+
+
+# =============================================================================
+# THREE-OBJECT FLOW TESTS
+# Verify: verdict_ceiling, workbench_ceiling, financial_current_standing
+# =============================================================================
+
+from services.ceiling_engine import (
+    calculate_verdict_ceiling,
+    calculate_workbench_ceiling,
+    calculate_financial_standing,
+    BASE_UNCERTAINTY,
+)
+
+
+def _rpc_comps_5(base_price=200_000):
+    """Five valid RPC-shaped comps within 0.5 miles."""
+    return [
+        {
+            "price":            base_price,
+            "miles":            0.05 + i * 0.08,
+            "age_months":       2 + i,
+            "duration":         "F",
+            "floor_area":       65.0,
+            "hpi_multiplier":   1.00,
+            "address":          f"Flow Test Comp {i}",
+            "property_type":    "flat",
+            "evidence_quality": "official",
+        }
+        for i in range(5)
+    ]
+
+
+def _subj():
+    return {"property_type": "flat", "tenure": "freehold"}
+
+
+# ── TEST 15: Verdict ceiling has no flag risks applied ──────────────────────
+
+def test_verdict_ceiling_no_flag_risks():
+    """Verdict ceiling = weighted median of comps, no legal-pack deductions."""
+    comps = _rpc_comps_5(200_000)
+    flags = [_flag("Short lease", "critical"), _flag("Defective title", "high")]
+
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    # Verdict must call engine with no flags
+    assert verdict["_ceiling_type"] == "verdict"
+    assert verdict["legal_pack_value_risks"]["adjustment_factor"] == 1.0, (
+        "Verdict must not apply legal-pack risk — adjustment_factor must be 1.0"
+    )
+    # If no flags applied, midpoint == base_value
+    base = verdict["base"]["value"]
+    mid  = verdict["valuation_range"]["midpoint"]
+    assert mid is not None
+    assert abs(mid - base) < 1, f"Verdict midpoint must equal base when no flags applied: {mid} vs {base}"
+
+
+# ── TEST 16: Workbench ceiling <= Verdict ceiling ───────────────────────────
+
+def test_workbench_lte_verdict():
+    """Workbench ceiling must never exceed Verdict ceiling."""
+    comps = _rpc_comps_5(200_000)
+    verdict   = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    flags     = [_flag("Short lease", "critical"), _flag("Planning issue", "high")]
+    workbench = calculate_workbench_ceiling(verdict_ceiling=verdict, active_legal_flags=flags)
+
+    v_mid = verdict["valuation_range"]["midpoint"]
+    w_mid = workbench["valuation_range"]["midpoint"]
+    v_low = verdict["valuation_range"]["low"]
+    w_low = workbench["valuation_range"]["low"]
+    v_hi  = verdict["valuation_range"]["high"]
+    w_hi  = workbench["valuation_range"]["high"]
+
+    assert w_mid <= v_mid, f"workbench.midpoint {w_mid} must not exceed verdict.midpoint {v_mid}"
+    assert w_low <= v_low, f"workbench.low {w_low} must not exceed verdict.low {v_low}"
+    assert w_hi  <= v_hi,  f"workbench.high {w_hi} must not exceed verdict.high {v_hi}"
+    assert workbench["_ceiling_type"] == "workbench"
+
+
+def test_workbench_less_than_verdict_with_risks():
+    """Active flags must reduce workbench below verdict."""
+    comps     = _rpc_comps_5(200_000)
+    verdict   = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    flags     = [_flag("Defective title", "critical")]
+    workbench = calculate_workbench_ceiling(verdict_ceiling=verdict, active_legal_flags=flags)
+
+    v_mid = verdict["valuation_range"]["midpoint"]
+    w_mid = workbench["valuation_range"]["midpoint"]
+    assert w_mid < v_mid, f"Workbench must be below Verdict when active risks exist: {w_mid} vs {v_mid}"
+
+
+# ── TEST 17: All flags resolved → Workbench equals Verdict ──────────────────
+
+def test_all_flags_resolved_workbench_equals_verdict():
+    """When no active flags remain, workbench_ceiling must equal verdict_ceiling."""
+    comps     = _rpc_comps_5(200_000)
+    verdict   = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    # Empty active_legal_flags → all resolved
+    workbench = calculate_workbench_ceiling(verdict_ceiling=verdict, active_legal_flags=[])
+
+    v_mid = verdict["valuation_range"]["midpoint"]
+    w_mid = workbench["valuation_range"]["midpoint"]
+    assert w_mid == v_mid, f"Workbench must equal Verdict when all flags resolved: {w_mid} vs {v_mid}"
+
+    v_low = verdict["valuation_range"]["low"]
+    w_low = workbench["valuation_range"]["low"]
+    assert w_low == v_low, f"Workbench.low must equal Verdict.low when all resolved: {w_low} vs {v_low}"
+
+    v_hi = verdict["valuation_range"]["high"]
+    w_hi = workbench["valuation_range"]["high"]
+    assert w_hi == v_hi, f"Workbench.high must equal Verdict.high when all resolved: {w_hi} vs {v_hi}"
+
+
+# ── TEST 18: Partial resolution raises Workbench but never above Verdict ─────
+
+def test_partial_resolution_raises_workbench_not_above_verdict():
+    """Resolving some flags raises workbench but it stays <= verdict."""
+    comps   = _rpc_comps_5(200_000)
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+
+    all_flags = [
+        _flag("Short lease",    "critical"),
+        _flag("Defective title","high"),
+        _flag("Planning issue", "medium"),
+    ]
+    active_2  = all_flags[:2]   # 3 → 2 active (1 resolved)
+    active_1  = all_flags[:1]   # 3 → 1 active (2 resolved)
+    active_0  = []              # all resolved
+
+    wb_all = calculate_workbench_ceiling(verdict, all_flags)
+    wb_2   = calculate_workbench_ceiling(verdict, active_2)
+    wb_1   = calculate_workbench_ceiling(verdict, active_1)
+    wb_0   = calculate_workbench_ceiling(verdict, active_0)
+
+    vm = verdict["valuation_range"]["midpoint"]
+    m_all = wb_all["valuation_range"]["midpoint"]
+    m_2   = wb_2["valuation_range"]["midpoint"]
+    m_1   = wb_1["valuation_range"]["midpoint"]
+    m_0   = wb_0["valuation_range"]["midpoint"]
+
+    # Monotonically rising as flags resolved
+    assert m_all <= m_2,  f"wb(all) {m_all} must be <= wb(2 active) {m_2}"
+    assert m_2   <= m_1,  f"wb(2) {m_2} must be <= wb(1 active) {m_1}"
+    assert m_1   <= m_0,  f"wb(1) {m_1} must be <= wb(0 active) {m_0}"
+    # None may exceed verdict
+    for mid, label in [(m_all,"all"), (m_2,"2"), (m_1,"1"), (m_0,"0")]:
+        assert mid <= vm, f"workbench({label}) {mid} must not exceed verdict {vm}"
+
+
+# ── TEST 19: Workbench formula — product not sum ─────────────────────────────
+
+def test_workbench_uses_risk_product_not_sum():
+    """Workbench midpoint = verdict_midpoint × product(1 - adj_i)."""
+    comps   = _rpc_comps_5(200_000)
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    flags   = [_flag("Defective title", "critical"), _flag("Planning issue", "high")]
+    wb      = calculate_workbench_ceiling(verdict, flags)
+
+    vm = verdict["valuation_range"]["midpoint"]
+    # critical=0.10, high=0.06 → factor = (1-0.10)×(1-0.06) = 0.846
+    expected_factor = (1 - 0.10) * (1 - 0.06)
+    expected_mid    = round(vm * expected_factor, 2)
+    actual_mid      = wb["valuation_range"]["midpoint"]
+
+    assert abs(actual_mid - expected_mid) < 1, (
+        f"Workbench midpoint must be verdict × product(1-adj): "
+        f"expected {expected_mid} got {actual_mid}"
+    )
+    assert abs(wb["legal_pack_value_risks"]["adjustment_factor"] - expected_factor) < 0.001
+
+
+# ── TEST 20: Financial standing reads Workbench ceiling ──────────────────────
+
+def test_financial_standing_reads_workbench():
+    """financial_current_standing derives from workbench_ceiling, not verdict."""
+    comps     = _rpc_comps_5(200_000)
+    verdict   = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    flags     = [_flag("Short lease", "critical")]
+    workbench = calculate_workbench_ceiling(verdict, flags)
+    standing  = calculate_financial_standing(workbench, current_bid=150_000)
+
+    wb_mid = workbench["valuation_range"]["midpoint"]
+    wb_low = workbench["valuation_range"]["low"]
+    wb_hi  = workbench["valuation_range"]["high"]
+
+    fs_mid = standing["workbench_ceiling_range"]["midpoint"]
+    fs_low = standing["workbench_ceiling_range"]["low"]
+    fs_hi  = standing["workbench_ceiling_range"]["high"]
+
+    assert fs_mid == wb_mid, f"financial_standing.midpoint must equal workbench.midpoint: {fs_mid} vs {wb_mid}"
+    assert fs_low == wb_low, f"financial_standing.low must equal workbench.low: {fs_low} vs {wb_low}"
+    assert fs_hi  == wb_hi,  f"financial_standing.high must equal workbench.high: {fs_hi} vs {wb_hi}"
+
+
+def test_financial_standing_reads_workbench_not_verdict():
+    """Financial standing must not equal verdict ceiling when flags are active."""
+    comps     = _rpc_comps_5(200_000)
+    verdict   = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    flags     = [_flag("Defective title", "critical")]
+    workbench = calculate_workbench_ceiling(verdict, flags)
+    standing  = calculate_financial_standing(workbench, current_bid=150_000)
+
+    v_mid = verdict["valuation_range"]["midpoint"]
+    fs_mid = standing["workbench_ceiling_range"]["midpoint"]
+
+    assert fs_mid != v_mid, (
+        f"Financial standing must reference workbench, not verdict, when flags active: "
+        f"fs={fs_mid} v={v_mid}"
+    )
+    assert fs_mid < v_mid
+
+
+# ── TEST 21: MY BID does not alter Verdict or Workbench ──────────────────────
+
+def test_my_bid_does_not_alter_verdict_or_workbench():
+    """Changing current_bid must not change verdict or workbench ceilings."""
+    comps     = _rpc_comps_5(200_000)
+    verdict   = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    flags     = [_flag("Short lease", "critical")]
+    workbench = calculate_workbench_ceiling(verdict, flags)
+
+    v_mid_before = verdict["valuation_range"]["midpoint"]
+    w_mid_before = workbench["valuation_range"]["midpoint"]
+
+    # Simulate MY BID changing
+    standing_1 = calculate_financial_standing(workbench, current_bid=100_000)
+    standing_2 = calculate_financial_standing(workbench, current_bid=180_000)
+    standing_3 = calculate_financial_standing(workbench, current_bid=None)
+
+    # Verdict and Workbench midpoints must be unchanged
+    assert verdict["valuation_range"]["midpoint"]   == v_mid_before, "Verdict changed after bid"
+    assert workbench["valuation_range"]["midpoint"]  == w_mid_before, "Workbench changed after bid"
+
+    # Only current_bid and derived fields change in standing
+    assert standing_1["current_bid"] == 100_000
+    assert standing_2["current_bid"] == 180_000
+    assert standing_3["current_bid"]  is None
+    assert standing_1["workbench_ceiling_range"]["midpoint"] == w_mid_before
+    assert standing_2["workbench_ceiling_range"]["midpoint"] == w_mid_before
+
+
+# ── TEST 22: Acquisition costs excluded from all three objects ───────────────
+
+def test_acquisition_costs_excluded_from_all_three():
+    """SDLT / buyer premium / legal fees must not reduce verdict or workbench."""
+    comps    = _rpc_comps_5(200_000)
+    verdict  = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    acq_flags = [
+        {"title": "Buyer's Premium £6,999 on Completion", "severity": "high",
+         "summation": "buyers premium payable on completion"},
+        {"title": "SDLT £8,400 estimate",  "severity": "high", "summation": "stamp duty sdlt"},
+        {"title": "Legal fees £2,000",      "severity": "note", "summation": "solicitor fee"},
+    ]
+    # Verdict: no flags → no reduction regardless
+    assert verdict["legal_pack_value_risks"]["adjustment_factor"] == 1.0
+
+    # Workbench with only acquisition-cost flags → factor must still be 1.0
+    wb = calculate_workbench_ceiling(verdict, acq_flags)
+    factor = wb["legal_pack_value_risks"]["adjustment_factor"]
+    assert factor == 1.0, (
+        f"Acquisition-cost flags must not reduce workbench ceiling: factor={factor}"
+    )
+    assert wb["valuation_range"]["midpoint"] == verdict["valuation_range"]["midpoint"]
+
+
+# ── TEST 23: Legacy ceiling alias does not become canonical ──────────────────
+
+def test_legacy_ceiling_is_not_canonical():
+    """
+    calculate_ceiling (legacy path) must still work but its result must not
+    equal the verdict_ceiling because it applies flag risks.
+    The three-object API (verdict/workbench/financial) is canonical.
+    """
+    comps  = _rpc_comps_5(200_000)
+    flags  = [_flag("Short lease", "critical")]
+    # Legacy path applies flag risks inside one call
+    legacy = calculate_ceiling(flags, {}, sold_comps=comps, subject=_subj())
+    # New verdict path has no flag risks
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+
+    l_mid = legacy["valuation_range"]["midpoint"]
+    v_mid = verdict["valuation_range"]["midpoint"]
+
+    assert v_mid is not None and l_mid is not None
+    # Legacy ceiling (flag-adjusted) must be < verdict (no flags)
+    assert l_mid < v_mid, (
+        f"Legacy ceiling {l_mid} must be < verdict ceiling {v_mid} because it applies flag risks"
+    )
+    # Legacy ceiling must not be presented as the verdict object
+    assert legacy.get("_ceiling_type") != "verdict"
+
+
+# ── TEST 24: Three-object API shape ──────────────────────────────────────────
+
+def test_three_object_api_shape():
+    """All three objects expose valuation_range with low, midpoint, high."""
+    comps     = _rpc_comps_5(200_000)
+    verdict   = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    workbench = calculate_workbench_ceiling(verdict, [_flag("Short lease", "critical")])
+    standing  = calculate_financial_standing(workbench, current_bid=160_000)
+
+    for obj, name in [(verdict, "verdict"), (workbench, "workbench")]:
+        vr = obj.get("valuation_range", {})
+        assert vr.get("low")      is not None, f"{name}.valuation_range.low missing"
+        assert vr.get("midpoint") is not None, f"{name}.valuation_range.midpoint missing"
+        assert vr.get("high")     is not None, f"{name}.valuation_range.high missing"
+
+    fs_cr = standing.get("workbench_ceiling_range", {})
+    assert fs_cr.get("low")      is not None, "financial_standing.workbench_ceiling_range.low missing"
+    assert fs_cr.get("midpoint") is not None, "financial_standing.workbench_ceiling_range.midpoint missing"
+    assert fs_cr.get("high")     is not None, "financial_standing.workbench_ceiling_range.high missing"
+    assert "current_bid"     in standing
+    assert "gap_to_ceiling"  in standing
+    assert "pct_of_ceiling"  in standing
+    assert "position"        in standing
+
+
+# ── TEST 25: Workbench insufficient when verdict insufficient ─────────────────
+
+def test_workbench_insufficient_when_verdict_insufficient():
+    """If verdict has no valid comps, workbench must also be insufficient."""
+    verdict   = calculate_verdict_ceiling(sold_comps=[], subject=_subj())
+    workbench = calculate_workbench_ceiling(verdict, [_flag("Short lease", "critical")])
+
+    assert verdict["status"]   == "insufficient_evidence"
+    assert workbench["status"] == "insufficient_evidence"
+    assert workbench["valuation_range"]["midpoint"] is None

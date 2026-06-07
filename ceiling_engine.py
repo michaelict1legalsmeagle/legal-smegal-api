@@ -720,9 +720,171 @@ def _legal_pack_adjustment_factor(risks: list[dict]) -> float:
         factor *= (1.0 - adj)
     return round(max(1.0 - MAX_TOTAL_VALUE_RISK_ADJ, factor), 6)
 
+
 # =============================================================================
-# MAIN: calculate_ceiling
+# VERDICT CEILING — comparable base only, NO legal-pack flag risks applied
 # =============================================================================
+def calculate_verdict_ceiling(
+    sold_comps: Optional[list[dict]] = None,
+    subject: Optional[dict] = None,
+    base_valuation: Optional[float] = None,
+    strategy: str = "BTL",
+    fallback_allowed: bool = True,
+) -> dict:
+    """
+    Verdict ceiling: weighted median of 0.5-mile relational comparable evidence.
+    Legal-pack flag risks are NOT applied.
+    This is the ceiling the investor sees before legal-pack adjustment.
+    """
+    result = calculate_ceiling(
+        legal_flags=[],   # ← no flag risks: verdict is pure comps
+        financial_inputs={},
+        base_valuation=base_valuation,
+        strategy=strategy,
+        sold_comps=sold_comps,
+        subject=subject,
+        fallback_allowed=fallback_allowed,
+    )
+    result["_ceiling_type"] = "verdict"
+    return result
+
+
+# =============================================================================
+# WORKBENCH CEILING — verdict ceiling × active legal-pack flag risk product
+# =============================================================================
+def calculate_workbench_ceiling(
+    verdict_ceiling: dict,
+    active_legal_flags: list[dict],
+) -> dict:
+    """
+    Workbench ceiling: verdict_ceiling × active_flag_risk_factor.
+
+    active_flag_risk_factor = product(1 - value_adjustment_i)
+        for each active (unresolved) legal-pack value risk.
+
+    Workbench ceiling is clamped so it cannot exceed verdict ceiling.
+    If active_legal_flags is empty, workbench_ceiling equals verdict_ceiling.
+    """
+    active_legal_flags = active_legal_flags if isinstance(active_legal_flags, list) else []
+
+    verdict_vr   = verdict_ceiling.get("valuation_range") or {}
+    verdict_mid  = verdict_vr.get("midpoint")
+    verdict_low  = verdict_vr.get("low")
+    verdict_high = verdict_vr.get("high")
+    u_band       = verdict_vr.get("uncertainty_band", BASE_UNCERTAINTY)
+
+    # If verdict has no valid midpoint, workbench is also insufficient
+    if not verdict_mid or verdict_mid <= 0:
+        return {
+            "_ceiling_type": "workbench",
+            "status": "insufficient_evidence",
+            "valuation_range": {"low": None, "midpoint": None, "high": None, "uncertainty_band": None},
+            "ceiling_range":   {"low": None, "high": None},
+            "legal_pack_value_risks": {"method": "property_value_risk_adjustment_only",
+                                       "adjustment_factor": 1.0, "adjusted_value": None, "risks": []},
+            "active_flag_count": len(active_legal_flags),
+            "confidence": verdict_ceiling.get("confidence"),
+            "audit": {"warnings": ["verdict_ceiling has no valid midpoint — workbench cannot be computed"]},
+        }
+
+    # Compute active flag risk adjustment
+    active_risks = _process_legal_risks(active_legal_flags)
+    risk_factor  = _legal_pack_adjustment_factor(active_risks)
+
+    wb_mid  = round(verdict_mid  * risk_factor, 2)
+    wb_low  = round(verdict_low  * risk_factor, 2) if verdict_low  is not None else round(wb_mid * (1 - u_band), 2)
+    wb_high = round(verdict_high * risk_factor, 2) if verdict_high is not None else round(wb_mid * (1 + u_band), 2)
+
+    # Clamp: workbench must never exceed verdict
+    wb_mid  = min(wb_mid,  verdict_mid)
+    wb_low  = min(wb_low,  verdict_low  if verdict_low  is not None else wb_low)
+    wb_high = min(wb_high, verdict_high if verdict_high is not None else wb_high)
+
+    return {
+        "_ceiling_type": "workbench",
+        "status": verdict_ceiling.get("status", "ok"),
+        "valuation_range": {
+            "low":              wb_low,
+            "midpoint":         wb_mid,
+            "high":             wb_high,
+            "uncertainty_band": u_band,
+        },
+        "ceiling_range": {
+            "low":  int(round(wb_low))  if wb_low  is not None else None,
+            "high": int(round(wb_high)) if wb_high is not None else None,
+        },
+        "legal_pack_value_risks": {
+            "method":            "property_value_risk_adjustment_only",
+            "adjustment_factor": risk_factor,
+            "adjusted_value":    wb_mid,
+            "risks":             active_risks,
+        },
+        "active_flag_count": len(active_legal_flags),
+        "verdict_midpoint":  verdict_mid,
+        "confidence":        verdict_ceiling.get("confidence"),
+        "base":              verdict_ceiling.get("base"),
+        "base_valuation":    verdict_ceiling.get("base_valuation"),
+        "base_method":       verdict_ceiling.get("base_method"),
+        "strategy_used":     verdict_ceiling.get("strategy_used"),
+        "audit": {
+            "verdict_ceiling_midpoint": verdict_mid,
+            "active_flag_count":        len(active_legal_flags),
+            "risk_adjustment_factor":   risk_factor,
+            "formula": "workbench_midpoint = verdict_midpoint × active_flag_risk_factor",
+        },
+        # acquisition costs excluded
+        "acquisition_costs":   None,
+        "excluded_from_ceiling": EXCLUDED_FROM_CEILING,
+    }
+
+
+# =============================================================================
+# FINANCIAL CURRENT STANDING — read workbench ceiling vs current bid
+# =============================================================================
+def calculate_financial_standing(
+    workbench_ceiling: dict,
+    current_bid: Optional[float] = None,
+) -> dict:
+    """
+    Financial current standing: comparison of current_bid vs workbench ceiling.
+    Does NOT calculate valuation. Does NOT apply legal risk.
+    MY BID changes current_standing only — never alters verdict or workbench ceiling.
+    """
+    wb_vr  = workbench_ceiling.get("valuation_range") or {}
+    wb_mid = wb_vr.get("midpoint")
+    wb_low = wb_vr.get("low")
+    wb_high= wb_vr.get("high")
+
+    if current_bid and current_bid > 0 and wb_mid and wb_mid > 0:
+        gap_to_ceiling = round(wb_mid - current_bid, 2)
+        pct_of_ceiling = round((current_bid / wb_mid) * 100, 1)
+        if current_bid < wb_low if wb_low else False:
+            position = "below_range"
+        elif current_bid > wb_high if wb_high else False:
+            position = "above_ceiling"
+        elif current_bid > wb_mid:
+            position = "above_midpoint"
+        else:
+            position = "within_range"
+    else:
+        gap_to_ceiling = None
+        pct_of_ceiling = None
+        position = "no_bid"
+
+    return {
+        "workbench_ceiling_range": {
+            "low":      wb_low,
+            "midpoint": wb_mid,
+            "high":     wb_high,
+        },
+        "current_bid":     current_bid,
+        "gap_to_ceiling":  gap_to_ceiling,
+        "pct_of_ceiling":  pct_of_ceiling,
+        "position":        position,
+        "_note": "MY BID changes current_standing only. Verdict and Workbench ceilings are unchanged.",
+    }
+
+
 def calculate_ceiling(
     legal_flags: list[dict],
     financial_inputs: dict,
