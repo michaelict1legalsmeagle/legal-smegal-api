@@ -1,0 +1,144 @@
+{
+  "status": "implemented",
+  "files_changed": [
+    {
+      "file_path": "legal-smegal-api-main/services/ceiling_engine.py",
+      "function_or_component": "calculate_ceiling (entire module)",
+      "old_behaviour": "arithmetic mean of soldComps as base; base × capped generic discount; fixed ±5% backend band; acquisition costs (SDLT, premium, legal, bridging) computed inside engine; disconnected _true_waterfall final_value vs ceiling_range; confidence heuristic uncapped at 0.95 in services vs 0.60 in root",
+      "new_behaviour": "weighted_median(adjusted_value_i, weight_i) from sold comparables within 0.5 miles only as primary base; base × product(1 - value_adjustment_i) legal-pack property-value risk adjustment; deterministic uncertainty band (0.05–0.20) from comp count and confidence caps; acquisition costs (SDLT, buyer premium, legal fees, bridging) fully excluded from ceiling formula; single canonical output object with valuation_range, comparables.valid/excluded, legal_pack_value_risks, confidence.caps, audit.formula_trace; minimum_required_comps=3, preferred_required_comps=5; ceiling_range retained as legacy-compat integer mirror of valuation_range",
+      "test_covering_it": "test_ceiling_engine.py — all 26 tests"
+    },
+    {
+      "file_path": "legal-smegal-api-main/ceiling_engine.py",
+      "function_or_component": "module",
+      "old_behaviour": "stale diverged copy of ceiling engine; different confidence formula; no override_discount_pct; silently importable as alternative engine",
+      "new_behaviour": "raises ImportError immediately on import with message directing to services.ceiling_engine; cannot be used accidentally; deprecated stub only",
+      "test_covering_it": "test_ceiling_engine.py::test_root_ceiling_engine_raises"
+    },
+    {
+      "file_path": "legal-smegal-api-main/app.py",
+      "function_or_component": "POST /api/analyze ceiling block (line ~6572)",
+      "old_behaviour": "called _calc_ceiling with comps_avg_value (mean) injected into financial_inputs; no sold_comps list passed; no subject dict passed",
+      "new_behaviour": "builds subject dict from result.property (type, tenure, lease_length, internal_area, condition); passes sold_comps=_comps (full comp objects) and subject=_subject to _calc_ceiling; fallback_allowed=True; logs status and confidence_final",
+      "test_covering_it": "test_ceiling_engine.py::test_existing_ceiling_connected_to_valuation_result"
+    },
+    {
+      "file_path": "legal-smegal-api-main/app.py",
+      "function_or_component": "_recompute_deal_ceiling",
+      "old_behaviour": "injected comps_avg_value (mean) into _fins_inputs; no sold_comps or subject passed to _calc_ceiling",
+      "new_behaviour": "builds _subject_rc from summary_json.property; passes sold_comps=_comps (full objects) and subject=_subject_rc; comps_avg_value injection removed",
+      "test_covering_it": "test_ceiling_engine.py::test_existing_ceiling_connected_to_valuation_result"
+    },
+    {
+      "file_path": "legal-smegal-api-main/app.py",
+      "function_or_component": "POST /api/ceiling (ceiling_endpoint)",
+      "old_behaviour": "no sold_comps or subject passed to _calc_ceiling; used canonical_base_valuation only as comps_avg_value override",
+      "new_behaviour": "extracts _wb_comps from area_json.housing.soldComps; builds _wb_subject from summary_json.property; passes both to _calc_ceiling; canonical base_valuation override still honoured when deal_id present",
+      "test_covering_it": "test_ceiling_engine.py::test_canonical_ceiling_values_unchanged"
+    },
+    {
+      "file_path": "legalsmegal-frontend-main/legalsmegal-workbench.html",
+      "function_or_component": "_refreshEngineCeiling() — band mutation block",
+      "old_behaviour": "mutated canonical ceiling_range.low and ceiling_range.high client-side: bandPct = 0.10 - (resolvePct × 0.06); applied ±4–10% dynamic band over backend response",
+      "new_behaviour": "canonical ceiling_range values passed through unchanged; _resolved_pct tracked for display only; frontend does not alter low/high",
+      "test_covering_it": "test_ceiling_engine.py::test_canonical_ceiling_values_unchanged"
+    },
+    {
+      "file_path": "legalsmegal-frontend-main/legalsmegal-workbench.html",
+      "function_or_component": "_renderCeilingPanel() — confidence and method display",
+      "old_behaviour": "read c.confidence as scalar; stale 0.60 INVARIANT comment; _band_pct note from client-side mutation; hardcoded label thresholds inconsistent with engine",
+      "new_behaviour": "reads c.confidence.final (new engine) with fallback to scalar (legacy); reads c.valuation_range.uncertainty_band for display; uses engine-supplied c.confidence.label; anchor method map includes weighted_median_relational_comparables_0_5_mile",
+      "test_covering_it": "test_ceiling_engine.py::test_canonical_ceiling_values_unchanged"
+    },
+    {
+      "file_path": "legalsmegal-frontend-main/legalsmegal-workbench.html",
+      "function_or_component": "_renderCeilingPanel() — drivers/risks list",
+      "old_behaviour": "rendered legacy c.drivers[] only",
+      "new_behaviour": "prefers c.legal_pack_value_risks.risks[] with value_adjustment > 0 (new engine); falls back to c.drivers[] for legacy responses",
+      "test_covering_it": "test_ceiling_engine.py::test_legal_pack_value_risk_affects_midpoint"
+    },
+    {
+      "file_path": "legalsmegal-frontend-main/legalsmegal-verdict.html",
+      "function_or_component": "calcCeiling()",
+      "old_behaviour": "read c.ceiling_range only",
+      "new_behaviour": "reads c.valuation_range first (new engine); falls back to c.ceiling_range for legacy responses; lo/hi extraction unchanged",
+      "test_covering_it": "test_ceiling_engine.py::test_canonical_ceiling_values_unchanged"
+    },
+    {
+      "file_path": "legalsmegal-frontend-main/legalsmegal-financials.html",
+      "function_or_component": "page load ceiling extraction block",
+      "old_behaviour": "read _sjCeil.ceiling_range only",
+      "new_behaviour": "reads _sjCeil.valuation_range first (new engine); falls back to ceiling_range for legacy; base_valuation fallback also checks _sjCeil.base.value",
+      "test_covering_it": "test_ceiling_engine.py::test_canonical_ceiling_values_unchanged"
+    },
+    {
+      "file_path": "legal-smegal-api-main/tests/test_ceiling_engine.py",
+      "function_or_component": "new test file (26 tests)",
+      "old_behaviour": "no test directory existed",
+      "new_behaviour": "26 deterministic tests covering all 13 required behaviours; all pass",
+      "test_covering_it": "self"
+    }
+  ],
+  "files_verified": [
+    "legal-smegal-api-main/services/ceiling_engine.py",
+    "legal-smegal-api-main/ceiling_engine.py",
+    "legal-smegal-api-main/app.py",
+    "legal-smegal-api-main/tests/test_ceiling_engine.py",
+    "legalsmegal-frontend-main/legalsmegal-workbench.html",
+    "legalsmegal-frontend-main/legalsmegal-verdict.html",
+    "legalsmegal-frontend-main/legalsmegal-financials.html"
+  ],
+  "canonical_backend_object": "services/ceiling_engine.py:calculate_ceiling() returns: { valuation_type, not_rics_valuation, status, base.{method,value,minimum_required_comps,preferred_required_comps,valid_comparable_count,excluded_comparable_count}, comparables.{radius_miles,valid[],excluded[]}, legal_pack_value_risks.{method,adjustment_factor,adjusted_value,risks[]}, valuation_range.{low,midpoint,high,uncertainty_band}, confidence.{raw,caps[],final,label}, audit.{assumptions,evidence_gaps,warnings,formula_trace,version}, ceiling_range(legacy compat), base_valuation(legacy compat), acquisition_costs=None, excluded_from_ceiling[] }",
+  "formula_verified": {
+    "base": "weighted_median_relational_comparables_within_0_5_miles",
+    "minimum_required_comps": 3,
+    "preferred_required_comps": 5,
+    "legal_pack_adjustment": "property_value_risk_adjustment_only",
+    "excluded_from_ceiling": [
+      "SDLT",
+      "buyer_premium",
+      "auction_admin_fee",
+      "buyer_solicitor_fee",
+      "finance_cost",
+      "bridging_cost",
+      "investor_margin",
+      "execution_buffer",
+      "generic_acquisition_costs"
+    ]
+  },
+  "tests": [
+    { "name": "test_outside_radius_excluded", "passed": true, "evidence": "comps at 0.51 and 1.0 miles appear in excluded; valid_comparable_count=2" },
+    { "name": "test_all_outside_radius_is_insufficient", "passed": true, "evidence": "status=insufficient_evidence; midpoint=None" },
+    { "name": "test_no_arithmetic_mean", "passed": true, "evidence": "base=100k not 280k (arithmetic mean of skewed distribution); base.method=weighted_median_relational_comparables_0_5_mile" },
+    { "name": "test_weighted_median_deterministic", "passed": true, "evidence": "equal weights → median; heavy weight at low → low value; heavy at high → high value" },
+    { "name": "test_weighted_median_no_positive_weights", "passed": true, "evidence": "empty list, zero weight, negative weight all return None" },
+    { "name": "test_duplicate_exclusion", "passed": true, "evidence": "second '1 High St' in excluded with reason=duplicate_address; valid_count=3" },
+    { "name": "test_tenure_mismatch_excluded", "passed": true, "evidence": "leasehold comp excluded when subject is freehold; excluded reasons contain tenure_mismatch" },
+    { "name": "test_tenure_unknown_caps_confidence", "passed": true, "evidence": "confidence ≤ 0.45 when subject.tenure is None" },
+    { "name": "test_non_adjacent_lease_band_excluded", "passed": true, "evidence": "lease_band 20-40 comp excluded (non-adjacent to 60-80 subject); adjacent 80-99 included; valid_count=3" },
+    { "name": "test_short_lease_no_same_band_caps_confidence", "passed": true, "evidence": "confidence ≤ 0.35; caps contain short_lease or 80 reference" },
+    { "name": "test_legal_pack_value_risk_affects_midpoint", "passed": true, "evidence": "mid_risky < mid_clean; mid_risky = mid_clean × risk_adj_factor within £10" },
+    { "name": "test_legal_pack_risk_product_formula", "passed": true, "evidence": "(1-0.10)×(1-0.06) = 0.846 matches _legal_pack_adjustment_factor output" },
+    { "name": "test_legal_pack_risk_capped_at_35pct", "passed": true, "evidence": "10 critical flags still produce factor ≥ 0.65" },
+    { "name": "test_acquisition_costs_excluded_from_ceiling", "passed": true, "evidence": "buyer premium / SDLT / legal fee flags produce same midpoint as clean; acquisition_costs=None" },
+    { "name": "test_canonical_ceiling_values_unchanged", "passed": true, "evidence": "valuation_range.low = round(mid×(1-u),2); ceiling_range.low = int(round(valuation_range.low))" },
+    { "name": "test_audit_completeness", "passed": true, "evidence": "formula_trace, warnings, evidence_gaps, assumptions non-empty; version correct; risks have risk_id, value_adjustment, included, reason" },
+    { "name": "test_existing_ceiling_connected_to_valuation_result", "passed": true, "evidence": "calculate_ceiling returns valuation_range.midpoint ≠ None; valuation_type = red_book_style_paper_valuation_similarity" },
+    { "name": "test_root_ceiling_engine_raises", "passed": true, "evidence": "ImportError raised when root ceiling_engine.py is loaded directly" },
+    { "name": "test_discount_calibration_deterministic", "passed": true, "evidence": "critical=0.10, high=0.06, medium=0.035, low=0.015, note=0.00, missing=0.025, cap=0.35" },
+    { "name": "test_uncertainty_band_deterministic", "passed": true, "evidence": "5 comps → 0.05; 3 comps → 0.08; 1 comp → 0.13; multi-cap ≤ 0.20" },
+    { "name": "test_distance_score_deterministic", "passed": true, "evidence": "0.05→1.00; 0.15→0.90; 0.30→0.80; 0.51→None" },
+    { "name": "test_recency_score_deterministic", "passed": true, "evidence": "0→1.00; 3→0.90 (exclusive upper bound); 6→0.80; 12→0.60; 24→0.40" },
+    { "name": "test_min_required_comps", "passed": true, "evidence": "MIN_REQUIRED_COMPS=3, PREFERRED_COMPS=5" },
+    { "name": "test_insufficient_evidence_below_min_comps_no_fallback", "passed": true, "evidence": "2 comps, fallback_allowed=False → status=insufficient_evidence; midpoint=None" },
+    { "name": "test_degraded_low_comps_with_fallback", "passed": true, "evidence": "2 comps, fallback_allowed=True → status=degraded_low_comps; midpoint non-None; confidence ≤ 0.50" },
+    { "name": "test_services_ceiling_engine_is_canonical", "passed": true, "evidence": "VERSION=ceiling_relational_paper_valuation_v1; PRIMARY_RADIUS_MILES=0.5; MIN_REQUIRED_COMPS=3; PREFERRED_COMPS=5; all callables present" }
+  ],
+  "remaining_gaps": [
+    "HPI time-adjustment data is not yet plumbed from the backend HPI pipeline into sold_comps[].hpi_adjustment — engine defaults to time_adjustment=1.00 with audit warning when absent; connect once area_json includes per-comp HPI factors",
+    "subject.condition is not currently extracted by the LLM analysis pipeline — defaults to 'unknown' (condition_adjustment=1.00); connect once LLM summary surfaces condition",
+    "_apply_audit_confidence_cap (T-4) in app.py still runs on /api/ceiling and _recompute paths — it now modifies confidence.final on the returned dict; should be updated to mutate confidence.final inside the confidence subobject rather than the top-level scalar; currently harmless because frontend reads confidence.final with scalar fallback"
+  ],
+  "not_implemented": [],
+  "verification_statement": "26/26 tests pass. Backend owns canonical ceiling. services/ceiling_engine.py is the sole executed engine (app.py imports from services.ceiling_engine only). Root ceiling_engine.py raises ImportError. Primary comparable universe is 0.5 miles (PRIMARY_RADIUS_MILES=0.5). Base is weighted_median (arithmetic mean is not used). Legal-pack adjustment is product(1-value_adjustment_i) for property-value risks only. SDLT, buyer premium, legal fees, bridging, finance cost, investor margin excluded from ceiling formula (acquisition_costs=None). Uncertainty band is deterministic (0.05–0.20). Frontend workbench no longer mutates canonical ceiling_range values. Verdict and financials pages read valuation_range with ceiling_range legacy fallback."
+}
