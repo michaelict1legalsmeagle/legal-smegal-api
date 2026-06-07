@@ -1310,3 +1310,171 @@ def test_api_ceiling_fixture_all_flags_resolved():
     w_mid = response["workbench_ceiling"]["valuation_range"]["midpoint"]
     assert w_mid == v_mid, f"All resolved: workbench {w_mid} must equal verdict {v_mid}"
     assert w_mid <= v_mid  # also satisfies never-exceed
+
+
+# =============================================================================
+# MANDATORY FIXTURE TEST — £372k–£411k verdict, 38% discount
+# =============================================================================
+
+def test_mandatory_fixture_workbench_from_verdict_range():
+    """
+    Mandatory fixture per task specification:
+    Verdict range = £372,000–£411,000
+    risk_discount_pct = 38%  →  risk_factor = 0.62
+    Expected Workbench:
+      low  = 372_000 × 0.62 = 230_640
+      high = 411_000 × 0.62 = 254_820
+
+    Workbench MUST NOT output £18,000–£20,000.
+    """
+    from services.ceiling_engine import calculate_workbench_ceiling
+
+    # Simulate the legacy ceiling stored in summary_json
+    # (Verdict range that the Verdict page displays)
+    legacy_ceiling = {
+        "base_valuation": 391_500,   # midpoint of 372k–411k
+        "ceiling_range":  {"low": 372_000, "high": 411_000},
+        "base_method":    "legacy_ceiling",
+        "confidence":     0.55,
+    }
+
+    # Simulate what /api/ceiling now builds as verdict_result from legacy ceiling
+    _ub    = 0.05
+    _v_lo  = 372_000.0
+    _v_hi  = 411_000.0
+    _v_mid = 391_500.0
+    verdict_result = {
+        "_ceiling_type":  "verdict",
+        "_legacy_source": True,
+        "status":         "ok",
+        "base": {"value": _v_mid, "method": "legacy_ceiling"},
+        "base_valuation":  int(_v_mid),
+        "valuation_range": {
+            "low":              _v_lo,
+            "midpoint":         _v_mid,
+            "high":             _v_hi,
+            "uncertainty_band": _ub,
+        },
+        "ceiling_range": {"low": int(_v_lo), "high": int(_v_hi)},
+        "confidence": {"final": 0.55, "label": "Low confidence"},
+        "legal_pack_value_risks": {
+            "method": "property_value_risk_adjustment_only",
+            "adjustment_factor": 1.0, "adjusted_value": None, "risks": [],
+        },
+        "audit": {"warnings": [], "version": "ceiling_relational_paper_valuation_v1"},
+        "acquisition_costs": None,
+        "excluded_from_ceiling": [],
+    }
+
+    # Active flags producing ~38% risk discount
+    # product(1-0.10)(1-0.06)(1-0.06)(1-0.035)(1-0.06)(1-0.06)(1-0.015) ≈ 0.62
+    active_flags = [
+        {"title": "Leasehold Title",         "severity": "critical", "summation": ""},
+        {"title": "Building Safety Act",      "severity": "high",     "summation": ""},
+        {"title": "Existing Mortgage",        "severity": "high",     "summation": ""},
+        {"title": "Lease Only 125 Years",     "severity": "medium",   "summation": ""},
+        {"title": "No Assignment Sub-Sale",   "severity": "high",     "summation": ""},
+        {"title": "Mines and Minerals",       "severity": "high",     "summation": ""},
+        {"title": "Interest Rate on Late",    "severity": "low",      "summation": ""},
+    ]
+
+    wb = calculate_workbench_ceiling(verdict_result, active_flags)
+
+    wb_lo  = wb["valuation_range"]["low"]
+    wb_hi  = wb["valuation_range"]["high"]
+    wb_mid = wb["valuation_range"]["midpoint"]
+
+    # Must not be £18k–£20k (the yield-based junk)
+    assert wb_lo  > 50_000,  f"Workbench.low {wb_lo} is unrealistically low — wrong base source"
+    assert wb_hi  > 50_000,  f"Workbench.high {wb_hi} is unrealistically low — wrong base source"
+    assert wb_mid > 100_000, f"Workbench.midpoint {wb_mid} is unrealistically low — wrong base source"
+
+    # Must be below verdict (risk factor < 1)
+    assert wb_lo  <= _v_lo,  f"Workbench.low {wb_lo} must not exceed verdict.low {_v_lo}"
+    assert wb_hi  <= _v_hi,  f"Workbench.high {wb_hi} must not exceed verdict.high {_v_hi}"
+    assert wb_mid <= _v_mid, f"Workbench.midpoint {wb_mid} must not exceed verdict.midpoint {_v_mid}"
+
+    # Must be in the right ballpark (38% discount → ~62% of verdict)
+    risk_factor = wb["legal_pack_value_risks"]["adjustment_factor"]
+    expected_lo  = round(_v_lo  * risk_factor, 0)
+    expected_hi  = round(_v_hi  * risk_factor, 0)
+
+    assert abs(wb_lo  - expected_lo)  < 5_000, (
+        f"Workbench.low {wb_lo} should be ~{expected_lo} (verdict × risk_factor)"
+    )
+    assert abs(wb_hi  - expected_hi)  < 5_000, (
+        f"Workbench.high {wb_hi} should be ~{expected_hi} (verdict × risk_factor)"
+    )
+
+    # risk_discount_pct should reflect the flags
+    assert wb["risk_discount_pct"] > 0, "Active flags must produce non-zero risk_discount_pct"
+    assert wb["risk_discount_pct"] < 50, "risk_discount_pct should not exceed 50% for these flags"
+
+
+def test_ensure_ceiling_owned_objects_uses_legacy_range_not_estimate():
+    """
+    ensure_ceiling_owned_objects must build verdict_ceiling from the actual
+    legacy ceiling_range.low/high, not recalculate from base ± 5%.
+    If legacy stores £372k–£411k, verdict must show £372k–£411k not £372k ± 5%.
+    """
+    from services.ceiling_engine import ensure_ceiling_owned_objects
+
+    sj = {
+        "ceiling": {
+            "base_valuation": 391_500,
+            "ceiling_range":  {"low": 372_000, "high": 411_000},
+            "base_method":    "comps",
+            "confidence":     0.55,
+        }
+    }
+    result = ensure_ceiling_owned_objects(sj, area_json={}, legal_flags=[])
+    vc_vr = result["verdict_ceiling"]["valuation_range"]
+
+    assert abs(vc_vr["low"]  - 372_000) < 1_000, (
+        f"verdict_ceiling.low should be ~372k (from legacy range), got {vc_vr['low']}"
+    )
+    assert abs(vc_vr["high"] - 411_000) < 1_000, (
+        f"verdict_ceiling.high should be ~411k (from legacy range), got {vc_vr['high']}"
+    )
+
+
+def test_api_ceiling_legacy_deal_workbench_uses_legacy_range():
+    """
+    Simulate the /api/ceiling path for a deal with only sj.ceiling (no verdict_ceiling).
+    The workbench must be derived from the actual ceiling_range, not re-derived from comps.
+    Verdict: £372k–£411k → Workbench must be in that neighbourhood, not £18k–£20k.
+    """
+    from services.ceiling_engine import calculate_workbench_ceiling
+
+    # What app.py now builds as verdict_result for legacy deals
+    verdict_result = {
+        "_ceiling_type":  "verdict",
+        "_legacy_source": True,
+        "status":         "ok",
+        "base": {"value": 391_500, "method": "legacy_ceiling"},
+        "base_valuation":  391_500,
+        "valuation_range": {
+            "low": 372_000.0, "midpoint": 391_500.0, "high": 411_000.0, "uncertainty_band": 0.05
+        },
+        "ceiling_range": {"low": 372_000, "high": 411_000},
+        "confidence": {"final": 0.55, "label": "Low confidence"},
+        "legal_pack_value_risks": {
+            "method": "property_value_risk_adjustment_only",
+            "adjustment_factor": 1.0, "adjusted_value": None, "risks": [],
+        },
+        "audit": {"warnings": [], "version": "ceiling_relational_paper_valuation_v1"},
+        "acquisition_costs": None, "excluded_from_ceiling": [],
+    }
+
+    # All flags resolved → workbench should equal verdict
+    wb_resolved = calculate_workbench_ceiling(verdict_result, active_legal_flags=[])
+    assert wb_resolved["valuation_range"]["low"]  == 372_000.0
+    assert wb_resolved["valuation_range"]["high"] == 411_000.0
+    assert wb_resolved["risk_discount_pct"] == 0.0
+    assert wb_resolved["all_flags_resolved"] is True
+
+    # With one critical flag
+    wb_risk = calculate_workbench_ceiling(verdict_result, [{"title": "Defective title", "severity": "critical", "summation": ""}])
+    assert wb_risk["valuation_range"]["low"]  < 372_000, "Risk must reduce low"
+    assert wb_risk["valuation_range"]["high"] < 411_000, "Risk must reduce high"
+    assert wb_risk["valuation_range"]["low"]  > 50_000,  "Must not be £18k junk"

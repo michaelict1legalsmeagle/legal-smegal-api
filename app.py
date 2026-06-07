@@ -7626,41 +7626,95 @@ def ceiling_endpoint():
             # ── V2 PATH: verdict × active flags ─────────────────────────────
             if _persisted_verdict and (_persisted_verdict.get("valuation_range") or {}).get("midpoint"):
                 verdict_result = _persisted_verdict
+
             else:
-                # No persisted verdict_ceiling yet — re-derive from comps.
-                # Cap against legacy ceiling base_valuation so workbench
-                # never exceeds the previously-stored ceiling.
+                # No persisted verdict_ceiling yet (deal analysed before v2 deploy).
+                # The legacy summary_json.ceiling IS the verdict ceiling for old deals —
+                # it was computed by the v1 engine from area comps and is what Verdict
+                # page displays. Use it directly as verdict_result rather than
+                # re-running the relational engine (which may have no 0.5-mile comps
+                # and will produce an incorrect yield-based or insufficient result).
                 _legacy_ceil = (_sj.get("ceiling") or {}) if isinstance(_sj, dict) else {}
                 _legacy_base = None
+                _legacy_lo   = None
+                _legacy_hi   = None
                 try:
                     _lb_raw = _legacy_ceil.get("base_valuation")
                     if _lb_raw and float(_lb_raw) > 5000:
                         _legacy_base = float(_lb_raw)
+                    # Prefer ceiling_range or valuation_range for low/high
+                    _lcr = _legacy_ceil.get("ceiling_range") or _legacy_ceil.get("valuation_range") or {}
+                    _lo_raw = _lcr.get("low")
+                    _hi_raw = _lcr.get("high")
+                    if _lo_raw and float(_lo_raw) > 5000:
+                        _legacy_lo = float(_lo_raw)
+                    if _hi_raw and float(_hi_raw) > 5000:
+                        _legacy_hi = float(_hi_raw)
                 except (TypeError, ValueError):
                     pass
 
-                verdict_result = _calc_verdict_ceiling(
-                    sold_comps=_wb_comps if deal_id else [],
-                    subject=_wb_subject if deal_id else {},
-                    base_valuation=float(base_val) if base_val else None,
-                    strategy=str(strategy),
-                    fallback_allowed=True,
-                )
-                _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
-
-                if _legacy_base and _legacy_base > 0:
-                    _vr = verdict_result.get("valuation_range") or {}
-                    _v_mid = _vr.get("midpoint") or 0
-                    if _v_mid and _v_mid > _legacy_base:
-                        _ub = _vr.get("uncertainty_band") or 0.05
-                        verdict_result["valuation_range"]["midpoint"] = round(_legacy_base, 2)
-                        verdict_result["valuation_range"]["low"]  = round(_legacy_base * (1 - _ub), 2)
-                        verdict_result["valuation_range"]["high"] = round(_legacy_base * (1 + _ub), 2)
-                        verdict_result["_legacy_capped"] = True
-                        verdict_result.setdefault("audit", {}).setdefault("warnings", []).append(
-                            "verdict re-derived from comps; capped to legacy ceiling base_valuation "
-                            f"(re-derive={_v_mid} > legacy={_legacy_base})"
-                        )
+                if _legacy_base and _legacy_base > 5000:
+                    # Build a verdict_result directly from the persisted legacy ceiling.
+                    # This is what Verdict page shows — it is the correct base.
+                    _ub = 0.05
+                    _v_mid = _legacy_base
+                    _v_lo  = _legacy_lo  if _legacy_lo  else round(_legacy_base * (1 - _ub), 2)
+                    _v_hi  = _legacy_hi  if _legacy_hi  else round(_legacy_base * (1 + _ub), 2)
+                    verdict_result = {
+                        "_ceiling_type":  "verdict",
+                        "_legacy_source": True,
+                        "status":         "ok",
+                        "base": {
+                            "value":  _legacy_base,
+                            "method": _legacy_ceil.get("base_method", "legacy_ceiling"),
+                        },
+                        "base_valuation":  int(round(_legacy_base)),
+                        "base_method":     _legacy_ceil.get("base_method", "legacy_ceiling"),
+                        "valuation_range": {
+                            "low":              round(_v_lo, 2),
+                            "midpoint":         round(_v_mid, 2),
+                            "high":             round(_v_hi, 2),
+                            "uncertainty_band": _ub,
+                        },
+                        "ceiling_range": {
+                            "low":  int(round(_v_lo)),
+                            "high": int(round(_v_hi)),
+                        },
+                        "confidence": _legacy_ceil.get("confidence") or {"final": 0.45, "label": "Low confidence"},
+                        "legal_pack_value_risks": {
+                            "method":            "property_value_risk_adjustment_only",
+                            "adjustment_factor": 1.0,
+                            "adjusted_value":    None,
+                            "risks":             [],
+                        },
+                        "audit": {
+                            "warnings":    ["verdict_result built from legacy summary_json.ceiling — re-analyse to get relational comparable base"],
+                            "version":     "ceiling_relational_paper_valuation_v1",
+                            "assumptions": ["base_valuation from legacy ceiling; low/high from legacy ceiling_range"],
+                        },
+                        "acquisition_costs":   None,
+                        "excluded_from_ceiling": [],
+                    }
+                    app.logger.info(
+                        f"[ceiling] deal={deal_id} using legacy ceiling as verdict base "
+                        f"mid={_v_mid} lo={_v_lo} hi={_v_hi}"
+                    )
+                else:
+                    # No legacy base either — run relational engine as last resort.
+                    # This will return insufficient_evidence if no comps are available,
+                    # which is the correct state to surface.
+                    verdict_result = _calc_verdict_ceiling(
+                        sold_comps=_wb_comps if deal_id else [],
+                        subject=_wb_subject if deal_id else {},
+                        base_valuation=float(base_val) if base_val else None,
+                        strategy=str(strategy),
+                        fallback_allowed=True,
+                    )
+                    _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
+                    app.logger.warning(
+                        f"[ceiling] deal={deal_id} no legacy base — re-derived from comps; "
+                        f"status={verdict_result.get('status')}"
+                    )
 
             # Workbench ceiling = verdict × active flag risk product
             result = _calc_workbench_ceiling(
