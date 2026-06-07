@@ -504,3 +504,83 @@ def test_services_ceiling_engine_is_canonical():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# =============================================================================
+# TEST 14: housing_comps_v1 RPC field-name aliases
+# =============================================================================
+
+def test_rpc_field_name_aliases():
+    """
+    housing_comps_v1 RPC returns comps with these field names:
+      miles          (not distance_miles)
+      price          (already correct)
+      duration       (F/L — not tenure)
+      age_months     (not months_ago)
+      floor_area     (not internal_area)
+      hpi_multiplier (not hpi_adjustment)
+
+    Engine must normalise all of these and produce a valid ceiling.
+    If any alias is missed, every comp fails _assess_comp and
+    status = insufficient_evidence with midpoint = None.
+    """
+    rpc_comps = [
+        {
+            "price":          200_000,
+            "miles":          0.15,       # RPC field name
+            "age_months":     4,           # RPC field name
+            "duration":       "F",         # RPC code for freehold
+            "floor_area":     65.0,        # RPC field name
+            "hpi_multiplier": 1.03,        # RPC field name
+            "address":        f"RPC Comp {i}",
+            "property_type":  "flat",
+            "evidence_quality": "official",
+        }
+        for i in range(5)
+    ]
+    # Give each a unique address to avoid duplicate exclusion
+    for i, c in enumerate(rpc_comps):
+        c["address"] = f"RPC Comp {i} High Street"
+
+    subject = _subject(tenure="freehold", prop_type="flat", area=65.0)
+    result  = calculate_ceiling([], {}, sold_comps=rpc_comps, subject=subject)
+
+    assert result["status"] != "insufficient_evidence", (
+        f"RPC field aliases not normalised — all comps excluded. "
+        f"Excluded: {[e['reason'] for e in result['comparables']['excluded']]}"
+    )
+    assert result["base"]["valid_comparable_count"] == 5
+    assert result["valuation_range"]["midpoint"] is not None
+    assert result["valuation_range"]["midpoint"] > 100_000
+
+
+def test_rpc_duration_L_maps_to_leasehold():
+    """duration='L' must map to leasehold — tenure mismatch against freehold subject."""
+    rpc_leasehold_comps = [
+        {"price": 200_000, "miles": 0.1, "age_months": 2,
+         "duration": "L",  # leasehold
+         "address": f"L{i}", "property_type": "flat", "evidence_quality": "official"}
+        for i in range(3)
+    ]
+    subject = _subject(tenure="freehold", prop_type="flat")
+    result  = calculate_ceiling([], {}, sold_comps=rpc_leasehold_comps, subject=subject)
+    # All comps should be excluded for tenure mismatch
+    excl_reasons = [e["reason"] for e in result["comparables"]["excluded"]]
+    assert all("tenure_mismatch" in r for r in excl_reasons), (
+        f"duration='L' comps vs freehold subject must all be excluded; reasons: {excl_reasons}"
+    )
+    assert result["status"] == "insufficient_evidence"
+
+
+def test_rpc_duration_F_matches_freehold_subject():
+    """duration='F' must map to freehold and match a freehold subject."""
+    rpc_freehold = [
+        {"price": 200_000, "miles": 0.1 + i*0.05, "age_months": 2,
+         "duration": "F",  # freehold
+         "address": f"F{i}", "property_type": "flat", "evidence_quality": "official"}
+        for i in range(5)
+    ]
+    subject = _subject(tenure="freehold", prop_type="flat")
+    result  = calculate_ceiling([], {}, sold_comps=rpc_freehold, subject=subject)
+    assert result["base"]["valid_comparable_count"] == 5
+    assert result["valuation_range"]["midpoint"] is not None

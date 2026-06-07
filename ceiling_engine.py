@@ -332,7 +332,13 @@ def _assess_comp(
     reasons_excluded = []
     audit_warnings = []
 
-    price = comp.get("price") or comp.get("sale_price")
+    # ── Normalise field names from housing_comps_v1 RPC ──────────────────────
+    # RPC returns:  miles, price, duration (F/L), age_months, floor_area,
+    #               hpi_multiplier, property_type, postcode, paon, saon, street
+    # Engine expects: distance_miles, price, tenure, months_ago, internal_area,
+    #               hpi_adjustment, property_type
+    # Build a normalised view without mutating the original comp dict.
+    price = comp.get("price") or comp.get("sale_price") or comp.get("price_paid")
     try:
         price = float(price)
     except (TypeError, ValueError):
@@ -341,7 +347,7 @@ def _assess_comp(
     if not price or price <= 0:
         return None, {"comp_idx": comp_idx, "reason": "invalid_price", "comp": comp}
 
-    dist = comp.get("distance_miles") or comp.get("distance")
+    dist = comp.get("distance_miles") or comp.get("distance") or comp.get("miles")
     try:
         dist = float(dist)
     except (TypeError, ValueError):
@@ -369,9 +375,26 @@ def _assess_comp(
         type_score = TYPE_NEAR_EQUIV  # unknown — partial
         audit_warnings.append("property_type unknown for comp or subject")
 
-    # Tenure match
+    # Tenure: engine expects "freehold"/"leasehold" strings.
+    # RPC returns duration="F" or "L". Normalise both.
+    _raw_tenure = comp.get("tenure") or comp.get("duration") or ""
+    _dur = str(_raw_tenure).strip().upper()
+    if _dur == "F":
+        comp_tenure_norm = "freehold"
+    elif _dur == "L":
+        comp_tenure_norm = "leasehold"
+    elif _dur:
+        comp_tenure_norm = _raw_tenure.lower()
+    else:
+        comp_tenure_norm = None
+
     subj_tenure = (subject.get("tenure") or "").lower() or None
-    comp_tenure = (comp.get("tenure") or "").lower() or None
+    # Normalise subject tenure from RPC duration codes if needed
+    if subj_tenure == "f":
+        subj_tenure = "freehold"
+    elif subj_tenure == "l":
+        subj_tenure = "leasehold"
+    comp_tenure  = comp_tenure_norm
     tenure_adj = _tenure_adjustment_match(subj_tenure, comp_tenure)
     if tenure_adj is None:
         return None, {"comp_idx": comp_idx, "reason": f"tenure_mismatch subj={subj_tenure} comp={comp_tenure}", "comp": comp}
@@ -411,7 +434,7 @@ def _assess_comp(
 
     # Size
     subj_area = subject.get("internal_area") or subject.get("floor_area")
-    comp_area  = comp.get("internal_area") or comp.get("floor_area")
+    comp_area  = comp.get("internal_area") or comp.get("floor_area") or comp.get("total_floor_area")
     try:
         subj_area = float(subj_area) if subj_area else None
         comp_area  = float(comp_area)  if comp_area  else None
@@ -424,7 +447,7 @@ def _assess_comp(
         audit_warnings.append("floor_area missing for size adjustment")
 
     # Recency
-    months = comp.get("months_ago") or comp.get("age_months")
+    months = comp.get("months_ago") or comp.get("age_months") or comp.get("age")
     try:
         months = float(months) if months is not None else None
     except (TypeError, ValueError):
@@ -432,7 +455,7 @@ def _assess_comp(
     rec_score = _recency_score(months)
 
     # Time adjustment
-    hpi_factor = comp.get("hpi_adjustment") or comp.get("time_adjustment")
+    hpi_factor = comp.get("hpi_adjustment") or comp.get("time_adjustment") or comp.get("hpi_multiplier")
     try:
         hpi_factor = float(hpi_factor) if hpi_factor else None
     except (TypeError, ValueError):
@@ -571,6 +594,8 @@ def _calculate_confidence(
 
     # lease_certainty
     subj_tenure = (subject.get("tenure") or "").lower()
+    if subj_tenure == "f": subj_tenure = "freehold"
+    if subj_tenure == "l": subj_tenure = "leasehold"
     leasehold_material = "leasehold" in subj_tenure
     if not leasehold_material:
         lease_certainty = 1.00
@@ -817,9 +842,12 @@ def calculate_ceiling(
     # ── STEP 5: Confidence ───────────────────────────────────────────────────
     formula_trace.append("step_5: confidence calculation")
 
-    tenure_unknown = not subject.get("tenure")
+    _subj_tenure_raw = (subject.get("tenure") or "").strip()
+    if _subj_tenure_raw.upper() == "F": _subj_tenure_raw = "freehold"
+    if _subj_tenure_raw.upper() == "L": _subj_tenure_raw = "leasehold"
+    tenure_unknown = not _subj_tenure_raw
     lease_unknown  = (
-        "leasehold" in (subject.get("tenure") or "").lower()
+        "leasehold" in _subj_tenure_raw.lower()
         and subject.get("lease_length") is None
     )
 
