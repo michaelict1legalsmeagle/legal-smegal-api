@@ -22,20 +22,42 @@ except ImportError:
     pdfplumber = None
 
 # --- Solicitor Q&A (bounded clarification) ---
+# --- Ceiling engine (relational comparable valuation) ---
+# Import the ceiling engine. All five functions are present in the current
+# ceiling_engine.py. If an older deployment is missing the newer functions,
+# we fall back gracefully so that _ceiling_engine_available stays True and
+# /api/ceiling returns 200 (not 503) using the legacy calculate_ceiling path.
+_calc_ceiling            = None
+_calc_verdict_ceiling    = None
+_calc_workbench_ceiling  = None
+_calc_financial_standing = None
+_ensure_ceiling_objects  = None
+_ceiling_engine_available = False
+
 try:
-    from services.ceiling_engine import (
-        calculate_ceiling as _calc_ceiling,
-        calculate_verdict_ceiling as _calc_verdict_ceiling,
-        calculate_workbench_ceiling as _calc_workbench_ceiling,
-        calculate_financial_standing as _calc_financial_standing,
-        ensure_ceiling_owned_objects as _ensure_ceiling_objects,
-    )
+    from services.ceiling_engine import calculate_ceiling as _calc_ceiling  # type: ignore
     _ceiling_engine_available = True
 except ImportError:
-    _calc_ceiling = None
-    _ceiling_engine_available = False
     import logging as _log
     _log.getLogger(__name__).warning("[ceiling] ceiling_engine not available — ceiling skipped")
+
+if _ceiling_engine_available:
+    # Import the newer functions added in v2. These are present in the
+    # current ceiling_engine.py. If for any reason they are absent
+    # (e.g. partial rollout), fall back to None and the endpoint will
+    # use the legacy calculate_ceiling path instead of returning 503.
+    try:
+        from services.ceiling_engine import (  # type: ignore
+            calculate_verdict_ceiling    as _calc_verdict_ceiling,
+            calculate_workbench_ceiling  as _calc_workbench_ceiling,
+            calculate_financial_standing as _calc_financial_standing,
+            ensure_ceiling_owned_objects as _ensure_ceiling_objects,
+        )
+    except ImportError:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "[ceiling] ceiling_engine v2 functions not found — using legacy calculate_ceiling path"
+        )
 try:
     from services.solicitor_qa_engine import clarify_flag  # type: ignore
 except Exception:
@@ -7581,12 +7603,15 @@ def ceiling_endpoint():
         if not isinstance(legal_flags, list):
             return jsonify({"error": "legal_flags must be an array"}), 400
 
-        if not _ceiling_engine_available or not _calc_verdict_ceiling:
+        if not _ceiling_engine_available or not _calc_ceiling:
             return jsonify({"error": "ceiling_engine not available on this deployment"}), 503
 
         # /api/ceiling is the Workbench live endpoint.
+        # Uses v2 three-object path (verdict/workbench) when available.
+        # Falls back to legacy calculate_ceiling when v2 not yet deployed.
+        _use_v2 = bool(_calc_verdict_ceiling and _calc_workbench_ceiling)
+
         # Read the persisted verdict_ceiling base; apply active_legal_flags risk product.
-        # If a fresh verdict is needed (no persisted one), recompute from comps.
         _persisted_verdict = None
         if deal_id:
             try:
@@ -7597,54 +7622,66 @@ def ceiling_endpoint():
             except Exception:
                 pass
 
-        if _persisted_verdict and (_persisted_verdict.get("valuation_range") or {}).get("midpoint"):
-            verdict_result = _persisted_verdict
-        else:
-            # No persisted verdict_ceiling yet (deal analysed before v2 deploy).
-            # Re-derive verdict from comps, but cap against the legacy ceiling
-            # base_valuation to prevent a yield-based re-derive from producing
-            # a higher value than the stored ceiling (workbench must never exceed verdict).
-            _legacy_ceil = (_sj.get("ceiling") or {}) if isinstance(_sj, dict) else {}
-            _legacy_base = None
-            try:
-                _lb_raw = _legacy_ceil.get("base_valuation")
-                if _lb_raw and float(_lb_raw) > 5000:
-                    _legacy_base = float(_lb_raw)
-            except (TypeError, ValueError):
-                pass
+        if _use_v2:
+            # ── V2 PATH: verdict × active flags ─────────────────────────────
+            if _persisted_verdict and (_persisted_verdict.get("valuation_range") or {}).get("midpoint"):
+                verdict_result = _persisted_verdict
+            else:
+                # No persisted verdict_ceiling yet — re-derive from comps.
+                # Cap against legacy ceiling base_valuation so workbench
+                # never exceeds the previously-stored ceiling.
+                _legacy_ceil = (_sj.get("ceiling") or {}) if isinstance(_sj, dict) else {}
+                _legacy_base = None
+                try:
+                    _lb_raw = _legacy_ceil.get("base_valuation")
+                    if _lb_raw and float(_lb_raw) > 5000:
+                        _legacy_base = float(_lb_raw)
+                except (TypeError, ValueError):
+                    pass
 
-            verdict_result = _calc_verdict_ceiling(
-                sold_comps=_wb_comps if deal_id else [],
-                subject=_wb_subject if deal_id else {},
+                verdict_result = _calc_verdict_ceiling(
+                    sold_comps=_wb_comps if deal_id else [],
+                    subject=_wb_subject if deal_id else {},
+                    base_valuation=float(base_val) if base_val else None,
+                    strategy=str(strategy),
+                    fallback_allowed=True,
+                )
+                _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
+
+                if _legacy_base and _legacy_base > 0:
+                    _vr = verdict_result.get("valuation_range") or {}
+                    _v_mid = _vr.get("midpoint") or 0
+                    if _v_mid and _v_mid > _legacy_base:
+                        _ub = _vr.get("uncertainty_band") or 0.05
+                        verdict_result["valuation_range"]["midpoint"] = round(_legacy_base, 2)
+                        verdict_result["valuation_range"]["low"]  = round(_legacy_base * (1 - _ub), 2)
+                        verdict_result["valuation_range"]["high"] = round(_legacy_base * (1 + _ub), 2)
+                        verdict_result["_legacy_capped"] = True
+                        verdict_result.setdefault("audit", {}).setdefault("warnings", []).append(
+                            "verdict re-derived from comps; capped to legacy ceiling base_valuation "
+                            f"(re-derive={_v_mid} > legacy={_legacy_base})"
+                        )
+
+            # Workbench ceiling = verdict × active flag risk product
+            result = _calc_workbench_ceiling(
+                verdict_ceiling=verdict_result,
+                active_legal_flags=legal_flags,
+            )
+            _apply_audit_confidence_cap(result, _area_data_for_cap)
+
+        else:
+            # ── LEGACY PATH ──────────────────────────────────────────────────
+            # ceiling_engine.py v2 functions not yet deployed — use legacy
+            # calculate_ceiling. Returns a single unified ceiling object.
+            app.logger.info("[ceiling] using legacy calculate_ceiling path (v2 not deployed)")
+            result = _calc_ceiling(
+                legal_flags=legal_flags,
+                financial_inputs=financial_inputs,
                 base_valuation=float(base_val) if base_val else None,
                 strategy=str(strategy),
-                fallback_allowed=True,
             )
-            _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
-
-            # If re-derived verdict base is higher than legacy ceiling base,
-            # clamp verdict midpoint/range down to legacy ceiling range so
-            # workbench can never exceed the previously-stored ceiling.
-            if _legacy_base and _legacy_base > 0:
-                _vr = verdict_result.get("valuation_range") or {}
-                _v_mid = _vr.get("midpoint") or 0
-                if _v_mid and _v_mid > _legacy_base:
-                    _ub = _vr.get("uncertainty_band") or 0.05
-                    verdict_result["valuation_range"]["midpoint"] = round(_legacy_base, 2)
-                    verdict_result["valuation_range"]["low"]  = round(_legacy_base * (1 - _ub), 2)
-                    verdict_result["valuation_range"]["high"] = round(_legacy_base * (1 + _ub), 2)
-                    verdict_result["_legacy_capped"] = True
-                    verdict_result.setdefault("audit", {}).setdefault("warnings", []).append(
-                        "verdict re-derived from comps; capped to legacy ceiling base_valuation "
-                        f"(re-derive={_v_mid} > legacy={_legacy_base})"
-                    )
-
-        # Workbench ceiling = verdict × active flag risk product
-        result = _calc_workbench_ceiling(
-            verdict_ceiling=verdict_result,
-            active_legal_flags=legal_flags,
-        )
-        _apply_audit_confidence_cap(result, _area_data_for_cap)
+            _apply_audit_confidence_cap(result, _area_data_for_cap)
+            verdict_result = result  # same object on legacy path
 
         # D4 — Path B (/api/ceiling) applies the same T-4 confidence cap as
         # Path A (_recompute_deal_ceiling). Both paths thus report identical
@@ -7659,8 +7696,6 @@ def ceiling_endpoint():
                 _high = _cr.get("high")
                 _mid  = round((_low + _high) / 2) if _low and _high else None
                 if _mid and _mid > 5000:
-                    _existing_fin = merged or {}
-                    _monthly_rent = _existing_fin.get("monthly_rent")
                     supabase.table("deals").update({
                         "bid_ceiling": _mid,
                         "updated_at": now_iso(),
@@ -7669,12 +7704,14 @@ def ceiling_endpoint():
             except Exception as _se:
                 print(f"[ceiling] Store to DB failed: {_se}")
 
+        _fs = _calc_financial_standing(result, current_bid=None) if _calc_financial_standing else None
+
         return jsonify({
             "ok": True,
             "ceiling":           result,           # workbench_ceiling (legacy key)
             "workbench_ceiling": result,
             "verdict_ceiling":   verdict_result,
-            "financial_current_standing": _calc_financial_standing(result, current_bid=None),
+            "financial_current_standing": _fs,
         }), 200
 
     except Exception as e:
