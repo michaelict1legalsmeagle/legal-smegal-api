@@ -911,3 +911,192 @@ def test_workbench_insufficient_when_verdict_insufficient():
     assert verdict["status"]   == "insufficient_evidence"
     assert workbench["status"] == "insufficient_evidence"
     assert workbench["valuation_range"]["midpoint"] is None
+
+
+# =============================================================================
+# BACKFILL / NORMALISATION HELPER TESTS (tests 26–32)
+# =============================================================================
+
+from services.ceiling_engine import (
+    ensure_ceiling_owned_objects,
+    VERSION,
+)
+
+
+def _legacy_ceiling_dict(base=250_000, lo=237_500, hi=262_500):
+    """Simulate an old summary_json.ceiling (pre-v2 deploy)."""
+    return {
+        "base_valuation": base,
+        "ceiling_range":  {"low": lo, "high": hi},
+        "confidence":     0.55,
+        "strategy_used":  "BTL",
+    }
+
+
+def _rpc_comps_within(base_price=200_000, n=5):
+    return [
+        {"price": base_price, "miles": 0.05 + i*0.07, "age_months": 2,
+         "duration": "F", "floor_area": 65.0, "hpi_multiplier": 1.00,
+         "address": f"Backfill Comp {i}", "property_type": "flat",
+         "evidence_quality": "official"}
+        for i in range(n)
+    ]
+
+
+# ── TEST 26: Backfill creates verdict and workbench from comps ────────────────
+
+def test_backfill_creates_owned_objects_from_comps():
+    """Old deal with only sj.ceiling gets verdict_ceiling and workbench_ceiling."""
+    sj = {"ceiling": _legacy_ceiling_dict(), "flags": [_flag("Short lease", "critical")]}
+    area = {"housing": {"soldComps": _rpc_comps_within(200_000)}}
+    result = ensure_ceiling_owned_objects(sj, area_json=area, legal_flags=[_flag("Short lease", "critical")])
+
+    assert "verdict_ceiling" in result
+    assert "workbench_ceiling" in result
+    assert "financial_current_standing" in result
+
+    vc_mid = result["verdict_ceiling"]["valuation_range"]["midpoint"]
+    wb_mid = result["workbench_ceiling"]["valuation_range"]["midpoint"]
+    assert vc_mid is not None and vc_mid > 0
+    assert wb_mid is not None and wb_mid > 0
+    assert wb_mid <= vc_mid
+
+
+# ── TEST 27: Legacy-only deal — workbench never exceeds verdict ───────────────
+
+def test_old_deal_legacy_only_workbench_never_exceeds_verdict():
+    """Old deal with no comps and only sj.ceiling: workbench must not exceed verdict."""
+    sj = {"ceiling": _legacy_ceiling_dict(base=250_000, lo=237_500, hi=262_500)}
+    # No area_json comps — should backfill from legacy base
+    result = ensure_ceiling_owned_objects(sj, area_json={}, legal_flags=[_flag("Defective title", "high")])
+
+    vc_mid = result["verdict_ceiling"]["valuation_range"]["midpoint"]
+    wb_mid = result["workbench_ceiling"]["valuation_range"]["midpoint"]
+    assert vc_mid is not None and vc_mid > 0
+    assert wb_mid <= vc_mid, f"Workbench {wb_mid} must not exceed verdict {vc_mid}"
+
+
+# ── TEST 28: Hard clamp enforced by helper ────────────────────────────────────
+
+def test_helper_hard_clamp_enforces_workbench_lte_verdict():
+    """If an existing workbench_ceiling somehow exceeds verdict, helper clamps it."""
+    sj = {
+        "verdict_ceiling": {
+            "_ceiling_type": "verdict",
+            "valuation_range": {"low": 190_000, "midpoint": 200_000, "high": 210_000, "uncertainty_band": 0.05},
+            "ceiling_range": {"low": 190_000, "high": 210_000},
+        },
+        "workbench_ceiling": {
+            "_ceiling_type": "workbench",
+            "valuation_range": {"low": 220_000, "midpoint": 230_000, "high": 240_000, "uncertainty_band": 0.05},
+            "ceiling_range": {"low": 220_000, "high": 240_000},
+            "legal_pack_value_risks": {"adjustment_factor": 1.0, "risks": []},
+        },
+    }
+    result = ensure_ceiling_owned_objects(sj)
+    wb_mid = result["workbench_ceiling"]["valuation_range"]["midpoint"]
+    vc_mid = result["verdict_ceiling"]["valuation_range"]["midpoint"]
+    # The helper either recomputes (invalid wb) or hard-clamps — either way:
+    assert wb_mid <= vc_mid, f"Workbench {wb_mid} must be <= verdict {vc_mid} after helper"
+
+
+# ── TEST 29: Legacy sj.ceiling does not override owned objects ────────────────
+
+def test_legacy_ceiling_does_not_override_owned_objects():
+    """
+    If verdict_ceiling and workbench_ceiling already exist and are valid,
+    the helper preserves them and does not replace with sj.ceiling values.
+    """
+    comps = _rpc_comps_within(200_000)
+    verdict   = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    workbench = calculate_workbench_ceiling(verdict, [])
+
+    sj = {
+        "ceiling":           _legacy_ceiling_dict(base=999_000),  # wrong legacy value
+        "verdict_ceiling":   verdict,
+        "workbench_ceiling": workbench,
+    }
+    result = ensure_ceiling_owned_objects(sj)
+
+    vc_mid = result["verdict_ceiling"]["valuation_range"]["midpoint"]
+    wb_mid = result["workbench_ceiling"]["valuation_range"]["midpoint"]
+    assert vc_mid < 999_000, "Legacy ceiling must not override valid verdict_ceiling"
+    assert wb_mid < 999_000, "Legacy ceiling must not override valid workbench_ceiling"
+
+
+# ── TEST 30: bid_ceiling is not used as canonical valuation ──────────────────
+
+def test_bid_ceiling_not_canonical():
+    """
+    bid_ceiling (DB column) is not passed to ensure_ceiling_owned_objects.
+    It must not appear as a valuation source.
+    """
+    # No comps, no legacy ceiling, no bid_ceiling in the helper signature
+    sj = {}
+    result = ensure_ceiling_owned_objects(sj, area_json={}, legal_flags=[])
+    vc = result["verdict_ceiling"]
+    assert vc["status"] == "missing_data"
+    assert vc["valuation_range"]["midpoint"] is None
+    # bid_ceiling field should not appear in verdict or workbench ranges
+    assert "bid_ceiling" not in str(result.get("verdict_ceiling", {}))
+    assert "bid_ceiling" not in str(result.get("workbench_ceiling", {}))
+
+
+# ── TEST 31: financial_current_standing always equals workbench range ─────────
+
+def test_financial_standing_always_equals_workbench_after_backfill():
+    """After backfill, financial_current_standing.workbench_ceiling_range == workbench.valuation_range."""
+    comps = _rpc_comps_within(200_000)
+    area  = {"housing": {"soldComps": comps}}
+    sj    = {"ceiling": _legacy_ceiling_dict(), "flags": []}
+    result = ensure_ceiling_owned_objects(sj, area_json=area, legal_flags=[], current_bid=160_000)
+
+    wb_vr = result["workbench_ceiling"]["valuation_range"]
+    fs_cr = result["financial_current_standing"]["workbench_ceiling_range"]
+
+    assert fs_cr["midpoint"] == wb_vr["midpoint"]
+    assert fs_cr["low"]      == wb_vr["low"]
+    assert fs_cr["high"]     == wb_vr["high"]
+    assert result["financial_current_standing"]["current_bid"] == 160_000
+
+
+# ── TEST 32: /api/ceiling fixture — verify numeric relationships ──────────────
+
+def test_api_ceiling_fixture_numeric_relationships():
+    """
+    Simulate the /api/ceiling response using a fixture deal.
+    Verify: verdict.midpoint >= workbench.midpoint
+    financial_standing.workbench_ceiling_range == workbench.valuation_range
+    """
+    from services.ceiling_engine import calculate_financial_standing
+
+    comps   = _rpc_comps_within(200_000)
+    flags   = [_flag("Defective title", "critical"), _flag("Short lease", "high")]
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    wb      = calculate_workbench_ceiling(verdict, flags)
+    fs      = calculate_financial_standing(wb, current_bid=155_000)
+
+    # Simulated API response structure
+    response = {
+        "ok": True,
+        "ceiling":           wb,
+        "workbench_ceiling": wb,
+        "verdict_ceiling":   verdict,
+        "financial_current_standing": fs,
+    }
+
+    v_mid  = response["verdict_ceiling"]["valuation_range"]["midpoint"]
+    wb_mid = response["workbench_ceiling"]["valuation_range"]["midpoint"]
+    v_lo   = response["verdict_ceiling"]["valuation_range"]["low"]
+    wb_lo  = response["workbench_ceiling"]["valuation_range"]["low"]
+    v_hi   = response["verdict_ceiling"]["valuation_range"]["high"]
+    wb_hi  = response["workbench_ceiling"]["valuation_range"]["high"]
+    fs_cr  = response["financial_current_standing"]["workbench_ceiling_range"]
+
+    assert v_mid >= wb_mid, f"verdict.midpoint {v_mid} must be >= workbench.midpoint {wb_mid}"
+    assert v_lo  >= wb_lo,  f"verdict.low {v_lo} must be >= workbench.low {wb_lo}"
+    assert v_hi  >= wb_hi,  f"verdict.high {v_hi} must be >= workbench.high {wb_hi}"
+
+    assert fs_cr["midpoint"] == wb_mid
+    assert fs_cr["low"]      == wb_lo
+    assert fs_cr["high"]     == wb_hi

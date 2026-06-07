@@ -28,6 +28,7 @@ try:
         calculate_verdict_ceiling as _calc_verdict_ceiling,
         calculate_workbench_ceiling as _calc_workbench_ceiling,
         calculate_financial_standing as _calc_financial_standing,
+        ensure_ceiling_owned_objects as _ensure_ceiling_objects,
     )
     _ceiling_engine_available = True
 except ImportError:
@@ -5996,9 +5997,30 @@ def get_deal(deal_id: str):
         if not result.data:
             return jsonify({"error": "Deal not found"}), 404
         deal = result.data
-        # area_json is fetched via POST /api/deals/:id/area (verdict and area pages both trigger this)
-        # Do NOT launch a second background thread here — it races with the POST /area fetch
-        # and produces inconsistent area_json (missing property_type, guide_price, gp data).
+        # Backfill owned ceiling objects on old deals that only have legacy summary_json.ceiling.
+        # This is a read-time normalisation — does not write to DB (avoids race on GET).
+        if _ceiling_engine_available and _ensure_ceiling_objects:
+            try:
+                _sj = deal.get("summary_json") or {}
+                if not _sj.get("verdict_ceiling") or not _sj.get("workbench_ceiling"):
+                    _sj = _ensure_ceiling_objects(
+                        summary_json=dict(_sj),
+                        area_json=deal.get("area_json"),
+                        financials_json=deal.get("financials_json"),
+                        legal_flags=(_sj.get("flags") or []),
+                        current_bid=None,
+                        strategy=(deal.get("financials_json") or {}).get("inputs", {}).get("strategy", "BTL"),
+                        subject={
+                            "property_type": deal.get("deal_type"),
+                            "tenure":        (_sj.get("property") or {}).get("tenure"),
+                            "lease_length":  (_sj.get("property") or {}).get("lease_length"),
+                            "internal_area": (_sj.get("property") or {}).get("internal_area"),
+                        },
+                    )
+                    deal = dict(deal)
+                    deal["summary_json"] = _sj
+            except Exception as _be:
+                app.logger.warning(f"[get_deal] backfill failed for {deal_id}: {_be}")
         return jsonify({"ok": True, "deal": deal}), 200
     except Exception as e:
         app.logger.exception("get_deal failed")
@@ -7652,6 +7674,7 @@ def ceiling_endpoint():
             "ceiling":           result,           # workbench_ceiling (legacy key)
             "workbench_ceiling": result,
             "verdict_ceiling":   verdict_result,
+            "financial_current_standing": _calc_financial_standing(result, current_bid=None),
         }), 200
 
     except Exception as e:

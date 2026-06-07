@@ -1139,3 +1139,227 @@ def calculate_ceiling(
         "acquisition_costs": None,
         "excluded_from_ceiling": EXCLUDED_FROM_CEILING,
     }
+
+
+# =============================================================================
+# BACKFILL / NORMALISATION HELPER
+# ensure_ceiling_owned_objects(summary_json, area_json, financials_json, flags, current_bid)
+#
+# Called before any page payload or API response is returned.
+# Rules:
+#  - preserve existing verdict_ceiling if valid (has valuation_range.midpoint > 0)
+#  - preserve existing workbench_ceiling if valid AND <= verdict ceiling
+#  - compute verdict_ceiling if missing and enough comp data exists
+#  - compute workbench_ceiling from verdict_ceiling and active flags
+#  - compute financial_current_standing from current_bid and workbench_ceiling
+#  - clamp workbench_ceiling to verdict_ceiling (hard invariant)
+#  - use legacy summary_json.ceiling only as a safety cap if no owned objects
+#  - mark missing-data state explicitly if not enough source data
+#  - write audit notes: computed | preserved | backfilled | capped | missing_data
+#  - acquisition costs do not enter verdict or workbench ceiling
+#  - bid_ceiling is not canonical valuation
+# =============================================================================
+
+def ensure_ceiling_owned_objects(
+    summary_json:     dict,
+    area_json:        Optional[dict] = None,
+    financials_json:  Optional[dict] = None,
+    legal_flags:      Optional[list[dict]] = None,
+    current_bid:      Optional[float] = None,
+    strategy:         str = "BTL",
+    subject:          Optional[dict] = None,
+) -> dict:
+    """
+    Normalise summary_json to contain verdict_ceiling, workbench_ceiling,
+    and financial_current_standing as separate owned objects.
+
+    Returns the mutated summary_json dict.
+    Does NOT write to the database — caller is responsible for persistence.
+    """
+    summary_json  = summary_json  if isinstance(summary_json,  dict) else {}
+    area_json     = area_json     if isinstance(area_json,     dict) else {}
+    financials_json = financials_json if isinstance(financials_json, dict) else {}
+    legal_flags   = legal_flags   if isinstance(legal_flags,   list) else []
+    subject       = subject       if isinstance(subject,        dict) else {}
+
+    audit_notes: list[str] = []
+
+    # ── 0. Extract sold comps from area_json ──────────────────────────────
+    _housing   = area_json.get("housing") or {}
+    _sold_comps = _housing.get("soldComps") or _housing.get("value") or []
+    _sold_comps = _sold_comps if isinstance(_sold_comps, list) else []
+
+    # ── 1. Validate existing verdict_ceiling ─────────────────────────────
+    _existing_vc = summary_json.get("verdict_ceiling")
+    _vc_valid = (
+        isinstance(_existing_vc, dict)
+        and isinstance(_existing_vc.get("valuation_range"), dict)
+        and (_existing_vc["valuation_range"].get("midpoint") or 0) > 0
+    )
+
+    if _vc_valid:
+        verdict = _existing_vc
+        audit_notes.append("verdict_ceiling: preserved (existing valid object)")
+    else:
+        # Compute verdict from comps if available
+        if _sold_comps:
+            verdict = calculate_verdict_ceiling(
+                sold_comps=_sold_comps,
+                subject=subject,
+                strategy=strategy,
+                fallback_allowed=True,
+            )
+            if (verdict.get("valuation_range") or {}).get("midpoint"):
+                audit_notes.append(f"verdict_ceiling: computed from {len(_sold_comps)} sold comps")
+            else:
+                # Comp data present but insufficient (e.g. all outside 0.5 miles)
+                # Fall back to legacy ceiling as safety cap
+                _legacy = summary_json.get("ceiling") or {}
+                _leg_base = None
+                try:
+                    _lb = _legacy.get("base_valuation")
+                    if _lb and float(_lb) > 5000:
+                        _leg_base = float(_lb)
+                except (TypeError, ValueError):
+                    pass
+                if _leg_base:
+                    _ub = 0.05
+                    verdict["valuation_range"]["midpoint"] = round(_leg_base, 2)
+                    verdict["valuation_range"]["low"]  = round(_leg_base * (1 - _ub), 2)
+                    verdict["valuation_range"]["high"] = round(_leg_base * (1 + _ub), 2)
+                    verdict["_ceiling_type"] = "verdict"
+                    verdict["_legacy_capped"] = True
+                    audit_notes.append(
+                        f"verdict_ceiling: insufficient comps; capped to legacy ceiling "
+                        f"base_valuation={_leg_base}"
+                    )
+                else:
+                    audit_notes.append("verdict_ceiling: insufficient comps and no legacy cap — missing_data")
+        else:
+            # No comps — check legacy ceiling for safety cap
+            _legacy = summary_json.get("ceiling") or {}
+            _leg_base = None
+            try:
+                _lb = _legacy.get("base_valuation")
+                if _lb and float(_lb) > 5000:
+                    _leg_base = float(_lb)
+            except (TypeError, ValueError):
+                pass
+
+            if _leg_base:
+                # Build a minimal verdict object from legacy base
+                _ub = 0.05
+                verdict = {
+                    "_ceiling_type":   "verdict",
+                    "_legacy_capped":  True,
+                    "status":          "legacy_cap",
+                    "base": {"value": _leg_base, "method": "legacy_ceiling_cap"},
+                    "base_valuation":  int(round(_leg_base)),
+                    "base_method":     "legacy_ceiling_cap",
+                    "valuation_range": {
+                        "low":              round(_leg_base * (1 - _ub), 2),
+                        "midpoint":         round(_leg_base, 2),
+                        "high":             round(_leg_base * (1 + _ub), 2),
+                        "uncertainty_band": _ub,
+                    },
+                    "ceiling_range": {
+                        "low":  int(round(_leg_base * (1 - _ub))),
+                        "high": int(round(_leg_base * (1 + _ub))),
+                    },
+                    "comparables": {"radius_miles": PRIMARY_RADIUS_MILES, "valid": [], "excluded": []},
+                    "legal_pack_value_risks": {
+                        "method": "property_value_risk_adjustment_only",
+                        "adjustment_factor": 1.0, "adjusted_value": None, "risks": [],
+                    },
+                    "confidence": {"final": 0.30, "caps": [{"cap": 0.30, "reason": "legacy_ceiling_cap"}],
+                                   "label": "Low confidence"},
+                    "audit": {
+                        "assumptions": ["base_value from legacy summary_json.ceiling"],
+                        "evidence_gaps": ["no sold comps available for relational comparable base"],
+                        "warnings": ["verdict_ceiling derived from legacy ceiling — backfill when comps available"],
+                        "formula_trace": ["legacy_cap: base_valuation from summary_json.ceiling.base_valuation"],
+                        "version": VERSION,
+                    },
+                    "acquisition_costs": None,
+                    "excluded_from_ceiling": EXCLUDED_FROM_CEILING,
+                }
+                audit_notes.append(f"verdict_ceiling: backfilled from legacy ceiling base_valuation={_leg_base}")
+            else:
+                # No data at all — explicit missing-data state
+                verdict = {
+                    "_ceiling_type": "verdict",
+                    "status": "missing_data",
+                    "valuation_range": {"low": None, "midpoint": None, "high": None, "uncertainty_band": None},
+                    "ceiling_range":   {"low": None, "high": None},
+                    "base": {"value": None, "method": "none"},
+                    "confidence": {"final": 0.0, "caps": [{"cap": 0.0, "reason": "no_data"}], "label": "Insufficient evidence"},
+                    "audit": {"warnings": ["no sold comps and no legacy ceiling — missing_data"],
+                              "version": VERSION},
+                    "acquisition_costs": None,
+                    "excluded_from_ceiling": EXCLUDED_FROM_CEILING,
+                }
+                audit_notes.append("verdict_ceiling: missing_data — no comps and no legacy ceiling")
+
+        summary_json["verdict_ceiling"] = verdict
+
+    # ── 2. Validate / compute workbench_ceiling ───────────────────────────
+    _existing_wb = summary_json.get("workbench_ceiling")
+    _v_mid = (verdict.get("valuation_range") or {}).get("midpoint") or 0
+    _wb_valid = (
+        isinstance(_existing_wb, dict)
+        and isinstance(_existing_wb.get("valuation_range"), dict)
+        and (_existing_wb["valuation_range"].get("midpoint") or 0) <= _v_mid + 1  # clamp tolerance £1
+        and (_existing_wb["valuation_range"].get("midpoint") or 0) > 0
+    )
+
+    if _wb_valid:
+        workbench = _existing_wb
+        audit_notes.append("workbench_ceiling: preserved (existing valid and <= verdict)")
+    else:
+        workbench = calculate_workbench_ceiling(
+            verdict_ceiling=verdict,
+            active_legal_flags=legal_flags,
+        )
+        audit_notes.append(
+            f"workbench_ceiling: computed from verdict × "
+            f"active_flag_risk_factor={workbench.get('legal_pack_value_risks', {}).get('adjustment_factor')}"
+        )
+        summary_json["workbench_ceiling"] = workbench
+
+    # Hard clamp: workbench must never exceed verdict (re-enforce after any path)
+    _v_vr = verdict.get("valuation_range")   or {}
+    _w_vr = workbench.get("valuation_range") or {}
+    _v_lo = _v_vr.get("low")  or 0
+    _v_md = _v_vr.get("midpoint") or 0
+    _v_hi = _v_vr.get("high") or 0
+    _w_lo = _w_vr.get("low")  or 0
+    _w_md = _w_vr.get("midpoint") or 0
+    _w_hi = _w_vr.get("high") or 0
+
+    _clamped = False
+    if _v_md > 0 and _w_md > _v_md:
+        workbench["valuation_range"]["midpoint"] = _v_md
+        workbench["valuation_range"]["low"]  = _v_lo
+        workbench["valuation_range"]["high"] = _v_hi
+        if workbench.get("ceiling_range"):
+            workbench["ceiling_range"]["low"]  = int(round(_v_lo)) if _v_lo else None
+            workbench["ceiling_range"]["high"] = int(round(_v_hi)) if _v_hi else None
+        workbench["_hard_clamped_to_verdict"] = True
+        _clamped = True
+        audit_notes.append(f"workbench_ceiling: hard-clamped to verdict (wb_mid={_w_md} > v_mid={_v_md})")
+
+    summary_json["workbench_ceiling"] = workbench
+
+    # ── 3. financial_current_standing ────────────────────────────────────
+    # Always recompute from current workbench (current_bid may change)
+    standing = calculate_financial_standing(workbench, current_bid=current_bid)
+    standing["_audit_note"] = f"backfill_helper: {'; '.join(audit_notes)}"
+    summary_json["financial_current_standing"] = standing
+
+    # ── 4. Legacy alias ───────────────────────────────────────────────────
+    # summary_json.ceiling kept as alias = workbench_ceiling for backward compat.
+    # It does NOT override owned objects.
+    if "ceiling" not in summary_json or _clamped:
+        summary_json["ceiling"] = workbench   # alias only
+
+    return summary_json
