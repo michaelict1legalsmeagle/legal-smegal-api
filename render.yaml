@@ -1,0 +1,44 @@
+services:
+  # Monthly Land Registry data refresh — runs 21st of each month at 6am UTC
+  - type: cron
+    name: legal-smegal-data-refresh
+    env: python
+    schedule: "0 6 21 * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python refresh_data.py
+    plan: free
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+  # Daily auction discovery scan — 07:00 UTC
+  - type: cron
+    name: legal-smegal-auction-scan
+    env: python
+    schedule: "0 7 * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scan_auctions.py
+    plan: free
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+
+  # Backend API (Python)
+  - type: web
+    name: legal-smegal-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    plan: free
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: MAPBOX_PUBLIC_TOKEN
+        sync: false
+
