@@ -23,7 +23,12 @@ except ImportError:
 
 # --- Solicitor Q&A (bounded clarification) ---
 try:
-    from services.ceiling_engine import calculate_ceiling as _calc_ceiling
+    from services.ceiling_engine import (
+        calculate_ceiling as _calc_ceiling,
+        calculate_verdict_ceiling as _calc_verdict_ceiling,
+        calculate_workbench_ceiling as _calc_workbench_ceiling,
+        calculate_financial_standing as _calc_financial_standing,
+    )
     _ceiling_engine_available = True
 except ImportError:
     _calc_ceiling = None
@@ -6569,16 +6574,36 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                         str(_strategy).lower(), str(_strategy)
                     )
 
-                    result["ceiling"] = _calc_ceiling(
-                        legal_flags=result["flags"],
-                        financial_inputs=_fins_inputs,
+                    # Build subject dict for relational comparable engine
+                    _prop = result.get("property") or {}
+                    _subject = {
+                        "property_type": _prop.get("type") or _deal_data.get("deal_type"),
+                        "tenure":        _prop.get("tenure") or _fins_inputs.get("tenure"),
+                        "lease_length":  _prop.get("lease_length") or _fins_inputs.get("lease_length"),
+                        "internal_area": _prop.get("internal_area") or _fins_inputs.get("internal_area"),
+                        "condition":     _prop.get("condition"),
+                    }
+                    # ── Verdict ceiling: comparable base only, NO flag risks ──
+                    _verdict_ceil = _calc_verdict_ceiling(
+                        sold_comps=_comps,
+                        subject=_subject,
                         base_valuation=None,
                         strategy=_strategy,
+                        fallback_allowed=True,
                     )
+                    # ── Workbench ceiling: verdict × all active flag risks ──
+                    _workbench_ceil = _calc_workbench_ceiling(
+                        verdict_ceiling=_verdict_ceil,
+                        active_legal_flags=result.get("flags") or [],
+                    )
+                    # ── Legacy ceiling alias (backward compat) ──
+                    result["verdict_ceiling"]   = _verdict_ceil
+                    result["workbench_ceiling"] = _workbench_ceil
+                    result["ceiling"]           = _workbench_ceil   # legacy alias
                     app.logger.info(
                         f"[ceiling] deal={_deal_id} strategy={_strategy} "
-                        f"range={result['ceiling'].get('ceiling_range')} "
-                        f"confidence={result['ceiling'].get('confidence')}"
+                        f"verdict={_verdict_ceil.get('valuation_range', {}).get('midpoint')} "
+                        f"workbench={_workbench_ceil.get('valuation_range', {}).get('midpoint')}"
                     )
                  except Exception as _ce:
                     app.logger.warning(f"[ceiling] Ceiling calculation failed for {_deal_id}: {_ce}")
@@ -7491,7 +7516,18 @@ def ceiling_endpoint():
                     # produces in the same state. Structurally identical.
                     area = d.get("area_json") or {}
                     _area_data_for_cap = area  # capture for the shared T-4 cap below
+                    # Extract sold comps for relational comparable engine
+                    _wb_housing = area.get("housing") or {}
+                    _wb_comps = _wb_housing.get("soldComps") or _wb_housing.get("value") or []
                     _sj = d.get("summary_json") or {}
+                    _wb_prop = (_sj.get("property") or {})
+                    _wb_subject = {
+                        "property_type": _wb_prop.get("type") or d.get("deal_type"),
+                        "tenure":        _wb_prop.get("tenure") or merged.get("tenure"),
+                        "lease_length":  _wb_prop.get("lease_length") or merged.get("lease_length"),
+                        "internal_area": _wb_prop.get("internal_area") or merged.get("internal_area"),
+                        "condition":     _wb_prop.get("condition"),
+                    }
                     _canon_ceiling = _sj.get("ceiling") if isinstance(_sj, dict) else None
                     _canon_ceiling = _canon_ceiling if isinstance(_canon_ceiling, dict) else {}
                     _canon_base_raw = _canon_ceiling.get("base_valuation")
@@ -7523,24 +7559,77 @@ def ceiling_endpoint():
         if not isinstance(legal_flags, list):
             return jsonify({"error": "legal_flags must be an array"}), 400
 
-        if not _ceiling_engine_available or not _calc_ceiling:
+        if not _ceiling_engine_available or not _calc_verdict_ceiling:
             return jsonify({"error": "ceiling_engine not available on this deployment"}), 503
 
-        result = _calc_ceiling(
-            legal_flags=legal_flags,
-            financial_inputs=financial_inputs,
-            base_valuation=float(base_val) if base_val else None,
-            strategy=str(strategy),
+        # /api/ceiling is the Workbench live endpoint.
+        # Read the persisted verdict_ceiling base; apply active_legal_flags risk product.
+        # If a fresh verdict is needed (no persisted one), recompute from comps.
+        _persisted_verdict = None
+        if deal_id:
+            try:
+                _sj_live = (supabase.table("deals")
+                    .select("summary_json").eq("id", deal_id)
+                    .eq("user_id", request.user_id).single().execute()).data or {}
+                _persisted_verdict = (_sj_live.get("summary_json") or {}).get("verdict_ceiling")
+            except Exception:
+                pass
+
+        if _persisted_verdict and (_persisted_verdict.get("valuation_range") or {}).get("midpoint"):
+            verdict_result = _persisted_verdict
+        else:
+            # No persisted verdict_ceiling yet (deal analysed before v2 deploy).
+            # Re-derive verdict from comps, but cap against the legacy ceiling
+            # base_valuation to prevent a yield-based re-derive from producing
+            # a higher value than the stored ceiling (workbench must never exceed verdict).
+            _legacy_ceil = (_sj.get("ceiling") or {}) if isinstance(_sj, dict) else {}
+            _legacy_base = None
+            try:
+                _lb_raw = _legacy_ceil.get("base_valuation")
+                if _lb_raw and float(_lb_raw) > 5000:
+                    _legacy_base = float(_lb_raw)
+            except (TypeError, ValueError):
+                pass
+
+            verdict_result = _calc_verdict_ceiling(
+                sold_comps=_wb_comps if deal_id else [],
+                subject=_wb_subject if deal_id else {},
+                base_valuation=float(base_val) if base_val else None,
+                strategy=str(strategy),
+                fallback_allowed=True,
+            )
+            _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
+
+            # If re-derived verdict base is higher than legacy ceiling base,
+            # clamp verdict midpoint/range down to legacy ceiling range so
+            # workbench can never exceed the previously-stored ceiling.
+            if _legacy_base and _legacy_base > 0:
+                _vr = verdict_result.get("valuation_range") or {}
+                _v_mid = _vr.get("midpoint") or 0
+                if _v_mid and _v_mid > _legacy_base:
+                    _ub = _vr.get("uncertainty_band") or 0.05
+                    verdict_result["valuation_range"]["midpoint"] = round(_legacy_base, 2)
+                    verdict_result["valuation_range"]["low"]  = round(_legacy_base * (1 - _ub), 2)
+                    verdict_result["valuation_range"]["high"] = round(_legacy_base * (1 + _ub), 2)
+                    verdict_result["_legacy_capped"] = True
+                    verdict_result.setdefault("audit", {}).setdefault("warnings", []).append(
+                        "verdict re-derived from comps; capped to legacy ceiling base_valuation "
+                        f"(re-derive={_v_mid} > legacy={_legacy_base})"
+                    )
+
+        # Workbench ceiling = verdict × active flag risk product
+        result = _calc_workbench_ceiling(
+            verdict_ceiling=verdict_result,
+            active_legal_flags=legal_flags,
         )
+        _apply_audit_confidence_cap(result, _area_data_for_cap)
 
         # D4 — Path B (/api/ceiling) applies the same T-4 confidence cap as
         # Path A (_recompute_deal_ceiling). Both paths thus report identical
         # confidence semantics derived from the same persisted audit block.
         # _area_data_for_cap was set during DB enrichment; None otherwise.
-        result = _apply_audit_confidence_cap(result, _area_data_for_cap)
 
-        # Store ceiling to DB so dashboard can show yield/cashflow
-        # without requiring Financial Model to be visited first
+        # Store workbench ceiling mid to DB (informational — NOT canonical valuation)
         if deal_id and result and supabase:
             try:
                 _cr = result.get("ceiling_range") or {}
@@ -7548,10 +7637,8 @@ def ceiling_endpoint():
                 _high = _cr.get("high")
                 _mid  = round((_low + _high) / 2) if _low and _high else None
                 if _mid and _mid > 5000:
-                    # Update financials_json.ceiling_snapshot for dashboard reads
                     _existing_fin = merged or {}
                     _monthly_rent = _existing_fin.get("monthly_rent")
-                    _gy = round((_monthly_rent * 12 / _mid) * 100, 2) if _monthly_rent and _mid else None
                     supabase.table("deals").update({
                         "bid_ceiling": _mid,
                         "updated_at": now_iso(),
@@ -7560,7 +7647,12 @@ def ceiling_endpoint():
             except Exception as _se:
                 print(f"[ceiling] Store to DB failed: {_se}")
 
-        return jsonify({"ok": True, "ceiling": result}), 200
+        return jsonify({
+            "ok": True,
+            "ceiling":           result,           # workbench_ceiling (legacy key)
+            "workbench_ceiling": result,
+            "verdict_ceiling":   verdict_result,
+        }), 200
 
     except Exception as e:
         app.logger.exception("[ceiling] /api/ceiling failed")
@@ -7783,19 +7875,39 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
         )
         _strategy = _strategy_map.get(str(_strategy).lower(), str(_strategy))
 
-        _ceiling = _calc_ceiling(
-            legal_flags=_summary.get("flags") or [],
-            financial_inputs=_fins_inputs,
+        # Build subject dict for relational comparable engine
+        _prop_rc = (_summary.get("property") or {})
+        _subject_rc = {
+            "property_type": _prop_rc.get("type") or _d.get("deal_type"),
+            "tenure":        _prop_rc.get("tenure") or _fins_inputs.get("tenure"),
+            "lease_length":  _prop_rc.get("lease_length") or _fins_inputs.get("lease_length"),
+            "internal_area": _prop_rc.get("internal_area") or _fins_inputs.get("internal_area"),
+            "condition":     _prop_rc.get("condition"),
+        }
+        # Verdict: comparable base only, no flag risks
+        _verdict = _calc_verdict_ceiling(
+            sold_comps=_comps,
+            subject=_subject_rc,
             base_valuation=None,
             strategy=_strategy,
+            fallback_allowed=True,
+        )
+        # Workbench: verdict × all active flag risks
+        _active_flags = _summary.get("flags") or []
+        _workbench = _calc_workbench_ceiling(
+            verdict_ceiling=_verdict,
+            active_legal_flags=_active_flags,
         )
 
         # T-4 (centralised under D4) — same cap helper as /api/ceiling.
-        _apply_audit_confidence_cap(_ceiling, area_data)
+        _apply_audit_confidence_cap(_verdict,   area_data)
+        _apply_audit_confidence_cap(_workbench, area_data)
 
-        # Merge: replace ONLY the ceiling key, preserve every other field.
+        # Merge: replace verdict_ceiling, workbench_ceiling, legacy ceiling key.
         _new_summary = dict(_summary)
-        _new_summary["ceiling"] = _ceiling
+        _new_summary["verdict_ceiling"]   = _verdict
+        _new_summary["workbench_ceiling"] = _workbench
+        _new_summary["ceiling"]           = _workbench   # legacy alias
 
         # Optimistic-lock write — reject if the row changed since our read.
         _res = supabase.table("deals").update({
@@ -7807,9 +7919,9 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
             print(f"[ceiling-recompute STALE_WRITE_REJECTED] {deal_id} — newer update existed")
             return None
         print(f"[ceiling-recompute OK] {deal_id} "
-              f"base_method={_ceiling.get('base_method')} "
-              f"range={_ceiling.get('ceiling_range')}")
-        return _ceiling
+              f"verdict={_verdict.get('valuation_range', {}).get('midpoint')} "
+              f"workbench={_workbench.get('valuation_range', {}).get('midpoint')}")
+        return _workbench
     except Exception as _e:
         print(f"[ceiling-recompute ERROR] {deal_id}: {_e}")
         return None
