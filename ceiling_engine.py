@@ -791,6 +791,10 @@ def calculate_workbench_ceiling(
     active_risks = _process_legal_risks(active_legal_flags)
     risk_factor  = _legal_pack_adjustment_factor(active_risks)
 
+    # risk_discount_pct: percentage reduction applied by active flags.
+    # If active_legal_flags is empty, risk_factor = 1.0 → risk_discount_pct = 0.
+    risk_discount_pct = round((1.0 - risk_factor) * 100, 1)
+
     wb_mid  = round(verdict_mid  * risk_factor, 2)
     wb_low  = round(verdict_low  * risk_factor, 2) if verdict_low  is not None else round(wb_mid * (1 - u_band), 2)
     wb_high = round(verdict_high * risk_factor, 2) if verdict_high is not None else round(wb_mid * (1 + u_band), 2)
@@ -800,9 +804,17 @@ def calculate_workbench_ceiling(
     wb_low  = min(wb_low,  verdict_low  if verdict_low  is not None else wb_low)
     wb_high = min(wb_high, verdict_high if verdict_high is not None else wb_high)
 
+    # All-flags-resolved path: range and discount must exactly equal verdict
+    all_resolved = len(active_legal_flags) == 0
+    if all_resolved:
+        wb_mid  = verdict_mid
+        wb_low  = verdict_low  if verdict_low  is not None else wb_low
+        wb_high = verdict_high if verdict_high is not None else wb_high
+        risk_discount_pct = 0.0
+
     return {
         "_ceiling_type": "workbench",
-        "status": verdict_ceiling.get("status", "ok"),
+        "status": "all_flags_resolved" if all_resolved else verdict_ceiling.get("status", "ok"),
         "valuation_range": {
             "low":              wb_low,
             "midpoint":         wb_mid,
@@ -819,8 +831,15 @@ def calculate_workbench_ceiling(
             "adjusted_value":    wb_mid,
             "risks":             active_risks,
         },
-        "active_flag_count": len(active_legal_flags),
-        "verdict_midpoint":  verdict_mid,
+        "risk_discount_pct":   risk_discount_pct,
+        "active_flag_count":   len(active_legal_flags),
+        "all_flags_resolved":  all_resolved,
+        "verdict_midpoint":    verdict_mid,
+        "verdict_range": {
+            "low":      verdict_low,
+            "midpoint": verdict_mid,
+            "high":     verdict_high,
+        },
         "confidence":        verdict_ceiling.get("confidence"),
         "base":              verdict_ceiling.get("base"),
         "base_valuation":    verdict_ceiling.get("base_valuation"),
@@ -829,8 +848,11 @@ def calculate_workbench_ceiling(
         "audit": {
             "verdict_ceiling_midpoint": verdict_mid,
             "active_flag_count":        len(active_legal_flags),
+            "all_flags_resolved":       all_resolved,
             "risk_adjustment_factor":   risk_factor,
+            "risk_discount_pct":        risk_discount_pct,
             "formula": "workbench_midpoint = verdict_midpoint × active_flag_risk_factor",
+            "resolved_flags_excluded":  True,
         },
         # acquisition costs excluded
         "acquisition_costs":   None,

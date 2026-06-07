@@ -1100,3 +1100,213 @@ def test_api_ceiling_fixture_numeric_relationships():
     assert fs_cr["midpoint"] == wb_mid
     assert fs_cr["low"]      == wb_lo
     assert fs_cr["high"]     == wb_hi
+
+
+# =============================================================================
+# FLAG RESOLUTION RECALCULATION TESTS (tests 33–44)
+# =============================================================================
+
+def _wb(active_flags):
+    """Helper: verdict from 5 comps then workbench with given active flags."""
+    comps   = _rpc_comps_5(200_000)
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    return verdict, calculate_workbench_ceiling(verdict, active_flags)
+
+
+# ── TEST 33: Active risk uses unresolved flags only ───────────────────────────
+
+def test_active_risk_uses_unresolved_flags_only():
+    """Resolved flags must not appear in active_risks or reduce workbench ceiling."""
+    all_flags = [_flag("Short lease", "critical"), _flag("Defective title", "high")]
+    verdict, wb_all = _wb(all_flags)
+    # Now pretend both flags are resolved → send empty list to /api
+    verdict, wb_zero = _wb([])
+
+    # With flags: workbench < verdict
+    assert wb_all["valuation_range"]["midpoint"] < verdict["valuation_range"]["midpoint"]
+    # Without flags (all resolved): workbench == verdict
+    assert wb_zero["valuation_range"]["midpoint"] == verdict["valuation_range"]["midpoint"]
+    assert wb_zero["legal_pack_value_risks"]["adjustment_factor"] == 1.0
+    assert wb_zero["legal_pack_value_risks"]["risks"] == []
+
+
+# ── TEST 34: Resolved flags excluded from active_flag_risk_factor ─────────────
+
+def test_resolved_flags_excluded_from_active_risk_factor():
+    """The risk factor must be product of ACTIVE flags only — 1.0 when none active."""
+    verdict, wb = _wb([])
+    assert wb["legal_pack_value_risks"]["adjustment_factor"] == 1.0, (
+        "adjustment_factor must be 1.0 when active_legal_flags is empty"
+    )
+
+
+# ── TEST 35: Resolving one flag raises Workbench ──────────────────────────────
+
+def test_resolving_one_flag_raises_workbench():
+    """After resolving one flag, workbench ceiling must rise (or stay same if no-op)."""
+    flags = [_flag("Short lease", "critical"), _flag("Defective title", "high")]
+    verdict, wb_all = _wb(flags)
+    verdict, wb_one = _wb(flags[1:])  # only "high" remains active
+
+    m_all = wb_all["valuation_range"]["midpoint"]
+    m_one = wb_one["valuation_range"]["midpoint"]
+    m_v   = verdict["valuation_range"]["midpoint"]
+
+    assert m_one >= m_all, f"Resolving a flag must raise or preserve workbench: {m_one} >= {m_all}"
+    assert m_one <= m_v,  f"Workbench must not exceed verdict: {m_one} <= {m_v}"
+
+
+# ── TEST 36: All flags resolved → workbench == verdict ───────────────────────
+
+def test_all_flags_resolved_workbench_equals_verdict_with_risk_discount():
+    """All flags resolved: workbench range equals verdict range exactly."""
+    flags = [_flag("Short lease", "critical"), _flag("Defective title", "high"), _flag("Planning", "medium")]
+    verdict, wb_all  = _wb(flags)
+    verdict, wb_zero = _wb([])
+
+    v_vr = verdict["valuation_range"]
+    w_vr = wb_zero["valuation_range"]
+
+    assert w_vr["midpoint"] == v_vr["midpoint"]
+    assert w_vr["low"]      == v_vr["low"]
+    assert w_vr["high"]     == v_vr["high"]
+    assert wb_zero["all_flags_resolved"] is True
+
+
+# ── TEST 37: All flags resolved → risk_discount_pct = 0 ──────────────────────
+
+def test_all_flags_resolved_risk_discount_pct_is_zero():
+    """risk_discount_pct must be 0.0 when active_legal_flags is empty."""
+    _, wb = _wb([])
+    assert wb["risk_discount_pct"] == 0.0, (
+        f"risk_discount_pct must be 0 when all resolved; got {wb['risk_discount_pct']}"
+    )
+
+
+def test_active_flags_produce_nonzero_discount():
+    """risk_discount_pct must be > 0 when active critical/high flags remain."""
+    _, wb = _wb([_flag("Short lease", "critical")])
+    assert wb["risk_discount_pct"] > 0.0, (
+        f"risk_discount_pct must be > 0 with active critical flag; got {wb['risk_discount_pct']}"
+    )
+
+
+# ── TEST 38: Workbench never exceeds verdict ──────────────────────────────────
+
+def test_workbench_never_exceeds_verdict_any_resolution_state():
+    """At every resolution state, workbench <= verdict."""
+    flags = [_flag("Short lease", "critical"), _flag("Defective title", "high"),
+             _flag("Planning", "medium"), _flag("Service charge", "low")]
+    for n_active in range(len(flags) + 1):
+        active = flags[:n_active]
+        verdict, wb = _wb(active)
+        v_m = verdict["valuation_range"]["midpoint"]
+        w_m = wb["valuation_range"]["midpoint"]
+        assert w_m <= v_m, f"n_active={n_active}: workbench {w_m} > verdict {v_m}"
+
+
+# ── TEST 39: resolved_flags_excluded audit field ──────────────────────────────
+
+def test_resolved_flags_excluded_audit_field():
+    """Audit must include resolved_flags_excluded = True."""
+    _, wb = _wb([_flag("Short lease", "critical")])
+    assert wb["audit"].get("resolved_flags_excluded") is True, (
+        "audit.resolved_flags_excluded must be True"
+    )
+
+
+# ── TEST 40: all_flags_resolved field ────────────────────────────────────────
+
+def test_all_flags_resolved_field_false_when_active():
+    """all_flags_resolved must be False when active flags remain."""
+    _, wb = _wb([_flag("Short lease", "critical")])
+    assert wb["all_flags_resolved"] is False
+
+
+def test_all_flags_resolved_field_true_when_empty():
+    """all_flags_resolved must be True when no active flags."""
+    _, wb = _wb([])
+    assert wb["all_flags_resolved"] is True
+
+
+# ── TEST 41: verdict_range in workbench response ──────────────────────────────
+
+def test_workbench_includes_verdict_range():
+    """Workbench response must include verdict_range for frontend Workbench=Verdict check."""
+    comps   = _rpc_comps_5(200_000)
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    wb      = calculate_workbench_ceiling(verdict, [])
+    assert "verdict_range" in wb
+    assert wb["verdict_range"]["midpoint"] == verdict["valuation_range"]["midpoint"]
+
+
+# ── TEST 42: risk_discount_pct formula ────────────────────────────────────────
+
+def test_risk_discount_pct_formula():
+    """risk_discount_pct = round((1 - adjustment_factor) * 100, 1)."""
+    flags = [_flag("Defective title", "critical"), _flag("Short lease", "high")]
+    _, wb = _wb(flags)
+    factor = wb["legal_pack_value_risks"]["adjustment_factor"]
+    expected_pct = round((1.0 - factor) * 100, 1)
+    assert wb["risk_discount_pct"] == expected_pct, (
+        f"risk_discount_pct mismatch: expected {expected_pct} got {wb['risk_discount_pct']}"
+    )
+
+
+# ── TEST 43: legacy ceiling stale -38% cannot persist after resolution ─────────
+
+def test_legacy_ceiling_stale_discount_cannot_persist():
+    """
+    After all flags resolved, the workbench object returned by the engine
+    has risk_discount_pct=0 regardless of what legacy summary_json.ceiling contained.
+    """
+    # Simulate a legacy ceiling with high discount
+    legacy_sj = {
+        "ceiling": {
+            "base_valuation": 250_000,
+            "ceiling_range": {"low": 154_000, "high": 164_000},
+            "risk_discount_pct": 38,  # stale
+            "confidence": 0.55,
+        }
+    }
+    from services.ceiling_engine import ensure_ceiling_owned_objects
+    result = ensure_ceiling_owned_objects(legacy_sj, area_json={}, legal_flags=[])
+    # After backfill with no active flags, workbench risk_discount_pct must be 0
+    wb = result.get("workbench_ceiling", {})
+    assert wb.get("risk_discount_pct", None) == 0.0, (
+        f"Legacy -38% must not survive to workbench after resolution; got {wb.get('risk_discount_pct')}"
+    )
+    assert wb.get("all_flags_resolved") is True
+
+
+# ── TEST 44: /api/ceiling fixture — active_flags=[] gives 200-equivalent response ──
+
+def test_api_ceiling_fixture_all_flags_resolved():
+    """
+    Simulate /api/ceiling call with all flags resolved (empty active list).
+    Response must: risk_discount_pct=0, workbench==verdict, no 503.
+    """
+    from services.ceiling_engine import calculate_financial_standing
+
+    comps   = _rpc_comps_5(200_000)
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    wb      = calculate_workbench_ceiling(verdict, active_legal_flags=[])
+    fs      = calculate_financial_standing(wb, current_bid=155_000)
+
+    # Simulated 200 response
+    response = {
+        "ok": True,
+        "ceiling":           wb,
+        "workbench_ceiling": wb,
+        "verdict_ceiling":   verdict,
+        "financial_current_standing": fs,
+    }
+
+    assert response["ok"] is True  # 200, not 503
+    assert response["workbench_ceiling"]["risk_discount_pct"] == 0.0
+    assert response["workbench_ceiling"]["all_flags_resolved"] is True
+
+    v_mid = response["verdict_ceiling"]["valuation_range"]["midpoint"]
+    w_mid = response["workbench_ceiling"]["valuation_range"]["midpoint"]
+    assert w_mid == v_mid, f"All resolved: workbench {w_mid} must equal verdict {v_mid}"
+    assert w_mid <= v_mid  # also satisfies never-exceed
