@@ -7998,24 +7998,43 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
             "internal_area": _prop_rc.get("internal_area") or _fins_inputs.get("internal_area"),
             "condition":     _prop_rc.get("condition"),
         }
-        # Verdict: comparable base only, no flag risks
-        _verdict = _calc_verdict_ceiling(
-            sold_comps=_comps,
-            subject=_subject_rc,
-            base_valuation=None,
-            strategy=_strategy,
-            fallback_allowed=True,
-        )
-        # Workbench: verdict × all active flag risks
+        # Verdict: comparable base only, no flag risks.
+        # Use v2 functions when available; fall back to v1 _calc_ceiling when not.
         _active_flags = _summary.get("flags") or []
-        _workbench = _calc_workbench_ceiling(
-            verdict_ceiling=_verdict,
-            active_legal_flags=_active_flags,
-        )
-
-        # T-4 (centralised under D4) — same cap helper as /api/ceiling.
-        _apply_audit_confidence_cap(_verdict,   area_data)
-        _apply_audit_confidence_cap(_workbench, area_data)
+        if _calc_verdict_ceiling and _calc_workbench_ceiling:
+            # V2 path — relational comparable engine
+            _verdict = _calc_verdict_ceiling(
+                sold_comps=_comps,
+                subject=_subject_rc,
+                base_valuation=None,
+                strategy=_strategy,
+                fallback_allowed=True,
+            )
+            _workbench = _calc_workbench_ceiling(
+                verdict_ceiling=_verdict,
+                active_legal_flags=_active_flags,
+            )
+            _apply_audit_confidence_cap(_verdict,   area_data)
+            _apply_audit_confidence_cap(_workbench, area_data)
+        else:
+            # V1 fallback — _calc_ceiling uses comps_avg_value from _fins_inputs.
+            # _fins_inputs["comps_avg_value"] was set above from _comp_prices.
+            # verdict and workbench are the same object on this path (no separate
+            # flag-risk split in v1); this matches the working /api/ceiling legacy path.
+            _verdict = _calc_ceiling(
+                legal_flags=[],           # verdict = no flag deductions
+                financial_inputs=_fins_inputs,
+                base_valuation=None,
+                strategy=_strategy,
+            )
+            _workbench = _calc_ceiling(
+                legal_flags=_active_flags,
+                financial_inputs=_fins_inputs,
+                base_valuation=None,
+                strategy=_strategy,
+            )
+            _apply_audit_confidence_cap(_verdict,   area_data)
+            _apply_audit_confidence_cap(_workbench, area_data)
 
         # Merge: replace verdict_ceiling, workbench_ceiling, legacy ceiling key.
         _new_summary = dict(_summary)
