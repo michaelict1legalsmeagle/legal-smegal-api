@@ -6627,27 +6627,44 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                         "internal_area": _prop.get("internal_area") or _fins_inputs.get("internal_area"),
                         "condition":     _prop.get("condition"),
                     }
-                    # ── Verdict ceiling: comparable base only, NO flag risks ──
-                    _verdict_ceil = _calc_verdict_ceiling(
-                        sold_comps=_comps,
-                        subject=_subject,
-                        base_valuation=None,
-                        strategy=_strategy,
-                        fallback_allowed=True,
-                    )
-                    # ── Workbench ceiling: verdict × all active flag risks ──
-                    _workbench_ceil = _calc_workbench_ceiling(
-                        verdict_ceiling=_verdict_ceil,
-                        active_legal_flags=result.get("flags") or [],
-                    )
-                    # ── Legacy ceiling alias (backward compat) ──
+                    # Verdict = comparable base only. Workbench = Verdict minus active flags.
+                    # Use v2 split only when deployed; otherwise use the existing v1 engine twice.
+                    if _calc_verdict_ceiling and _calc_workbench_ceiling:
+                        _verdict_ceil = _calc_verdict_ceiling(
+                            sold_comps=_comps,
+                            subject=_subject,
+                            base_valuation=None,
+                            strategy=_strategy,
+                            fallback_allowed=True,
+                        )
+                        _workbench_ceil = _calc_workbench_ceiling(
+                            verdict_ceiling=_verdict_ceil,
+                            active_legal_flags=result.get("flags") or [],
+                        )
+                    else:
+                        # v1 production path: same formula that previously worked.
+                        # Empty flags gives the Verdict comparable ceiling; active flags gives Workbench.
+                        _verdict_ceil = _calc_ceiling(
+                            legal_flags=[],
+                            financial_inputs=_fins_inputs,
+                            base_valuation=None,
+                            strategy=_strategy,
+                        )
+                        _workbench_ceil = _calc_ceiling(
+                            legal_flags=result.get("flags") or [],
+                            financial_inputs=_fins_inputs,
+                            base_valuation=None,
+                            strategy=_strategy,
+                        )
+
+                    # Owned objects used by the pages. Legacy alias points to Workbench.
                     result["verdict_ceiling"]   = _verdict_ceil
                     result["workbench_ceiling"] = _workbench_ceil
-                    result["ceiling"]           = _workbench_ceil   # legacy alias
+                    result["ceiling"]           = _workbench_ceil
                     app.logger.info(
                         f"[ceiling] deal={_deal_id} strategy={_strategy} "
-                        f"verdict={_verdict_ceil.get('valuation_range', {}).get('midpoint')} "
-                        f"workbench={_workbench_ceil.get('valuation_range', {}).get('midpoint')}"
+                        f"verdict={(_verdict_ceil.get('valuation_range') or _verdict_ceil.get('ceiling_range') or {}).get('midpoint') or _verdict_ceil.get('base_valuation')} "
+                        f"workbench={(_workbench_ceil.get('valuation_range') or _workbench_ceil.get('ceiling_range') or {}).get('midpoint') or _workbench_ceil.get('base_valuation')}"
                     )
                  except Exception as _ce:
                     app.logger.warning(f"[ceiling] Ceiling calculation failed for {_deal_id}: {_ce}")
@@ -7517,7 +7534,7 @@ def ceiling_endpoint():
         if deal_id and supabase:
             try:
                 row = supabase.table("deals").select(
-                    "financials_json,area_json,deal_type,guide_price"
+                    "financials_json,area_json,deal_type,guide_price,summary_json"
                 ).eq("id", deal_id).eq("user_id", request.user_id).single().execute()
 
                 if row.data:
@@ -7752,40 +7769,60 @@ def ceiling_endpoint():
 
         else:
             # ── LEGACY PATH ──────────────────────────────────────────────────
-            # ceiling_engine.py v2 functions not yet deployed — use legacy
-            # calculate_ceiling. Returns a single unified ceiling object.
-            app.logger.info("[ceiling] using legacy calculate_ceiling path (v2 not deployed)")
+            # v1 engine is the production engine in services/. Use it twice so the
+            # flow remains explicit: Verdict has no legal-pack deductions;
+            # Workbench applies active unresolved flags only.
+            app.logger.info("[ceiling] using legacy calculate_ceiling split path (v2 not deployed)")
+            verdict_result = _calc_ceiling(
+                legal_flags=[],
+                financial_inputs=financial_inputs,
+                base_valuation=float(base_val) if base_val else None,
+                strategy=str(strategy),
+            )
             result = _calc_ceiling(
                 legal_flags=legal_flags,
                 financial_inputs=financial_inputs,
                 base_valuation=float(base_val) if base_val else None,
                 strategy=str(strategy),
             )
+            _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
             _apply_audit_confidence_cap(result, _area_data_for_cap)
-            verdict_result = result  # same object on legacy path
 
         # D4 — Path B (/api/ceiling) applies the same T-4 confidence cap as
         # Path A (_recompute_deal_ceiling). Both paths thus report identical
         # confidence semantics derived from the same persisted audit block.
         # _area_data_for_cap was set during DB enrichment; None otherwise.
 
-        # Store workbench ceiling mid to DB (informational — NOT canonical valuation)
+        _fs = _calc_financial_standing(result, current_bid=None) if _calc_financial_standing else None
+
+        # Persist the current owned ceiling objects so Financials and Deal Report
+        # read the same state that Workbench just calculated. This prevents
+        # Financials showing "not set" while Workbench has a live range.
         if deal_id and result and supabase:
             try:
-                _cr = result.get("ceiling_range") or {}
+                _cr = result.get("valuation_range") or result.get("ceiling_range") or {}
                 _low  = _cr.get("low")
                 _high = _cr.get("high")
-                _mid  = round((_low + _high) / 2) if _low and _high else None
+                _mid  = _cr.get("midpoint") or (round((_low + _high) / 2) if _low and _high else None)
+
+                _row2 = supabase.table("deals").select("summary_json").eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+                _sj2 = (_row2.data or {}).get("summary_json") or {}
+                if not isinstance(_sj2, dict):
+                    _sj2 = {}
+                _sj2["verdict_ceiling"] = verdict_result
+                _sj2["workbench_ceiling"] = result
+                _sj2["ceiling"] = result
+                if _fs is not None:
+                    _sj2["financial_current_standing"] = _fs
+
+                _update = {"summary_json": _sj2, "updated_at": now_iso()}
                 if _mid and _mid > 5000:
-                    supabase.table("deals").update({
-                        "bid_ceiling": _mid,
-                        "updated_at": now_iso(),
-                    }).eq("id", deal_id).eq("user_id", request.user_id).execute()
-                    print(f"[ceiling] Stored bid_ceiling £{_mid:,} for {deal_id}")
+                    _update["bid_ceiling"] = int(round(_mid))
+                supabase.table("deals").update(_update).eq("id", deal_id).eq("user_id", request.user_id).execute()
+                if _mid and _mid > 5000:
+                    print(f"[ceiling] Stored workbench ceiling £{int(round(_mid)):,} for {deal_id}")
             except Exception as _se:
                 print(f"[ceiling] Store to DB failed: {_se}")
-
-        _fs = _calc_financial_standing(result, current_bid=None) if _calc_financial_standing else None
 
         return jsonify({
             "ok": True,
