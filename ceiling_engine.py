@@ -1,11 +1,13 @@
 """
 ceiling_engine.py — LegalSmegal Ceiling Engine v2.0
 ====================================================
-Red-book-style paper valuation similarity engine.
+LegalSmegal comparable valuation ceiling engine.
+
 
 NOT a RICS Red Book valuation.
-NOT institutional underwriting.
-NOT an acquisition-cost model.
+NOT legal advice.
+NOT financial advice.
+NOT acquisition underwriting.
 
 Formula
 -------
