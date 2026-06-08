@@ -43,7 +43,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERSION = "ceiling_comparable_valuation_v2"
+VERSION = "ceiling_relational_paper_valuation_v1"
 
 # =============================================================================
 # DISTANCE RULE
@@ -919,7 +919,7 @@ def calculate_ceiling(
     fallback_allowed: bool = True,
 ) -> dict:
     """
-    Comparable valuation ceiling engine.
+    Red-book-style paper valuation similarity ceiling engine.
 
     Parameters
     ----------
@@ -1103,7 +1103,7 @@ def calculate_ceiling(
         status = "ok"
 
     return {
-        "valuation_type":    "comparable_valuation_ceiling",
+        "valuation_type":    "red_book_style_paper_valuation_similarity",
         "not_rics_valuation": True,
         "status":            status,
         "base": {
@@ -1156,7 +1156,7 @@ def calculate_ceiling(
         "confidence_final": final_conf,
         "strategy_used":  strategy,
         "investment_value_note": (
-            "Comparable valuation ceiling — not a RICS valuation, "
+            "Red-book-style paper valuation similarity — not a RICS valuation, "
             "not financial advice. Decision-support only."
         ),
         # Acquisition costs: informational only — NOT in ceiling formula
@@ -1213,57 +1213,22 @@ def ensure_ceiling_owned_objects(
     _sold_comps = _housing.get("soldComps") or _housing.get("value") or []
     _sold_comps = _sold_comps if isinstance(_sold_comps, list) else []
 
-    # ── 1. Compute / validate verdict_ceiling ─────────────────────────────
-    # Source priority:
-    #   1) If sold comps exist, compute Verdict from sold comps.
-    #   2) Preserve an existing Verdict only if it is non-legacy and comp recompute is unavailable/failed.
-    #   3) Use legacy summary_json.ceiling only when no sold comps exist.
-    #
-    # This prevents old v1/workbench-style summary_json.ceiling objects from being
-    # wrapped as Verdict and then contaminating Workbench/Financials.
+    # ── 1. Validate existing verdict_ceiling ─────────────────────────────
     _existing_vc = summary_json.get("verdict_ceiling")
     _vc_valid = (
         isinstance(_existing_vc, dict)
         and isinstance(_existing_vc.get("valuation_range"), dict)
         and (_existing_vc["valuation_range"].get("midpoint") or 0) > 0
-        and not _existing_vc.get("_legacy_source")
     )
 
-    if _sold_comps:
-        verdict = calculate_verdict_ceiling(
-            sold_comps=_sold_comps,
-            subject=subject,
-            strategy=strategy,
-            fallback_allowed=True,
-        )
-
-        if (verdict.get("valuation_range") or {}).get("midpoint"):
-            audit_notes.append(f"verdict_ceiling: recomputed from {len(_sold_comps)} sold comps")
-        elif _vc_valid:
-            verdict = _existing_vc
-            audit_notes.append("verdict_ceiling: preserved existing non-legacy object because comp recompute failed")
-        else:
-            verdict = {
-                "_ceiling_type": "verdict",
-                "status": "missing_data",
-                "valuation_range": {"low": None, "midpoint": None, "high": None, "uncertainty_band": None},
-                "ceiling_range":   {"low": None, "high": None},
-                "base": {"value": None, "method": "none"},
-                "confidence": {"final": 0.0, "caps": [{"cap": 0.0, "reason": "comp_recompute_failed"}], "label": "Insufficient evidence"},
-                "audit": {"warnings": ["sold comps exist but relational comparable recompute failed"], "version": VERSION},
-                "acquisition_costs": None,
-                "excluded_from_ceiling": EXCLUDED_FROM_CEILING,
-            }
-            audit_notes.append("verdict_ceiling: sold comps existed but comp recompute failed — missing_data")
-
-        summary_json["verdict_ceiling"] = verdict
-
-    elif _vc_valid:
+    if _vc_valid:
         verdict = _existing_vc
-        audit_notes.append("verdict_ceiling: preserved existing non-legacy valid object")
-
+        audit_notes.append("verdict_ceiling: preserved (existing valid object)")
     else:
-        # Legacy fallback ONLY when no sold comps exist.
+        # For old deals without verdict_ceiling: use legacy summary_json.ceiling directly
+        # as the verdict base — it is what the Verdict page displays and represents
+        # the correct comparable ceiling for that deal.
+        # Only call calculate_verdict_ceiling when no legacy ceiling exists.
         _legacy = summary_json.get("ceiling") or {}
         _leg_base = None
         _leg_lo   = None
@@ -1283,13 +1248,14 @@ def ensure_ceiling_owned_objects(
             pass
 
         if _leg_base and _leg_base > 5000:
+            # Build verdict_ceiling from the legacy ceiling — preserving the actual range
             _ub = 0.05
             _v_lo  = _leg_lo  if _leg_lo  else round(_leg_base * (1 - _ub), 2)
             _v_hi  = _leg_hi  if _leg_hi  else round(_leg_base * (1 + _ub), 2)
             verdict = {
                 "_ceiling_type":   "verdict",
                 "_legacy_source":  True,
-                "status":          "legacy_no_comps",
+                "status":          "ok",
                 "base": {"value": _leg_base, "method": _legacy.get("base_method", "legacy_ceiling")},
                 "base_valuation":  int(round(_leg_base)),
                 "base_method":     _legacy.get("base_method", "legacy_ceiling"),
@@ -1310,18 +1276,32 @@ def ensure_ceiling_owned_objects(
                 },
                 "confidence": _legacy.get("confidence") or {"final": 0.45, "label": "Low confidence"},
                 "audit": {
-                    "assumptions": ["legacy ceiling used only because no sold comps were available"],
+                    "assumptions": ["base_value and range from legacy summary_json.ceiling; re-analyse for relational comparable base"],
                     "evidence_gaps": [],
-                    "warnings": ["legacy verdict fallback — re-analyse with comps to compute comparable valuation ceiling"],
-                    "formula_trace": ["legacy_source: no sold comps available"],
+                    "warnings": ["verdict_ceiling built from legacy ceiling — re-analyse to compute relational comparable base"],
+                    "formula_trace": ["legacy_source: base_valuation from summary_json.ceiling.base_valuation"],
                     "version": VERSION,
                 },
                 "acquisition_costs": None,
                 "excluded_from_ceiling": EXCLUDED_FROM_CEILING,
             }
-            audit_notes.append(f"verdict_ceiling: legacy fallback used because no sold comps exist base={_leg_base} lo={_v_lo} hi={_v_hi}")
+            audit_notes.append(f"verdict_ceiling: built from legacy ceiling base={_leg_base} lo={_v_lo} hi={_v_hi}")
+
+        elif _sold_comps:
+            # No legacy base — try relational engine with sold comps
+            verdict = calculate_verdict_ceiling(
+                sold_comps=_sold_comps,
+                subject=subject,
+                strategy=strategy,
+                fallback_allowed=True,
+            )
+            if (verdict.get("valuation_range") or {}).get("midpoint"):
+                audit_notes.append(f"verdict_ceiling: computed from {len(_sold_comps)} sold comps")
+            else:
+                audit_notes.append("verdict_ceiling: insufficient comps and no legacy ceiling — missing_data")
 
         else:
+            # No legacy base, no comps — explicit missing-data state
             verdict = {
                 "_ceiling_type": "verdict",
                 "status": "missing_data",
@@ -1337,27 +1317,39 @@ def ensure_ceiling_owned_objects(
 
         summary_json["verdict_ceiling"] = verdict
 
-    # ── 2. Always recompute workbench_ceiling from current verdict ───────────
-    # Do not preserve old Workbench objects. An old Workbench can be <= Verdict
-    # while still being stale after flags are resolved. Current Workbench is
-    # always Verdict × current unresolved legal-pack risk factor.
-    workbench = calculate_workbench_ceiling(
-        verdict_ceiling=verdict,
-        active_legal_flags=legal_flags,
+    # ── 2. Validate / compute workbench_ceiling ───────────────────────────
+    _existing_wb = summary_json.get("workbench_ceiling")
+    _v_mid = (verdict.get("valuation_range") or {}).get("midpoint") or 0
+    _wb_valid = (
+        isinstance(_existing_wb, dict)
+        and isinstance(_existing_wb.get("valuation_range"), dict)
+        and (_existing_wb["valuation_range"].get("midpoint") or 0) <= _v_mid + 1  # clamp tolerance £1
+        and (_existing_wb["valuation_range"].get("midpoint") or 0) > 0
     )
-    audit_notes.append(
-        f"workbench_ceiling: recomputed from verdict × "
-        f"active_flag_risk_factor={workbench.get('legal_pack_value_risks', {}).get('adjustment_factor')}"
-    )
-    summary_json["workbench_ceiling"] = workbench
 
-    # Hard clamp: workbench must never exceed verdict.
+    if _wb_valid:
+        workbench = _existing_wb
+        audit_notes.append("workbench_ceiling: preserved (existing valid and <= verdict)")
+    else:
+        workbench = calculate_workbench_ceiling(
+            verdict_ceiling=verdict,
+            active_legal_flags=legal_flags,
+        )
+        audit_notes.append(
+            f"workbench_ceiling: computed from verdict × "
+            f"active_flag_risk_factor={workbench.get('legal_pack_value_risks', {}).get('adjustment_factor')}"
+        )
+        summary_json["workbench_ceiling"] = workbench
+
+    # Hard clamp: workbench must never exceed verdict (re-enforce after any path)
     _v_vr = verdict.get("valuation_range")   or {}
     _w_vr = workbench.get("valuation_range") or {}
     _v_lo = _v_vr.get("low")  or 0
     _v_md = _v_vr.get("midpoint") or 0
     _v_hi = _v_vr.get("high") or 0
+    _w_lo = _w_vr.get("low")  or 0
     _w_md = _w_vr.get("midpoint") or 0
+    _w_hi = _w_vr.get("high") or 0
 
     _clamped = False
     if _v_md > 0 and _w_md > _v_md:
