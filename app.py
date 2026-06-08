@@ -7585,6 +7585,33 @@ def ceiling_endpoint():
                         merged["comps_source"]     = "canonical_persisted_base"
                         merged["comps_base_method"] = _canon_ceiling.get("base_method")
 
+                    # Fallback 2: verdict_ceiling.base_valuation (set by _recompute_deal_ceiling)
+                    # Covers deals where sj.ceiling is absent but verdict_ceiling was written.
+                    if not merged.get("comps_avg_value"):
+                        _vc_ceil = _sj.get("verdict_ceiling") if isinstance(_sj, dict) else None
+                        if isinstance(_vc_ceil, dict):
+                            _vc_base_raw = _vc_ceil.get("base_valuation")
+                            try:
+                                _vc_base_f = float(_vc_base_raw) if _vc_base_raw is not None else None
+                            except (TypeError, ValueError):
+                                _vc_base_f = None
+                            if _vc_base_f and _vc_base_f > 5000:
+                                merged["comps_avg_value"]  = int(round(_vc_base_f))
+                                merged["comps_source"]     = "verdict_ceiling_base"
+                                merged["comps_base_method"] = _vc_ceil.get("base_method")
+
+                    # Fallback 3: average of area_json soldComps prices
+                    # Covers deals where neither sj.ceiling nor verdict_ceiling has been written.
+                    if not merged.get("comps_avg_value") and _wb_comps:
+                        _comp_prices_wb = [
+                            c.get("price") for c in _wb_comps
+                            if isinstance(c, dict) and c.get("price") and float(c["price"]) > 5000
+                        ]
+                        if _comp_prices_wb:
+                            merged["comps_avg_value"]  = int(round(sum(_comp_prices_wb) / len(_comp_prices_wb)))
+                            merged["comps_source"]     = "area_json_comps_average"
+                            merged["comps_base_method"] = "comps_avg"
+
                     print(
                         f"[ceiling] deal={deal_id} "
                         f"canonical_base={('£' + format(merged['comps_avg_value'], ',')) if merged.get('comps_avg_value') else 'MISSING'} "
