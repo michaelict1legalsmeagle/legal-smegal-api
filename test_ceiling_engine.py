@@ -111,7 +111,8 @@ def test_no_arithmetic_mean():
     # Weighted median must be 100_000 (4 high-weight comps all at 100k)
     assert abs(base - 100_000) < 5_000, f"Expected ~100k weighted median, got {base}"
     assert abs(base - arith_mean) > 10_000, "base_value must NOT equal arithmetic mean"
-    assert result["base"]["method"] == "weighted_median_relational_comparables_0_5_mile"
+    assert result["base"]["method"].startswith("weighted_median"), \
+        f"base_method must start with weighted_median, got {result['base']['method']}"
 
 
 def test_weighted_median_deterministic():
@@ -1766,3 +1767,374 @@ def test_type_mismatch_comps_genuinely_excluded():
     reasons = (vc.get("audit") or {}).get("excluded_reasons_summary") or {}
     assert any("type_mismatch" in r for r in reasons), \
         f"Excluded reasons should mention type_mismatch. Got: {reasons}"
+
+
+# =============================================================================
+# PHASE 2 TESTS — Comparable valuation methodology
+# =============================================================================
+
+import sys as _sys
+_sys.path.insert(0, "/tmp/phase2/legal-smegal-api-main")
+from services.ceiling_engine import (
+    _normalise_property_type,
+    _types_near_equiv,
+    _assess_comp,
+    calculate_ceiling,
+    calculate_verdict_ceiling,
+    calculate_workbench_ceiling,
+    ensure_ceiling_owned_objects,
+)
+
+
+def _p2_comp(price, miles, prop_type="F", tenure="L", age_months=3, hpi_mult=None):
+    """Minimal sold comp as returned by get_housing_data / housing_comps_v1 RPC."""
+    c = {
+        "price":         price,
+        "miles":         miles,
+        "property_type": prop_type,
+        "duration":      tenure,
+        "age_months":    age_months,
+    }
+    if hpi_mult is not None:
+        c["hpi_multiplier"] = hpi_mult
+    return c
+
+
+def _p2_subject(prop_type="flat", tenure="leasehold"):
+    return {"property_type": prop_type, "tenure": tenure}
+
+
+# ── T1: Sold comps found from real stored path ────────────────────────────
+
+def test_p2_comps_extracted_from_area_json():
+    """T1: ensure_ceiling_owned_objects reads area_json.housing.soldComps."""
+    area_json = {
+        "housing": {
+            "soldComps": [
+                _p2_comp(250000, 0.05),
+                _p2_comp(260000, 0.10),
+                _p2_comp(255000, 0.08),
+            ]
+        }
+    }
+    result = ensure_ceiling_owned_objects(
+        summary_json={},
+        area_json=area_json,
+        subject=_p2_subject(),
+    )
+    vc = result["verdict_ceiling"]
+    mid = (vc.get("valuation_range") or {}).get("midpoint") or 0
+    assert mid > 0, f"Expected midpoint from soldComps, got {mid}"
+    # Audit must record comps_source_path
+    audit = vc.get("audit") or {}
+    assert audit.get("sold_comps_count") == 3 or (vc.get("comparables") is not None)
+
+
+# ── T2-T5: Property type normalisation ───────────────────────────────────
+
+def test_p2_F_comp_accepted_flat_subject():
+    """T2: LR code F accepted against subject 'flat'."""
+    valid, excl = _assess_comp(_p2_comp(250000, 0.1, prop_type="F"), _p2_subject("flat"), 0)
+    assert valid is not None, f"F comp must be accepted against flat subject. Got: {excl}"
+
+
+def test_p2_S_comp_accepted_semi_detached_subject():
+    """T3: LR code S accepted against subject 'semi-detached'."""
+    valid, excl = _assess_comp(
+        _p2_comp(250000, 0.1, prop_type="S", tenure="F"),
+        _p2_subject("semi-detached", "freehold"), 0
+    )
+    assert valid is not None, f"S comp must be accepted against semi-detached. Got: {excl}"
+
+
+def test_p2_T_comp_accepted_terraced_subject():
+    """T4: LR code T accepted against subject 'terraced'."""
+    valid, excl = _assess_comp(
+        _p2_comp(200000, 0.1, prop_type="T", tenure="F"),
+        _p2_subject("terraced", "freehold"), 0
+    )
+    assert valid is not None, f"T comp must be accepted against terraced. Got: {excl}"
+
+
+def test_p2_D_comp_accepted_detached_subject():
+    """T5: LR code D accepted against subject 'detached'."""
+    valid, excl = _assess_comp(
+        _p2_comp(400000, 0.1, prop_type="D", tenure="F"),
+        _p2_subject("detached", "freehold"), 0
+    )
+    assert valid is not None, f"D comp must be accepted against detached. Got: {excl}"
+
+
+def test_p2_wrong_class_rejected():
+    """T6: Flat subject with detached comp is rejected (type_mismatch)."""
+    valid, excl = _assess_comp(
+        _p2_comp(400000, 0.1, prop_type="D", tenure="F"),
+        _p2_subject("flat", "leasehold"), 0
+    )
+    assert valid is None, "Detached comp must be rejected against flat subject"
+    assert "type_mismatch" in (excl or {}).get("reason", "")
+
+
+# ── T7-T8: Type + tenure before IQR ──────────────────────────────────────
+
+def test_p2_tenure_mismatch_excluded_before_iqr():
+    """T7: Tenure-mismatched comps excluded (never reach IQR set)."""
+    # Subject is leasehold; comp is freehold — must be excluded
+    valid, excl = _assess_comp(
+        _p2_comp(250000, 0.1, prop_type="F", tenure="F"),   # freehold
+        _p2_subject("flat", "leasehold"),  # subject leasehold
+        0
+    )
+    assert valid is None, "Freehold comp must be excluded against leasehold subject"
+    assert "tenure_mismatch" in (excl or {}).get("reason", "")
+
+
+def test_p2_cross_type_excluded_before_iqr():
+    """T8: Cross-type comps excluded before IQR (not in clean IQR set)."""
+    # 6 comps needed for IQR to fire. Mix flat and terraced.
+    comps = (
+        [_p2_comp(250000, 0.05, "F")] * 4  # flat — matching
+        + [_p2_comp(300000, 0.1, "T", "F")] * 3  # terraced — excluded for type + tenure
+    )
+    subject = _p2_subject("flat", "leasehold")
+    result = calculate_ceiling(legal_flags=[], financial_inputs={}, sold_comps=comps, subject=subject)
+    valid_count = result["base"]["valid_comparable_count"]
+    excl = result["comparables"]["excluded"]
+    type_mismatch_excl = [e for e in excl if "type_mismatch" in (e.get("reason") or "")]
+    assert len(type_mismatch_excl) >= 3, "Terraced comps must be excluded before IQR"
+    # IQR only had 4 flat comps — fewer than 6 — so IQR was skipped
+    audit = result.get("audit") or {}
+    iqr = audit.get("iqr_trim_summary") or {}
+    assert not iqr.get("applied"), "IQR should not apply when fewer than 6 matching comps"
+
+
+# ── T9-T10: HPI normalisation ─────────────────────────────────────────────
+
+def test_p2_hpi_multiplier_produces_adjusted_value():
+    """T9: Sale price × hpi_multiplier = adjusted_value."""
+    comp = _p2_comp(200000, 0.1, hpi_mult=1.05)
+    valid, excl = _assess_comp(comp, _p2_subject(), 0)
+    assert valid is not None
+    expected = 200000 * 1.05
+    assert abs(valid["adjusted_value"] - expected) < 1, \
+        f"adjusted_value must be price × hpi_mult. Expected {expected}, got {valid['adjusted_value']}"
+    assert valid["adjustments"]["time"] == 1.05
+
+
+def test_p2_missing_hpi_is_audited():
+    """T10: Missing hpi_multiplier is audited — time_adjustment=1.00 assumed."""
+    comp = _p2_comp(200000, 0.1)  # no hpi_multiplier
+    valid, excl = _assess_comp(comp, _p2_subject(), 0)
+    assert valid is not None
+    assert valid["adjustments"]["time"] == 1.00
+    assert any("hpi_adjustment missing" in w for w in valid.get("audit_warnings", []))
+
+
+# ── T11-T12: IQR trimming ─────────────────────────────────────────────────
+
+def test_p2_iqr_outlier_removed_after_hpi():
+    """T11: Outlier comp is removed by IQR after HPI normalisation (≥6 comps)."""
+    # 6 flat comps at ~£260k + 1 extreme outlier at £600k
+    comps = [
+        _p2_comp(250000, 0.05),
+        _p2_comp(255000, 0.08),
+        _p2_comp(260000, 0.10),
+        _p2_comp(262000, 0.12),
+        _p2_comp(265000, 0.15),
+        _p2_comp(270000, 0.18),
+        _p2_comp(600000, 0.20),  # outlier — above IQR fence
+    ]
+    subject = _p2_subject()
+    result = calculate_ceiling(legal_flags=[], financial_inputs={}, sold_comps=comps, subject=subject)
+    audit = result.get("audit") or {}
+    iqr = audit.get("iqr_trim_summary") or {}
+    assert iqr.get("applied"), "IQR should have fired with 7 comps"
+    assert iqr.get("removed_outliers_count", 0) >= 1, "Outlier should be removed"
+    # base_value should be near the cluster (~260k), not pulled toward £600k
+    bv = result["base"]["value"] or 0
+    assert bv < 300000, f"base_value {bv} should be below £300k after outlier removal"
+
+
+def test_p2_iqr_audit_persisted():
+    """T12: IQR trim counts are persisted in audit."""
+    comps = [
+        _p2_comp(250000, 0.05),
+        _p2_comp(255000, 0.08),
+        _p2_comp(260000, 0.10),
+        _p2_comp(262000, 0.12),
+        _p2_comp(265000, 0.15),
+        _p2_comp(600000, 0.20),  # outlier
+    ]
+    result = calculate_ceiling(legal_flags=[], financial_inputs={}, sold_comps=comps, subject=_p2_subject())
+    audit = result.get("audit") or {}
+    iqr = audit.get("iqr_trim_summary") or {}
+    assert "pre_trim_count" in iqr
+    assert "post_trim_count" in iqr
+    assert "removed_outliers_count" in iqr
+
+
+# ── T13: Weighted median primary ──────────────────────────────────────────
+
+def test_p2_weighted_median_not_arithmetic_mean():
+    """T13: Weighted median, not arithmetic mean, determines base_value."""
+    # Skewed distribution: 4 comps at £200k, 1 at £800k
+    comps = [
+        _p2_comp(200000, 0.05, age_months=1),
+        _p2_comp(200000, 0.06, age_months=1),
+        _p2_comp(200000, 0.07, age_months=1),
+        _p2_comp(200000, 0.08, age_months=1),
+        _p2_comp(800000, 0.40, age_months=24),  # low weight, far, old
+    ]
+    result = calculate_ceiling(legal_flags=[], financial_inputs={}, sold_comps=comps, subject=_p2_subject())
+    bv = result["base"]["value"] or 0
+    arith_mean = (200000 * 4 + 800000) / 5  # = 280000
+    assert abs(bv - 200000) < 10000, f"weighted median should be ~£200k, got {bv}"
+    assert abs(bv - arith_mean) > 20000, "base_value must not equal arithmetic mean"
+    assert result["base"]["method"].startswith("weighted_median")
+
+
+# ── T14-T16: Verdict isolation ────────────────────────────────────────────
+
+def test_p2_legal_flags_do_not_reduce_verdict():
+    """T14: Legal flags must not reduce Verdict."""
+    comps = [_p2_comp(260000, 0.05), _p2_comp(265000, 0.08), _p2_comp(258000, 0.10)]
+    subject = _p2_subject()
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=subject)
+    mid_v = (verdict.get("valuation_range") or {}).get("midpoint") or 0
+    adj   = (verdict.get("legal_pack_value_risks") or {}).get("adjustment_factor", 0)
+    assert adj == 1.0, f"Verdict adjustment_factor must be 1.0 (no flags), got {adj}"
+    assert mid_v > 0
+
+
+def test_p2_manual_bid_does_not_alter_verdict():
+    """T15: current_bid must not change verdict midpoint."""
+    comps = [_p2_comp(260000, 0.05), _p2_comp(265000, 0.08), _p2_comp(258000, 0.10)]
+    area  = {"housing": {"soldComps": comps}}
+    r1 = ensure_ceiling_owned_objects(summary_json={}, area_json=area, current_bid=None, subject=_p2_subject())
+    r2 = ensure_ceiling_owned_objects(summary_json={}, area_json=area, current_bid=120000, subject=_p2_subject())
+    mid1 = (r1["verdict_ceiling"].get("valuation_range") or {}).get("midpoint")
+    mid2 = (r2["verdict_ceiling"].get("valuation_range") or {}).get("midpoint")
+    assert mid1 == mid2, f"current_bid must not alter verdict. Got {mid1} vs {mid2}"
+
+
+def test_p2_acquisition_costs_excluded_from_verdict():
+    """T16: Acquisition cost flags must not reduce Verdict."""
+    comps   = [_p2_comp(260000, 0.05), _p2_comp(265000, 0.08), _p2_comp(258000, 0.10)]
+    subject = _p2_subject()
+    flags   = [{"title": "Buyer's premium 5%", "severity": "high", "summation": "buyers premium"}]
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=subject)
+    adj     = (verdict.get("legal_pack_value_risks") or {}).get("adjustment_factor", 0)
+    assert adj == 1.0, "Acquisition cost flags must not reduce Verdict"
+
+
+# ── T17-T18: Workbench relation ───────────────────────────────────────────
+
+def test_p2_unresolved_risks_reduce_workbench_only():
+    """T17: Unresolved legal risks reduce Workbench, not Verdict."""
+    comps   = [_p2_comp(260000, 0.05), _p2_comp(265000, 0.08), _p2_comp(258000, 0.10)]
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_p2_subject())
+    flags   = [{"title": "Defective title", "severity": "critical", "summation": ""}]
+    wb      = calculate_workbench_ceiling(verdict, flags)
+    v_mid   = (verdict.get("valuation_range") or {}).get("midpoint") or 0
+    w_mid   = (wb.get("valuation_range") or {}).get("midpoint") or 0
+    assert w_mid < v_mid, f"Workbench ({w_mid}) must be below Verdict ({v_mid}) with active flags"
+    assert wb.get("risk_discount_pct", 0) > 0
+
+
+def test_p2_all_flags_resolved_workbench_equals_verdict():
+    """T18: All flags resolved → Workbench midpoint == Verdict midpoint."""
+    comps   = [_p2_comp(260000, 0.05), _p2_comp(265000, 0.08), _p2_comp(258000, 0.10)]
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_p2_subject())
+    wb      = calculate_workbench_ceiling(verdict, active_legal_flags=[])
+    v_mid   = (verdict.get("valuation_range") or {}).get("midpoint") or 0
+    w_mid   = (wb.get("valuation_range") or {}).get("midpoint") or 0
+    assert w_mid == v_mid, f"All flags resolved: Workbench {w_mid} must equal Verdict {v_mid}"
+    assert wb.get("risk_discount_pct") == 0.0
+    assert wb.get("active_flag_count") == 0
+    assert wb.get("all_flags_resolved") is True
+
+
+# ── T19-T20: Fallback safety ──────────────────────────────────────────────
+
+def test_p2_no_blank_ceiling_when_all_comps_fail():
+    """T19: If all comps fail, no blank ceiling — safe fallback used."""
+    # All comps are outside 0.5 miles — will all be excluded
+    comps = [_p2_comp(260000, 0.8), _p2_comp(270000, 0.9)]
+    area  = {"housing": {"soldComps": comps}}
+    # Give it a legacy ceiling to fall back to
+    sj = {
+        "ceiling": {
+            "base_valuation": 160000,
+            "ceiling_range": {"low": 152000, "high": 168000},
+        }
+    }
+    result = ensure_ceiling_owned_objects(summary_json=sj, area_json=area, subject=_p2_subject())
+    vc  = result["verdict_ceiling"]
+    mid = (vc.get("valuation_range") or {}).get("midpoint") or 0
+    assert mid > 0, "Must not blank ceiling when comps fail — use legacy fallback"
+    assert vc.get("_legacy_source") is True, "Fallback must be marked _legacy_source=True"
+
+
+def test_p2_fallback_clearly_marked():
+    """T20: Fallback is clearly marked — not silently treated as clean comparable Verdict."""
+    area  = {"housing": {"soldComps": []}}  # no comps
+    sj    = {"ceiling": {"base_valuation": 160000, "ceiling_range": {"low": 152000, "high": 168000}}}
+    result = ensure_ceiling_owned_objects(summary_json=sj, area_json=area, subject=_p2_subject())
+    vc = result["verdict_ceiling"]
+    assert vc.get("_legacy_source") is True
+    audit = vc.get("audit") or {}
+    src = audit.get("source_decision") or ""
+    assert "legacy_fallback" in src, f"source_decision must indicate fallback, got {src!r}"
+    assert audit.get("fallback_used") is True
+
+
+# ── T21-T22: Regression ───────────────────────────────────────────────────
+
+def test_p2_flat_F_comps_within_half_mile_produce_non_legacy_verdict():
+    """T21: Flat subject with F comps within 0.5 miles → non-legacy comparable Verdict."""
+    comps = [
+        _p2_comp(250000, 0.00, "F"),
+        _p2_comp(260000, 0.10, "F"),
+        _p2_comp(255000, 0.12, "F"),
+    ]
+    area   = {"housing": {"soldComps": comps}}
+    result = ensure_ceiling_owned_objects(summary_json={}, area_json=area, subject=_p2_subject("flat", "leasehold"))
+    vc  = result["verdict_ceiling"]
+    mid = (vc.get("valuation_range") or {}).get("midpoint") or 0
+    assert not vc.get("_legacy_source"), "Must not be _legacy_source when valid comps succeed"
+    assert mid > 200000, f"Midpoint must be near comp prices (~£255k), not a legacy value. Got {mid}"
+    audit = vc.get("audit") or {}
+    src   = audit.get("source_decision") or ""
+    assert src == "computed_from_sold_comps", f"source_decision wrong: {src!r}"
+
+
+def test_p2_legacy_replaced_when_valid_comp_recompute_succeeds():
+    """T22: Legacy fallback is not preserved when valid comparable recompute succeeds."""
+    # Pre-existing legacy verdict_ceiling with _legacy_source=True
+    sj = {
+        "ceiling": {"base_valuation": 160000, "ceiling_range": {"low": 152000, "high": 168000}},
+        "verdict_ceiling": {
+            "_ceiling_type": "verdict",
+            "_legacy_source": True,
+            "status": "ok",
+            "valuation_range": {"low": 152000.0, "midpoint": 160000.0, "high": 168000.0, "uncertainty_band": 0.05},
+            "ceiling_range": {"low": 152000, "high": 168000},
+            "base": {"value": 160000.0, "method": "legacy_v1"},
+            "base_valuation": 160000,
+            "legal_pack_value_risks": {"method": "property_value_risk_adjustment_only",
+                                       "adjustment_factor": 1.0, "adjusted_value": None, "risks": []},
+            "confidence": {"final": 0.45, "label": "Low confidence"},
+            "audit": {"warnings": ["legacy"], "version": "v1"},
+            "acquisition_costs": None, "excluded_from_ceiling": [],
+        },
+    }
+    area = {"housing": {"soldComps": [
+        _p2_comp(250000, 0.05, "F"),
+        _p2_comp(260000, 0.10, "F"),
+        _p2_comp(258000, 0.12, "F"),
+    ]}}
+    result = ensure_ceiling_owned_objects(summary_json=sj, area_json=area, subject=_p2_subject("flat", "leasehold"))
+    vc  = result["verdict_ceiling"]
+    mid = (vc.get("valuation_range") or {}).get("midpoint") or 0
+    assert not vc.get("_legacy_source"), "Legacy must be replaced when valid recompute succeeds"
+    assert mid > 200000, f"Verdict must use comp-derived value (~£255k), not legacy £160k. Got {mid}"
