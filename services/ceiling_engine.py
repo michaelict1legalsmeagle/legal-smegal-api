@@ -814,12 +814,19 @@ def calculate_workbench_ceiling(
     active_legal_flags = active_legal_flags if isinstance(active_legal_flags, list) else []
 
     verdict_vr   = verdict_ceiling.get("valuation_range") or {}
-    verdict_mid  = verdict_vr.get("midpoint")
+    # Prefer explicit comparable_valuation (unambiguous). Fall back to midpoint for
+    # backward compat with objects that pre-date this field.
+    verdict_comparable_valuation = (
+        verdict_ceiling.get("comparable_valuation")
+        or (verdict_ceiling.get("base") or {}).get("value")
+        or verdict_vr.get("midpoint")
+    )
+    verdict_mid  = verdict_comparable_valuation   # canonical base for workbench derivation
     verdict_low  = verdict_vr.get("low")
     verdict_high = verdict_vr.get("high")
     u_band       = verdict_vr.get("uncertainty_band", BASE_UNCERTAINTY)
 
-    # If verdict has no valid midpoint, workbench is also insufficient
+    # If verdict has no valid comparable_valuation, workbench is also insufficient
     if not verdict_mid or verdict_mid <= 0:
         return {
             "_ceiling_type": "workbench",
@@ -858,11 +865,17 @@ def calculate_workbench_ceiling(
         wb_high = verdict_high if verdict_high is not None else wb_high
         risk_discount_pct = 0.0
 
+    # wb_mid = risk_adjusted_value for this workbench state.
+    wb_risk_adjusted_value = wb_mid
     return {
         "_ceiling_type": "workbench",
         "status": "all_flags_resolved" if all_resolved else verdict_ceiling.get("status", "ok"),
+        # Explicit semantic fields (unambiguous).
+        "comparable_valuation": verdict_comparable_valuation,  # from Verdict, unchanged
+        "risk_adjusted_value":  wb_risk_adjusted_value,        # comparable_valuation × risk_factor
         "valuation_range": {
             "low":              wb_low,
+            # midpoint = risk_adjusted_value (backward-compat alias).
             "midpoint":         wb_mid,
             "high":             wb_high,
             "uncertainty_band": u_band,
@@ -874,16 +887,16 @@ def calculate_workbench_ceiling(
         "legal_pack_value_risks": {
             "method":            "property_value_risk_adjustment_only",
             "adjustment_factor": risk_factor,
-            "adjusted_value":    wb_mid,
+            "adjusted_value":    wb_risk_adjusted_value,  # = comparable_valuation × risk_factor
             "risks":             active_risks,
         },
         "risk_discount_pct":   risk_discount_pct,
         "active_flag_count":   len(active_legal_flags),
         "all_flags_resolved":  all_resolved,
-        "verdict_midpoint":    verdict_mid,
+        "verdict_midpoint":    verdict_mid,      # backward compat
         "verdict_range": {
             "low":      verdict_low,
-            "midpoint": verdict_mid,
+            "midpoint": verdict_mid,             # backward compat
             "high":     verdict_high,
         },
         "confidence":        verdict_ceiling.get("confidence"),
@@ -892,13 +905,15 @@ def calculate_workbench_ceiling(
         "base_method":       verdict_ceiling.get("base_method"),
         "strategy_used":     verdict_ceiling.get("strategy_used"),
         "audit": {
-            "verdict_ceiling_midpoint": verdict_mid,
-            "active_flag_count":        len(active_legal_flags),
-            "all_flags_resolved":       all_resolved,
-            "risk_adjustment_factor":   risk_factor,
-            "risk_discount_pct":        risk_discount_pct,
-            "formula": "workbench_midpoint = verdict_midpoint × active_flag_risk_factor",
-            "resolved_flags_excluded":  True,
+            "comparable_valuation":        verdict_comparable_valuation,
+            "risk_adjusted_value":         wb_risk_adjusted_value,
+            "verdict_ceiling_midpoint":    verdict_mid,   # backward compat
+            "active_flag_count":           len(active_legal_flags),
+            "all_flags_resolved":          all_resolved,
+            "risk_adjustment_factor":      risk_factor,
+            "risk_discount_pct":           risk_discount_pct,
+            "formula": "risk_adjusted_value = comparable_valuation × active_flag_risk_factor",
+            "resolved_flags_excluded":     True,
         },
         # acquisition costs excluded
         "acquisition_costs":   None,
@@ -1144,15 +1159,17 @@ def calculate_ceiling(
     formula_trace.append(f"step_3_result: risk_adj_factor={risk_adj_factor} risks_included={len(included_risks)}")
 
     # ── STEP 4: Compute ceiling values ───────────────────────────────────────
-    formula_trace.append("step_4: ceiling_midpoint = base_value × risk_adj_factor")
+    formula_trace.append("step_4: risk_adjusted_value = base_value × risk_adj_factor")
 
-    ceiling_midpoint: Optional[float] = None
+    ceiling_midpoint: Optional[float] = None   # backward-compat alias for risk_adjusted_value
+    risk_adjusted_value: Optional[float] = None
     ceiling_low:      Optional[float] = None
     ceiling_high:     Optional[float] = None
 
     if not insufficient_evidence and base_value and base_value > 0:
-        ceiling_midpoint = round(base_value * risk_adj_factor, 2)
-        formula_trace.append(f"step_4_result: ceiling_midpoint={ceiling_midpoint}")
+        risk_adjusted_value = round(base_value * risk_adj_factor, 2)
+        ceiling_midpoint    = risk_adjusted_value  # backward-compat alias
+        formula_trace.append(f"step_4_result: risk_adjusted_value={risk_adjusted_value}")
     else:
         formula_trace.append("step_4: skipped — insufficient_evidence")
 
@@ -1198,10 +1215,10 @@ def calculate_ceiling(
     u_band = _uncertainty_band(n_valid, conf_caps)
     formula_trace.append(f"step_6_result: uncertainty_band={u_band}")
 
-    if ceiling_midpoint:
-        ceiling_low  = round(ceiling_midpoint * (1 - u_band), 2)
-        ceiling_high = round(ceiling_midpoint * (1 + u_band), 2)
-        formula_trace.append(f"step_6: ceiling_low={ceiling_low} ceiling_high={ceiling_high}")
+    if risk_adjusted_value:
+        ceiling_low  = round(risk_adjusted_value * (1 - u_band), 2)
+        ceiling_high = round(risk_adjusted_value * (1 + u_band), 2)
+        formula_trace.append(f"step_6: ceiling_low={ceiling_low} ceiling_high={ceiling_high} (from risk_adjusted_value={risk_adjusted_value})")
 
     # ── STEP 7: Warnings and audit ───────────────────────────────────────────
     if not valid_comps:
@@ -1247,6 +1264,14 @@ def calculate_ceiling(
             "pre_iqr_trim_count":      _pre_trim_count,
             "post_iqr_trim_count":     n_valid,
         },
+        # Explicit semantic fields — unambiguous across Verdict and Workbench.
+        # comparable_valuation: weighted median of HPI-adjusted like-for-like comps.
+        # risk_adjusted_value:  comparable_valuation × legal_pack_risk_factor.
+        #   Verdict:   risk_factor = 1.0  → risk_adjusted_value == comparable_valuation
+        #   Workbench: risk_factor < 1.0  → risk_adjusted_value < comparable_valuation
+        # ceiling_range.low/high are derived from risk_adjusted_value only.
+        "comparable_valuation": base_value,
+        "risk_adjusted_value":  risk_adjusted_value,
         "comparables": {
             "radius_miles": PRIMARY_RADIUS_MILES,
             "valid":        valid_comps,
@@ -1255,11 +1280,14 @@ def calculate_ceiling(
         "legal_pack_value_risks": {
             "method":            "property_value_risk_adjustment_only",
             "adjustment_factor": risk_adj_factor,
-            "adjusted_value":    ceiling_midpoint,
+            "adjusted_value":    risk_adjusted_value,  # = comparable_valuation × risk_factor
             "risks":             included_risks,
         },
         "valuation_range": {
             "low":              ceiling_low,
+            # midpoint = risk_adjusted_value (backward-compat alias).
+            # Verdict: equals base_value (risk_factor=1). Workbench: equals base_value × risk_factor.
+            # Prefer comparable_valuation / risk_adjusted_value for new code.
             "midpoint":         ceiling_midpoint,
             "high":             ceiling_high,
             "uncertainty_band": u_band,
@@ -1306,8 +1334,10 @@ def calculate_ceiling(
                 "removed_outliers_count": _iqr_removed_count,
                 "removed_outlier_reasons": _iqr_removed_reasons,
             },
-            "base_method":     base_method,
-            "base_value":      base_value,
+            "base_method":          base_method,
+            "base_value":           base_value,
+            "comparable_valuation": base_value,        # explicit alias: comparable evidence result
+            "risk_adjusted_value":  risk_adjusted_value,  # base_value × risk_factor
             "source_decision": (
                 "computed_from_sold_comps" if base_value and not insufficient_evidence
                 else "external_override" if base_method == "external_override"
@@ -1394,8 +1424,15 @@ def ensure_ceiling_owned_objects(
     _existing_vc = summary_json.get("verdict_ceiling")
     _vc_valid = (
         isinstance(_existing_vc, dict)
-        and isinstance(_existing_vc.get("valuation_range"), dict)
-        and (_existing_vc["valuation_range"].get("midpoint") or 0) > 0
+        and (
+            # Accept via explicit comparable_valuation field (new objects)
+            (_existing_vc.get("comparable_valuation") or 0) > 0
+            or (
+                # Accept via valuation_range.midpoint (backward compat for older objects)
+                isinstance(_existing_vc.get("valuation_range"), dict)
+                and (_existing_vc["valuation_range"].get("midpoint") or 0) > 0
+            )
+        )
     )
     # A verdict_ceiling is only trusted if it was computed from sold comps
     # (no _legacy_source flag). Legacy-sourced verdicts must be upgraded
@@ -1591,12 +1628,27 @@ def ensure_ceiling_owned_objects(
 
     # ── 2. Validate / compute workbench_ceiling ───────────────────────────
     _existing_wb = summary_json.get("workbench_ceiling")
-    _v_mid = (verdict.get("valuation_range") or {}).get("midpoint") or 0
+    # Use comparable_valuation as the authoritative verdict base for workbench guard.
+    # Falls back to valuation_range.midpoint for pre-fix objects.
+    _v_comparable = (
+        verdict.get("comparable_valuation")
+        or (verdict.get("base") or {}).get("value")
+        or (verdict.get("valuation_range") or {}).get("midpoint")
+        or 0
+    )
+    _v_mid = _v_comparable  # backward-compat alias used in clamp below
+    # Workbench is valid if its risk_adjusted_value (or midpoint) <= verdict comparable_valuation + £1
+    _wb_rav = _existing_wb.get("risk_adjusted_value") if isinstance(_existing_wb, dict) else None
+    _wb_check_val = (
+        _wb_rav
+        if _wb_rav is not None
+        else ((_existing_wb or {}).get("valuation_range") or {}).get("midpoint")
+    ) or 0
     _wb_valid = (
         isinstance(_existing_wb, dict)
         and isinstance(_existing_wb.get("valuation_range"), dict)
-        and (_existing_wb["valuation_range"].get("midpoint") or 0) <= _v_mid + 1  # clamp tolerance £1
-        and (_existing_wb["valuation_range"].get("midpoint") or 0) > 0
+        and _wb_check_val <= _v_comparable + 1  # clamp tolerance £1
+        and _wb_check_val > 0
     )
 
     if _wb_valid:
