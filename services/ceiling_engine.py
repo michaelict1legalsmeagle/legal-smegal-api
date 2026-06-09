@@ -991,12 +991,20 @@ def calculate_ceiling(
     warnings: list[str] = []
     formula_trace: list[str] = []
 
-    # ── STEP 1: Process comparable universe ──────────────────────────────────
+    # ── STEP 1: Type/tenure matching + HPI normalisation ─────────────────────
+    # Doctrine: type + tenure match BEFORE IQR trimming.
+    # HPI normalisation occurs inside _assess_comp via hpi_multiplier field.
+    # All comps returned by _assess_comp have already been:
+    #   (a) matched for type and tenure (excluded if mismatch),
+    #   (b) HPI-normalised (adjusted_value = price × hpi_multiplier × size_adj × …).
     valid_comps:    list[dict] = []
     excluded_comps: list[dict] = []
     seen_addresses: set[str]   = set()
 
-    formula_trace.append("step_1: assess comparable universe within 0.5 miles")
+    formula_trace.append("step_1: type+tenure match + HPI normalisation within 0.5 miles")
+
+    _hpi_used_count    = 0
+    _hpi_missing_count = 0
 
     for idx, comp in enumerate(sold_comps):
         addr = (comp.get("address") or "").strip().lower()
@@ -1008,17 +1016,96 @@ def calculate_ceiling(
 
         valid, excl = _assess_comp(comp, subject, idx)
         if valid:
+            # Track HPI coverage
+            _hpi_raw = comp.get("hpi_adjustment") or comp.get("time_adjustment") or comp.get("hpi_multiplier")
+            if _hpi_raw and float(_hpi_raw) != 1.0:
+                _hpi_used_count += 1
+            else:
+                _hpi_missing_count += 1
             valid_comps.append(valid)
         else:
             excluded_comps.append(excl)
 
-    n_valid = len(valid_comps)
-    formula_trace.append(f"step_1_result: valid_comps={n_valid} excluded={len(excluded_comps)}")
+    _pre_trim_count = len(valid_comps)
+    formula_trace.append(
+        f"step_1_result: matched={_pre_trim_count} excluded={len(excluded_comps)} "
+        f"hpi_used={_hpi_used_count} hpi_missing={_hpi_missing_count}"
+    )
 
-    # ── STEP 2: Compute base_value ───────────────────────────────────────────
+    # ── STEP 1b: IQR outlier trimming on HPI-adjusted values ─────────────────
+    # Doctrine: IQR must run AFTER type/tenure matching AND after HPI normalisation.
+    # We trim on adjusted_value (which already incorporates hpi_multiplier), not on
+    # nominal sale_price. This is the authoritative IQR step. The IQR in
+    # get_housing_data (area fetch pipeline) uses nominal prices as a pre-filter
+    # only; this step is the canonical post-HPI trim inside the valuation engine.
+    _iqr_lower: Optional[float] = None
+    _iqr_upper: Optional[float] = None
+    _iqr_removed_count = 0
+    _iqr_removed_reasons: list[str] = []
+
+    if len(valid_comps) >= 6:
+        _adj_values = sorted(c["adjusted_value"] for c in valid_comps)
+        _n = len(_adj_values)
+        _q1 = _adj_values[_n // 4]
+        _q3 = _adj_values[(3 * _n) // 4]
+        _iqr_val = _q3 - _q1
+        _iqr_lower = _q1 - 1.5 * _iqr_val
+        _iqr_upper = _q3 + 1.5 * _iqr_val
+        _iqr_survivors = [
+            c for c in valid_comps
+            if _iqr_lower <= c["adjusted_value"] <= _iqr_upper
+        ]
+        if len(_iqr_survivors) >= MIN_REQUIRED_COMPS:
+            _removed = [c for c in valid_comps if c not in _iqr_survivors]
+            for _rc in _removed:
+                _reason = (
+                    f"iqr_outlier_below_fence adj={_rc['adjusted_value']:.0f} "
+                    f"fence_lo={_iqr_lower:.0f}"
+                    if _rc["adjusted_value"] < _iqr_lower
+                    else f"iqr_outlier_above_fence adj={_rc['adjusted_value']:.0f} "
+                         f"fence_hi={_iqr_upper:.0f}"
+                )
+                excluded_comps.append({
+                    "comp_idx":  _rc["comp_idx"],
+                    "reason":    _reason,
+                    "comp":      {},  # comp already assessed — no raw dict needed
+                })
+                _iqr_removed_reasons.append(_reason)
+            _iqr_removed_count = len(_removed)
+            valid_comps = _iqr_survivors
+            formula_trace.append(
+                f"step_1b: iqr_trim applied "
+                f"fence=[{_iqr_lower:.0f},{_iqr_upper:.0f}] "
+                f"removed={_iqr_removed_count} survivors={len(valid_comps)}"
+            )
+        else:
+            warnings.append(
+                f"IQR trim skipped: only {len(_iqr_survivors)} comps survive "
+                f"fence [{_iqr_lower:.0f},{_iqr_upper:.0f}] — keeping all {_pre_trim_count}"
+            )
+            formula_trace.append(
+                f"step_1b: iqr_trim skipped — "
+                f"would leave only {len(_iqr_survivors)} comps < MIN_REQUIRED_COMPS={MIN_REQUIRED_COMPS}"
+            )
+            _iqr_lower = _iqr_upper = None  # mark as not applied
+    else:
+        formula_trace.append(
+            f"step_1b: iqr_trim skipped — only {len(valid_comps)} comps "
+            f"(need ≥6 for IQR to be meaningful)"
+        )
+
+    n_valid = len(valid_comps)
+    formula_trace.append(f"step_1b_result: post_trim_comps={n_valid}")
+
+    # ── STEP 2: Compute base_value via weighted median ────────────────────────
     insufficient_evidence = False
     base_value: Optional[float] = None
-    base_method = "weighted_median_relational_comparables_0_5_mile"
+    # base_method reflects actual pipeline path
+    base_method = (
+        "weighted_median_hpi_normalised_like_for_like_iqr_trimmed_comps"
+        if _iqr_removed_count > 0 or len(valid_comps) >= 6
+        else "weighted_median_hpi_normalised_like_for_like_comps"
+    )
 
     if base_valuation and float(base_valuation) > 5_000:
         base_value  = float(base_valuation)
@@ -1027,8 +1114,8 @@ def calculate_ceiling(
 
     elif n_valid == 0:
         insufficient_evidence = True
-        formula_trace.append("step_2: insufficient_evidence — no valid comps within 0.5 miles")
-        evidence_gaps.append("No valid sold comparables within 0.5 miles")
+        formula_trace.append("step_2: insufficient_evidence — no valid comps within 0.5 miles after matching+trim")
+        evidence_gaps.append("No valid sold comparables within 0.5 miles after type/tenure matching and IQR trim")
 
     elif n_valid < MIN_REQUIRED_COMPS and not fallback_allowed:
         insufficient_evidence = True
@@ -1044,7 +1131,7 @@ def calculate_ceiling(
             evidence_gaps.append("Weighted median could not be computed — check comp weights")
         else:
             base_value = round(wm, 2)
-            formula_trace.append(f"step_2: base_value={base_value} method=weighted_median n_valid={n_valid}")
+            formula_trace.append(f"step_2: base_value={base_value} method={base_method} n_valid={n_valid}")
             if n_valid < MIN_REQUIRED_COMPS:
                 warnings.append(f"Only {n_valid} valid comp(s) — below minimum {MIN_REQUIRED_COMPS}; ceiling is indicative with low confidence")
             if n_valid < PREFERRED_COMPS:
@@ -1157,6 +1244,8 @@ def calculate_ceiling(
             "preferred_required_comps": PREFERRED_COMPS,
             "valid_comparable_count":  n_valid,
             "excluded_comparable_count": len(excluded_comps),
+            "pre_iqr_trim_count":      _pre_trim_count,
+            "post_iqr_trim_count":     n_valid,
         },
         "comparables": {
             "radius_miles": PRIMARY_RADIUS_MILES,
@@ -1182,11 +1271,55 @@ def calculate_ceiling(
             "label": conf_label,
         },
         "audit": {
-            "assumptions":  assumptions,
-            "evidence_gaps": evidence_gaps,
-            "warnings":     warnings,
-            "formula_trace": formula_trace,
-            "version":      VERSION,
+            # Phase 2 doctrine fields
+            "comparable_method":   "red_book_style_comparable_evidence",
+            "not_rics_valuation":  True,
+            "formal_valuation":    False,
+            "decision_support_only": True,
+            "comps_source_path":   "area_json.housing.soldComps",
+            "sold_comps_count":    len(sold_comps),
+            "type_tenure_matched_count": _pre_trim_count,
+            "pre_trim_comp_count": _pre_trim_count,
+            "post_trim_comp_count": n_valid,
+            "valid_comparable_count":    n_valid,
+            "excluded_comparable_count": len(excluded_comps),
+            "excluded_reasons_summary": {
+                r: sum(1 for e in excluded_comps if r in (e.get("reason") or ""))
+                for r in {(e.get("reason") or "unknown").split(" ")[0]
+                          for e in excluded_comps}
+            },
+            "hpi_normalisation_summary": {
+                "hpi_used_count":    _hpi_used_count,
+                "hpi_missing_count": _hpi_missing_count,
+                "hpi_source_fields": ["hpi_multiplier", "hpi_adjustment", "time_adjustment"],
+                "time_adjustment_assumptions": (
+                    "time_adjustment=1.00 where hpi_multiplier absent or ==1.0"
+                    if _hpi_missing_count > 0 else "all comps HPI-adjusted"
+                ),
+            },
+            "iqr_trim_summary": {
+                "applied":             _iqr_removed_count > 0,
+                "iqr_lower_bound":     round(_iqr_lower, 2) if _iqr_lower is not None else None,
+                "iqr_upper_bound":     round(_iqr_upper, 2) if _iqr_upper is not None else None,
+                "pre_trim_count":      _pre_trim_count,
+                "post_trim_count":     n_valid,
+                "removed_outliers_count": _iqr_removed_count,
+                "removed_outlier_reasons": _iqr_removed_reasons,
+            },
+            "base_method":     base_method,
+            "base_value":      base_value,
+            "source_decision": (
+                "computed_from_sold_comps" if base_value and not insufficient_evidence
+                else "external_override" if base_method == "external_override"
+                else "insufficient_evidence"
+            ),
+            "fallback_used":   insufficient_evidence,
+            # Existing audit fields
+            "assumptions":     assumptions,
+            "evidence_gaps":   evidence_gaps,
+            "warnings":        warnings,
+            "formula_trace":   formula_trace,
+            "version":         VERSION,
         },
         # Legacy compatibility fields — mapped from new structure for
         # existing app.py consumers that read these keys.
