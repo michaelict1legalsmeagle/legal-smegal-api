@@ -6019,12 +6019,23 @@ def get_deal(deal_id: str):
         if not result.data:
             return jsonify({"error": "Deal not found"}), 404
         deal = result.data
-        # Backfill owned ceiling objects on old deals that only have legacy summary_json.ceiling.
-        # This is a read-time normalisation — does not write to DB (avoids race on GET).
+        # Backfill / upgrade owned ceiling objects on read.
+        # Triggers when:
+        #   (a) verdict_ceiling or workbench_ceiling is absent, OR
+        #   (b) verdict_ceiling exists but is _legacy_source=True — meaning it was built
+        #       from a pre-area v1 base and should be upgraded to relational comp valuation
+        #       now that area_json may carry sold comps.
+        # This is read-time normalisation only — does NOT write to the DB.
         if _ceiling_engine_available and _ensure_ceiling_objects:
             try:
                 _sj = deal.get("summary_json") or {}
-                if not _sj.get("verdict_ceiling") or not _sj.get("workbench_ceiling"):
+                _vc = _sj.get("verdict_ceiling") if isinstance(_sj, dict) else None
+                _needs_backfill = (
+                    not _sj.get("verdict_ceiling")
+                    or not _sj.get("workbench_ceiling")
+                    or (isinstance(_vc, dict) and _vc.get("_legacy_source"))
+                )
+                if _needs_backfill:
                     _sj = _ensure_ceiling_objects(
                         summary_json=dict(_sj),
                         area_json=deal.get("area_json"),
@@ -7668,71 +7679,67 @@ def ceiling_endpoint():
 
         if _use_v2:
             # ── V2 PATH: verdict × active flags ─────────────────────────────
-            _persisted_mid = (_persisted_verdict and
-                              (_persisted_verdict.get("valuation_range") or {}).get("midpoint") or 0)
-            _persisted_is_legacy = bool(
-                _persisted_verdict and _persisted_verdict.get("_legacy_source")
-            )
+            # Use the persisted verdict ONLY when it is non-legacy (computed from
+            # sold comps). If _legacy_source=True, attempt a live recompute from
+            # area_json.housing.soldComps before falling back to the legacy base.
+            _pv_mid      = (_persisted_verdict and
+                            (_persisted_verdict.get("valuation_range") or {}).get("midpoint") or 0)
+            _pv_is_legacy = bool(_persisted_verdict and _persisted_verdict.get("_legacy_source"))
 
-            # Use the persisted verdict only if it is non-legacy (computed from comps).
-            # If _legacy_source=True and we have comps available, attempt a fresh recompute.
-            if _persisted_verdict and _persisted_mid > 0 and not _persisted_is_legacy:
+            if _persisted_verdict and _pv_mid > 0 and not _pv_is_legacy:
+                # Non-legacy persisted verdict — use directly.
                 verdict_result = _persisted_verdict
                 app.logger.info(
-                    f"[ceiling] deal={deal_id} using persisted non-legacy verdict "
-                    f"mid={_persisted_mid}"
+                    f"[ceiling] deal={deal_id} using persisted non-legacy verdict mid={_pv_mid}"
                 )
 
             else:
-                # Either no persisted verdict, or persisted verdict is _legacy_source=True.
-                # Source order:
-                # 1. Try relational comp recompute from _wb_comps (area_json.housing.soldComps).
-                # 2. If recompute fails/no comps, fall back to legacy summary_json.ceiling.
-                # 3. If no legacy base and no comps: run engine anyway (will surface insufficient_evidence).
+                # Either no persisted verdict, or it is _legacy_source=True.
+                # Try live recompute from area_json sold comps first.
+                _live_verdict = None
+                _live_comps   = _wb_comps if deal_id else []
+                if _live_comps and _calc_verdict_ceiling:
+                    try:
+                        _live_verdict = _calc_verdict_ceiling(
+                            sold_comps=_live_comps,
+                            subject=_wb_subject if deal_id else {},
+                            base_valuation=None,
+                            strategy=str(strategy),
+                            fallback_allowed=True,
+                        )
+                        _apply_audit_confidence_cap(_live_verdict, _area_data_for_cap)
+                    except Exception as _lve:
+                        app.logger.warning(f"[ceiling] live comp recompute failed deal={deal_id}: {_lve}")
+                        _live_verdict = None
 
-                _ceil_recompute_verdict = None
-                _recompute_comps = _wb_comps if deal_id else []
-                if _recompute_comps:
-                    _ceil_recompute_verdict = _calc_verdict_ceiling(
-                        sold_comps=_recompute_comps,
-                        subject=_wb_subject if deal_id else {},
-                        base_valuation=None,
-                        strategy=str(strategy),
-                        fallback_allowed=True,
-                    )
-                    _apply_audit_confidence_cap(_ceil_recompute_verdict, _area_data_for_cap)
-
-                _recompute_mid = (
-                    (_ceil_recompute_verdict and
-                     (_ceil_recompute_verdict.get("valuation_range") or {}).get("midpoint") or 0)
-                    if _ceil_recompute_verdict else 0
+                _live_mid = (
+                    (_live_verdict.get("valuation_range") or {}).get("midpoint") or 0
+                    if _live_verdict else 0
                 )
 
-                if _recompute_mid and _recompute_mid > 0:
-                    # Recompute succeeded — use it; remove _legacy_source
-                    verdict_result = _ceil_recompute_verdict
+                if _live_mid and _live_mid > 0:
+                    # Recompute succeeded — use it and persist to DB so next load is fast.
+                    verdict_result = _live_verdict
                     verdict_result.pop("_legacy_source", None)
-                    _rc_audit = verdict_result.get("audit") or {}
-                    _rc_audit["source_decision"] = "computed_from_sold_comps"
-                    _rc_audit["sold_comps_count"] = len(_recompute_comps)
-                    _rc_audit["fallback_used"] = False
-                    verdict_result["audit"] = _rc_audit
+                    _lv_audit = verdict_result.setdefault("audit", {})
+                    _lv_audit["source_decision"] = "computed_from_sold_comps"
                     app.logger.info(
-                        f"[ceiling] deal={deal_id} recomputed from {len(_recompute_comps)} comps "
-                        f"mid={_recompute_mid} (replaced legacy verdict)"
+                        f"[ceiling] deal={deal_id} recomputed from {len(_live_comps)} comps "
+                        f"mid={_live_mid} (replaced legacy)"
                     )
 
                 else:
-                    # Comp recompute failed or no comps — fall back to legacy ceiling.
-                    _legacy_ceil = (_sj.get("ceiling") or {}) if isinstance(_sj, dict) else {}
-                    _legacy_base = None
-                    _legacy_lo   = None
-                    _legacy_hi   = None
+                    # Live recompute failed or no comps — fall back to persisted legacy ceiling.
+                    _legacy_ceil  = (_sj.get("ceiling") or {}) if isinstance(_sj, dict) else {}
+                    _legacy_base  = None
+                    _legacy_lo    = None
+                    _legacy_hi    = None
                     try:
                         _lb_raw = _legacy_ceil.get("base_valuation")
                         if _lb_raw and float(_lb_raw) > 5000:
                             _legacy_base = float(_lb_raw)
-                        _lcr = _legacy_ceil.get("ceiling_range") or _legacy_ceil.get("valuation_range") or {}
+                        _lcr    = (_legacy_ceil.get("ceiling_range") or
+                                   _legacy_ceil.get("valuation_range") or {})
                         _lo_raw = _lcr.get("low")
                         _hi_raw = _lcr.get("high")
                         if _lo_raw and float(_lo_raw) > 5000:
@@ -7743,18 +7750,18 @@ def ceiling_endpoint():
                         pass
 
                     if _legacy_base and _legacy_base > 5000:
-                        _ub = 0.05
+                        _ub    = 0.05
                         _v_mid = _legacy_base
-                        _v_lo  = _legacy_lo  if _legacy_lo  else round(_legacy_base * (1 - _ub), 2)
-                        _v_hi  = _legacy_hi  if _legacy_hi  else round(_legacy_base * (1 + _ub), 2)
-                        _src = ("legacy_fallback_comp_recompute_failed"
-                                if (_ceil_recompute_verdict is not None and _recompute_comps)
-                                else "legacy_fallback_no_comps")
-                        _ex_reasons = {}
-                        if _ceil_recompute_verdict:
-                            for _ex in ((_ceil_recompute_verdict.get("comparables") or {}).get("excluded") or []):
+                        _v_lo  = _legacy_lo if _legacy_lo else round(_legacy_base * (1 - _ub), 2)
+                        _v_hi  = _legacy_hi if _legacy_hi else round(_legacy_base * (1 + _ub), 2)
+                        _src   = ("legacy_fallback_comp_recompute_failed"
+                                  if _live_comps else "legacy_fallback_no_comps")
+                        # Collect exclusion reasons for the audit trail
+                        _excl_reasons: dict = {}
+                        if _live_verdict:
+                            for _ex in ((_live_verdict.get("comparables") or {}).get("excluded") or []):
                                 _r = (_ex or {}).get("reason", "unknown")
-                                _ex_reasons[_r] = _ex_reasons.get(_r, 0) + 1
+                                _excl_reasons[_r] = _excl_reasons.get(_r, 0) + 1
                         verdict_result = {
                             "_ceiling_type":  "verdict",
                             "_legacy_source": True,
@@ -7775,7 +7782,8 @@ def ceiling_endpoint():
                                 "low":  int(round(_v_lo)),
                                 "high": int(round(_v_hi)),
                             },
-                            "confidence": _legacy_ceil.get("confidence") or {"final": 0.45, "label": "Low confidence"},
+                            "confidence": (_legacy_ceil.get("confidence") or
+                                           {"final": 0.45, "label": "Low confidence"}),
                             "legal_pack_value_risks": {
                                 "method":            "property_value_risk_adjustment_only",
                                 "adjustment_factor": 1.0,
@@ -7783,26 +7791,31 @@ def ceiling_endpoint():
                                 "risks":             [],
                             },
                             "audit": {
-                                "source_decision":           _src,
-                                "sold_comps_count":          len(_recompute_comps),
-                                "excluded_reasons_summary":  _ex_reasons,
-                                "fallback_used":             True,
-                                "warnings":    [f"verdict built from legacy ceiling ({_src})"],
-                                "version":     "ceiling_relational_paper_valuation_v1",
-                                "assumptions": ["base_valuation from legacy ceiling; low/high from legacy ceiling_range"],
+                                "source_decision":          _src,
+                                "sold_comps_count":         len(_live_comps),
+                                "excluded_reasons_summary": _excl_reasons,
+                                "fallback_used":            True,
+                                "warnings": [
+                                    f"verdict built from legacy ceiling ({_src}). "
+                                    + (f"Comps excluded: {_excl_reasons}. "
+                                       if _excl_reasons else "")
+                                    + "Re-fetch area to recompute."
+                                ],
+                                "version":     VERSION if "VERSION" in dir() else "ceiling_relational_paper_valuation_v1",
+                                "assumptions": ["base from legacy summary_json.ceiling"],
                             },
-                            "acquisition_costs":   None,
+                            "acquisition_costs":    None,
                             "excluded_from_ceiling": [],
                         }
                         app.logger.info(
                             f"[ceiling] deal={deal_id} {_src} "
-                            f"mid={_v_mid} lo={_v_lo} hi={_v_hi}"
+                            f"mid={_v_mid} excl={_excl_reasons}"
                         )
                     else:
-                        # No legacy base either — run relational engine anyway;
-                        # will surface insufficient_evidence state correctly.
+                        # No legacy base and comps insufficient — run engine anyway;
+                        # surfaces insufficient_evidence state correctly to the UI.
                         verdict_result = _calc_verdict_ceiling(
-                            sold_comps=_recompute_comps,
+                            sold_comps=_live_comps,
                             subject=_wb_subject if deal_id else {},
                             base_valuation=float(base_val) if base_val else None,
                             strategy=str(strategy),
@@ -7810,7 +7823,7 @@ def ceiling_endpoint():
                         )
                         _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
                         app.logger.warning(
-                            f"[ceiling] deal={deal_id} no legacy base — derived from comps; "
+                            f"[ceiling] deal={deal_id} no legacy base — "
                             f"status={verdict_result.get('status')}"
                         )
 
