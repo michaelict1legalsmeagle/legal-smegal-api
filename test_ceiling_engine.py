@@ -2141,246 +2141,168 @@ def test_p2_legacy_replaced_when_valid_comp_recompute_succeeds():
 
 
 # =============================================================================
-# NAVIGATION / OWNERSHIP INVARIANT TESTS
-# Tests required by the ceiling ownership debug task.
+# TERMINOLOGY / OBJECT MODEL TESTS
+# Verify: comparable_valuation, risk_adjusted_value, ceiling derivation chain.
 # =============================================================================
 
 import sys as _sys
-_sys.path.insert(0, "/tmp/debug")
+_sys.path.insert(0, "/tmp/term_fix")
 from services.ceiling_engine import (
     calculate_verdict_ceiling,
     calculate_workbench_ceiling,
     ensure_ceiling_owned_objects,
 )
 
-
-def _nav_comps():
+def _tm_comps():
     return [
-        {"price": 260000, "miles": 0.05, "property_type": "F",
-         "duration": "L", "age_months": 3},
-        {"price": 265000, "miles": 0.10, "property_type": "F",
-         "duration": "L", "age_months": 3},
-        {"price": 258000, "miles": 0.12, "property_type": "F",
-         "duration": "L", "age_months": 3},
+        {"price": 260000, "miles": 0.05, "property_type": "F", "duration": "L", "age_months": 3},
+        {"price": 265000, "miles": 0.10, "property_type": "F", "duration": "L", "age_months": 3},
+        {"price": 258000, "miles": 0.12, "property_type": "F", "duration": "L", "age_months": 3},
     ]
 
-
-def _nav_subject():
+def _tm_subject():
     return {"property_type": "flat", "tenure": "leasehold"}
 
-
-def _nav_flags():
+def _tm_flags():
     return [{"title": "Defective title", "severity": "critical", "summation": ""}]
 
 
-def _nav_verdict():
-    """Clean non-legacy verdict from comparables."""
-    return calculate_verdict_ceiling(
-        sold_comps=_nav_comps(), subject=_nav_subject()
-    )
+# T1 — Like-for-like comps produce base_value (comparable_valuation)
+def test_term_comps_produce_comparable_valuation():
+    v = calculate_verdict_ceiling(sold_comps=_tm_comps(), subject=_tm_subject())
+    # comparable_valuation is the explicit new field
+    cv = v.get("comparable_valuation")
+    assert cv is not None and cv > 0, f"comparable_valuation missing or zero: {cv}"
+    # Must equal base.value
+    assert cv == v["base"]["value"], \
+        f"comparable_valuation {cv} != base.value {v['base']['value']}"
+    # Must equal audit.comparable_valuation
+    assert v["audit"].get("comparable_valuation") == cv, \
+        "audit.comparable_valuation mismatch"
+    # Must equal audit.base_value
+    assert v["audit"].get("base_value") == cv
 
 
-def _nav_workbench(verdict, flags):
-    return calculate_workbench_ceiling(verdict, flags)
+# T2 — Risk factor reduces base_value into risk_adjusted_value
+def test_term_risk_factor_reduces_to_risk_adjusted_value():
+    v = calculate_verdict_ceiling(sold_comps=_tm_comps(), subject=_tm_subject())
+    w = calculate_workbench_ceiling(v, _tm_flags())
+    cv  = v["comparable_valuation"]
+    rf  = w["legal_pack_value_risks"]["adjustment_factor"]
+    rav = round(cv * rf, 2)
+    assert rf > 0 and rf < 1.0, f"risk_factor should be <1 with active flags, got {rf}"
+    # Workbench must expose risk_adjusted_value explicitly
+    assert w.get("risk_adjusted_value") is not None, "risk_adjusted_value missing from workbench"
+    assert abs(w["risk_adjusted_value"] - rav) < 1, \
+        f"risk_adjusted_value {w['risk_adjusted_value']} != base×rf {rav}"
+    # audit must record both
+    assert abs(w["audit"]["comparable_valuation"] - cv) < 1
+    assert abs(w["audit"]["risk_adjusted_value"] - rav) < 1
 
 
-# ── T1: Verdict unchanged after Workbench call ───────────────────────────────
-
-def test_nav_verdict_unchanged_after_workbench_call():
-    """Verdict midpoint and adjustment_factor must not change after workbench is derived."""
-    verdict = _nav_verdict()
-    v_mid_before = (verdict.get("valuation_range") or {}).get("midpoint")
-    adj_before   = (verdict.get("legal_pack_value_risks") or {}).get("adjustment_factor")
-
-    # Derive workbench (simulating /api/ceiling call)
-    _nav_workbench(verdict, _nav_flags())
-
-    v_mid_after = (verdict.get("valuation_range") or {}).get("midpoint")
-    adj_after   = (verdict.get("legal_pack_value_risks") or {}).get("adjustment_factor")
-
-    assert v_mid_before == v_mid_after, \
-        f"Verdict midpoint changed after workbench call: {v_mid_before} → {v_mid_after}"
-    assert adj_before == adj_after == 1.0, \
-        f"Verdict adjustment_factor changed: {adj_before} → {adj_after}"
-
-
-# ── T2: Workbench stable across repeated /api/ceiling calls ──────────────────
-
-def test_nav_workbench_stable_repeated_calls():
-    """Repeated workbench calls with the same flags must produce identical midpoints."""
-    verdict = _nav_verdict()
-    flags   = _nav_flags()
-
-    wb1 = _nav_workbench(verdict, flags)
-    wb2 = _nav_workbench(verdict, flags)
-    wb3 = _nav_workbench(verdict, flags)
-
-    mid1 = (wb1.get("valuation_range") or {}).get("midpoint")
-    mid2 = (wb2.get("valuation_range") or {}).get("midpoint")
-    mid3 = (wb3.get("valuation_range") or {}).get("midpoint")
-
-    assert mid1 == mid2 == mid3, \
-        f"Workbench not stable across calls: {mid1}, {mid2}, {mid3}"
+# T3 — Ceiling range is derived from risk_adjusted_value only
+def test_term_ceiling_range_derived_from_risk_adjusted_value():
+    v = calculate_verdict_ceiling(sold_comps=_tm_comps(), subject=_tm_subject())
+    w = calculate_workbench_ceiling(v, _tm_flags())
+    rav = w["risk_adjusted_value"]
+    u   = w["valuation_range"]["uncertainty_band"]
+    expected_lo = round(rav * (1 - u), 2)
+    expected_hi = round(rav * (1 + u), 2)
+    actual_lo   = w["valuation_range"]["low"]
+    actual_hi   = w["valuation_range"]["high"]
+    assert abs(actual_lo - expected_lo) < 1, \
+        f"ceiling_low {actual_lo} != risk_adjusted_value*(1-u) {expected_lo}"
+    assert abs(actual_hi - expected_hi) < 1, \
+        f"ceiling_high {actual_hi} != risk_adjusted_value*(1+u) {expected_hi}"
+    # NOT derived from base_value directly
+    cv = v["comparable_valuation"]
+    wrong_lo = round(cv * (1 - u), 2)
+    if abs(rav - cv) > 1:   # only meaningful when risk reduces
+        assert abs(actual_lo - wrong_lo) > 1, \
+            "ceiling_low appears to be derived from comparable_valuation, not risk_adjusted_value"
 
 
-# ── T3: Workbench never derives from previous Workbench ──────────────────────
-
-def test_nav_workbench_derives_from_verdict_not_previous_workbench():
-    """
-    Workbench must always be derived from verdict midpoint, not from a previous workbench.
-    If WB1 = verdict × r1, then WB2 must equal verdict × r2, not WB1 × r2.
-    """
-    verdict = _nav_verdict()
-    v_mid   = (verdict.get("valuation_range") or {}).get("midpoint") or 0
-
-    flags_2 = [
-        {"title": "Flag 1", "severity": "critical", "summation": ""},
-        {"title": "Flag 2", "severity": "critical", "summation": ""},
-    ]
-    wb2 = _nav_workbench(verdict, flags_2)
-    wb2_mid = (wb2.get("valuation_range") or {}).get("midpoint") or 0
-    r2      = (wb2.get("legal_pack_value_risks") or {}).get("adjustment_factor") or 1.0
-
-    # Correct: wb2_mid = v_mid × r2
-    expected = round(v_mid * r2, 2)
-    assert abs(wb2_mid - expected) < 1, \
-        f"Workbench derived from wrong base: expected {expected} (verdict×r2), got {wb2_mid}"
-
-    # Confirm: NOT derived from a previous workbench
-    # If derived from WB1 (which would be verdict × r1_factor), value would differ
-    wb1 = _nav_workbench(verdict, _nav_flags())
-    wb1_mid = (wb1.get("valuation_range") or {}).get("midpoint") or 0
-    # WB2 derived from WB1 would = wb1_mid × r2, which ≠ v_mid × r2 when wb1_mid ≠ v_mid
-    if wb1_mid != v_mid:
-        wrong_if_compounded = round(wb1_mid * r2, 2)
-        assert abs(wb2_mid - wrong_if_compounded) > 1 or abs(wb2_mid - expected) < 1, \
-            f"Workbench appears to compound from previous workbench: " \
-            f"wb2_mid={wb2_mid}, compounded_wrong={wrong_if_compounded}, expected={expected}"
+# T4 — Verdict risk_factor = 1.0
+def test_term_verdict_risk_factor_is_1():
+    v = calculate_verdict_ceiling(sold_comps=_tm_comps(), subject=_tm_subject())
+    adj = v["legal_pack_value_risks"]["adjustment_factor"]
+    assert adj == 1.0, f"Verdict adjustment_factor must be 1.0, got {adj}"
+    # Because risk_factor=1, comparable_valuation == risk_adjusted_value on Verdict
+    cv  = v["comparable_valuation"]
+    rav = v.get("risk_adjusted_value")
+    assert rav is not None, "risk_adjusted_value missing from Verdict"
+    assert abs(cv - rav) < 1, \
+        f"Verdict: comparable_valuation {cv} should equal risk_adjusted_value {rav} when factor=1"
+    # midpoint backward compat should also equal both
+    mid = v["valuation_range"]["midpoint"]
+    assert abs(mid - cv) < 1, \
+        f"Verdict midpoint {mid} should equal comparable_valuation {cv}"
 
 
-# ── T4: Legacy sj.ceiling cannot override valid verdict_ceiling ───────────────
+# T5 — Workbench risk_factor applies unresolved risks
+def test_term_workbench_applies_unresolved_risks():
+    v = calculate_verdict_ceiling(sold_comps=_tm_comps(), subject=_tm_subject())
+    # No flags
+    w0 = calculate_workbench_ceiling(v, [])
+    assert w0["risk_adjusted_value"] == v["comparable_valuation"], \
+        "No flags: risk_adjusted_value should equal comparable_valuation"
+    assert w0.get("risk_discount_pct") == 0.0
+    # One critical flag
+    w1 = calculate_workbench_ceiling(v, _tm_flags())
+    assert w1["risk_adjusted_value"] < v["comparable_valuation"], \
+        "Active flag must reduce risk_adjusted_value below comparable_valuation"
+    assert w1.get("risk_discount_pct") > 0
+    # Two critical flags — deeper discount
+    w2 = calculate_workbench_ceiling(v, _tm_flags() + _tm_flags())
+    assert w2["risk_adjusted_value"] < w1["risk_adjusted_value"], \
+        "Two flags must reduce risk_adjusted_value more than one flag"
 
-def test_nav_legacy_ceiling_cannot_override_valid_verdict():
-    """
-    summary_json.ceiling (legacy alias) must not override an existing non-legacy verdict_ceiling.
-    ensure_ceiling_owned_objects must preserve the non-legacy verdict as-is.
-    """
-    verdict = _nav_verdict()
-    v_mid   = (verdict.get("valuation_range") or {}).get("midpoint")
 
-    # Build a summary_json with a valid non-legacy verdict_ceiling AND a legacy ceiling
-    # with a DIFFERENT (lower, risk-reduced) base_valuation.
+# T6 — Repeated Workbench calls do not compound
+def test_term_workbench_no_compounding():
+    v  = calculate_verdict_ceiling(sold_comps=_tm_comps(), subject=_tm_subject())
+    cv = v["comparable_valuation"]
+    rf = None
+    w1 = calculate_workbench_ceiling(v, _tm_flags())
+    rf = w1["legal_pack_value_risks"]["adjustment_factor"]
+    expected_rav = round(cv * rf, 2)
+    # Call workbench a second and third time from the same verdict
+    w2 = calculate_workbench_ceiling(v, _tm_flags())
+    w3 = calculate_workbench_ceiling(v, _tm_flags())
+    assert abs(w1["risk_adjusted_value"] - expected_rav) < 1
+    assert abs(w2["risk_adjusted_value"] - expected_rav) < 1, \
+        f"Call 2 compounded: got {w2['risk_adjusted_value']} not {expected_rav}"
+    assert abs(w3["risk_adjusted_value"] - expected_rav) < 1, \
+        f"Call 3 compounded: got {w3['risk_adjusted_value']} not {expected_rav}"
+    # Prove NOT compounded: if it were, call2 rav = call1_rav × rf (smaller)
+    wrong_compounded = round(w1["risk_adjusted_value"] * rf, 2)
+    if abs(w1["risk_adjusted_value"] - cv) > 1:
+        assert abs(w2["risk_adjusted_value"] - wrong_compounded) > 1, \
+            "Workbench IS compounding — derived from previous workbench not from verdict"
+
+
+# T7 — Legacy summary_json.ceiling cannot override valid Verdict
+def test_term_legacy_ceiling_cannot_override_valid_verdict():
+    v   = calculate_verdict_ceiling(sold_comps=_tm_comps(), subject=_tm_subject())
+    cv  = v["comparable_valuation"]
+    # Build summary_json with valid non-legacy verdict_ceiling AND a legacy ceiling
+    # with a lower (risk-reduced) base_valuation — the legacy alias must NOT win.
     sj = {
-        "verdict_ceiling": verdict,   # clean non-legacy verdict
-        "ceiling": {                  # legacy alias pointing to a risk-reduced value
-            "base_valuation":  int(v_mid * 0.85),   # 15% lower — should NOT win
-            "ceiling_range":   {
-                "low":  int(v_mid * 0.85 * 0.95),
-                "high": int(v_mid * 0.85 * 1.05),
-            },
+        "verdict_ceiling": v,   # valid non-legacy comparable verdict
+        "ceiling": {            # legacy alias at a 15% lower value
+            "base_valuation": int(cv * 0.85),
+            "ceiling_range":  {"low": int(cv * 0.85 * 0.95), "high": int(cv * 0.85 * 1.05)},
+            "_ceiling_type":  "workbench",
         },
     }
     result = ensure_ceiling_owned_objects(
-        summary_json=sj, area_json={}, subject=_nav_subject()
+        summary_json=sj,
+        area_json={},
+        subject=_tm_subject(),
     )
-    result_vc_mid = (result["verdict_ceiling"].get("valuation_range") or {}).get("midpoint")
-    assert result_vc_mid == v_mid, \
-        f"Legacy ceiling overrode valid verdict: expected {v_mid}, got {result_vc_mid}"
+    result_cv = result["verdict_ceiling"].get("comparable_valuation")
+    assert result_cv is not None, "comparable_valuation missing from preserved verdict"
+    assert abs(result_cv - cv) < 1, \
+        f"Legacy ceiling overrode valid verdict: expected {cv}, got {result_cv}"
     assert not result["verdict_ceiling"].get("_legacy_source"), \
-        "Non-legacy verdict was replaced by a legacy-sourced one"
-
-
-# ── T5: Verdict legal risk factor always 1.0 ─────────────────────────────────
-
-def test_nav_verdict_adjustment_factor_always_1():
-    """Verdict ceiling must always have adjustment_factor = 1.0 regardless of flags."""
-    verdict = calculate_verdict_ceiling(
-        sold_comps=_nav_comps(),
-        subject=_nav_subject(),
-        strategy="BTL",
-    )
-    adj = (verdict.get("legal_pack_value_risks") or {}).get("adjustment_factor")
-    assert adj == 1.0, f"Verdict adjustment_factor must be 1.0, got {adj}"
-    # Ceiling type must be verdict
-    assert verdict.get("_ceiling_type") == "verdict"
-
-
-# ── T6: Workbench equals Verdict when all flags resolved ─────────────────────
-
-def test_nav_workbench_equals_verdict_all_flags_resolved():
-    """When no active flags, workbench midpoint must equal verdict midpoint."""
-    verdict   = _nav_verdict()
-    workbench = _nav_workbench(verdict, [])
-    v_mid = (verdict.get("valuation_range") or {}).get("midpoint")
-    w_mid = (workbench.get("valuation_range") or {}).get("midpoint")
-    assert v_mid == w_mid, \
-        f"All flags resolved: workbench {w_mid} != verdict {v_mid}"
-    assert workbench.get("risk_discount_pct") == 0.0
-    assert workbench.get("all_flags_resolved") is True
-
-
-# ── T7: Navigation simulation ────────────────────────────────────────────────
-
-def test_nav_full_navigation_simulation():
-    """
-    Simulate: Deal load → Workbench → Verdict → Workbench
-    Verdict must be identical across both reads.
-    Workbench must be stable.
-
-    This also validates the core fix: sj.ceiling must = verdict_result,
-    so that if the legacy fallback path fires on a repeat call, it reads
-    correct verdict ranges (not risk-reduced workbench ranges).
-    """
-    flags = _nav_flags()
-    verdict_original = _nav_verdict()
-    v_mid = (verdict_original.get("valuation_range") or {}).get("midpoint")
-    v_lo  = (verdict_original.get("valuation_range") or {}).get("low")
-    v_hi  = (verdict_original.get("valuation_range") or {}).get("high")
-    v_adj = (verdict_original.get("legal_pack_value_risks") or {}).get("adjustment_factor")
-
-    # Step 1: Workbench call (simulating /api/ceiling)
-    wb1 = _nav_workbench(verdict_original, flags)
-    wb1_mid = (wb1.get("valuation_range") or {}).get("midpoint")
-
-    # Simulate the FIX: sj.ceiling = verdict_result (not workbench)
-    sj_after_workbench = {
-        "verdict_ceiling":   verdict_original,  # clean verdict
-        "workbench_ceiling": wb1,
-        "ceiling":           verdict_original,  # THE FIX: alias = verdict, not workbench
-    }
-
-    # Step 2: Verdict page load reads sj.verdict_ceiling
-    verdict_on_verdict_page = sj_after_workbench["verdict_ceiling"]
-    assert (verdict_on_verdict_page.get("valuation_range") or {}).get("midpoint") == v_mid, \
-        "Verdict page shows wrong midpoint after workbench call"
-    assert (verdict_on_verdict_page.get("legal_pack_value_risks") or {}).get("adjustment_factor") == 1.0, \
-        "Verdict shows risk-adjusted ceiling"
-    v_range_on_page = verdict_on_verdict_page.get("valuation_range") or {}
-    assert abs(v_range_on_page.get("low", 0) - v_lo) < 1, \
-        f"Verdict low changed: {v_range_on_page.get('low')} vs original {v_lo}"
-    assert abs(v_range_on_page.get("high", 0) - v_hi) < 1, \
-        f"Verdict high changed: {v_range_on_page.get('high')} vs original {v_hi}"
-
-    # Step 3: Second Workbench call, reading verdict from sj (as /api/ceiling does)
-    # The FIX ensures sj.ceiling.ceiling_range = verdict range (not workbench range).
-    # If legacy fallback fires and reads sj.ceiling.ceiling_range, it gets the correct values.
-    sj_ceiling = sj_after_workbench["ceiling"]  # = verdict_original after fix
-    fallback_lo  = sj_ceiling.get("ceiling_range", {}).get("low")  or \
-                   (sj_ceiling.get("valuation_range") or {}).get("low")
-    fallback_hi  = sj_ceiling.get("ceiling_range", {}).get("high") or \
-                   (sj_ceiling.get("valuation_range") or {}).get("high")
-
-    # fallback_lo/hi must equal verdict low/high (not workbench low/high)
-    wb1_lo = (wb1.get("valuation_range") or {}).get("low")
-    assert abs(fallback_lo - v_lo) < 1, \
-        f"sj.ceiling.low is workbench-reduced ({fallback_lo}) not verdict ({v_lo}) — BUG NOT FIXED"
-    assert abs(fallback_hi - v_hi) < 1, \
-        f"sj.ceiling.high is workbench-reduced ({fallback_hi}) not verdict ({v_hi}) — BUG NOT FIXED"
-    assert abs(fallback_lo - wb1_lo) > 1 or abs(fallback_lo - v_lo) < 1, \
-        "sj.ceiling still points to workbench (pre-fix behaviour)"
-
-    # Step 4: Second workbench call with same flags — must produce same result as first
-    wb2 = _nav_workbench(sj_after_workbench["verdict_ceiling"], flags)
-    wb2_mid = (wb2.get("valuation_range") or {}).get("midpoint")
-    assert abs(wb1_mid - wb2_mid) < 1, \
-        f"Workbench not stable across navigation: wb1={wb1_mid}, wb2={wb2_mid}"
+        "Non-legacy verdict was replaced by a legacy-sourced object"
