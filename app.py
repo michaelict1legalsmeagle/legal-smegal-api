@@ -7878,7 +7878,14 @@ def ceiling_endpoint():
                     _sj2 = {}
                 _sj2["verdict_ceiling"] = verdict_result
                 _sj2["workbench_ceiling"] = result
-                _sj2["ceiling"] = result
+                # summary_json.ceiling is the legacy alias/fallback.
+                # It MUST point to verdict_result (comparable base), NOT the
+                # risk-reduced workbench. If it points to workbench, the
+                # /api/ceiling legacy fallback reads workbench.ceiling_range
+                # (risk-reduced low/hi) and builds a corrupt verdict_ceiling
+                # with correct midpoint but wrong low/high. That corrupt object
+                # is stored as verdict_ceiling and used directly on the next call.
+                _sj2["ceiling"] = verdict_result
                 if _fs is not None:
                     _sj2["financial_current_standing"] = _fs
 
