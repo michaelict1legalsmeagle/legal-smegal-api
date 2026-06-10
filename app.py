@@ -1815,28 +1815,26 @@ def map_property_type_label(v: Any) -> str:
 #   in _assess_comp to produce type_mismatch, excluding all comps and forcing an
 #   incorrect insufficient_evidence result on every BTL / HMO deal.
 #
-# Priority chain (first non-None result wins):
-#   1. Direct physical-form lookup of prop_type_raw through _PHYSICAL_MAP.
-#      Handles deals where summary_json.property.type is already a physical label
-#      (e.g. "Flat", "Terraced", "F", "T") — returns the canonical LR code.
-#      Returns None for investment-category labels (BTL, HMO, etc.).
+# Allowed physical type sources (first non-None wins):
+#   1. Direct physical-form lookup — prop_type_raw is already a physical label
+#      ("Flat", "Terraced", "F", "T", "D", "S", etc.) or a recognisable variant.
+#      Returns None for investment-category labels (BTL, HMO, Commercial, etc.).
 #
-#   2. Stored audit filter from area_json.housing.metrics.audit.filters_applied.
-#      The area-fetch pipeline records "property_type=X:N_comps" when it
-#      successfully filtered comps by physical type.  Parsing this entry gives the
-#      LR code that was resolved at area-fetch time — the authoritative persisted
-#      record of the subject's physical type.
+#   2. Stored area-fetch audit filter — area_json.housing.metrics.audit
+#      .filters_applied contains "property_type=X:N_comps" when the area-fetch
+#      pipeline successfully filtered comps by physical type.  This is the
+#      authoritative persisted record of the subject's physical type.
 #
-#   3. Majority type of area_json.housing.soldComps.
-#      When the audit filter is absent (area fetch ran without a type filter,
-#      typically because prop_type_raw was BTL/HMO/etc.), inspect the soldComps
-#      distribution.  If one LR code accounts for >= 50 % of comps that have a
-#      property_type field, that code is the dominant physical type in the subject
-#      postcode and is a reliable proxy for the subject's own physical form.
-#      Threshold of 50 % prevents noise in genuinely mixed-type postcodes.
+# Explicitly NOT allowed:
+#   - soldComps majority inference  (nearby comp distribution ≠ subject type)
+#   - Guessing from address or title
+#   - Hardcoded values
+#   - Investment-type labels (BTL, HMO, Commercial, Development, Unknown)
 #
-#   4. None — physical type unknown; engine uses TYPE_NEAR_EQUIV for all comps
-#      (partial weight, no exclusion).
+# When no real physical type source exists:
+#   resolved = None, source = unknown, confidence = unknown.
+#   Engine uses TYPE_NEAR_EQUIV (0.75) for all comps — partial weight, no
+#   exclusion.  This is correct: unknown type ≠ type mismatch.
 # ─────────────────────────────────────────────────────────────────────────────
 def _resolve_subject_property_type(
     prop_type_raw: Any,
@@ -1898,22 +1896,10 @@ def _resolve_subject_property_type(
                 if _code in _LR_VALID:
                     return _code
 
-    # ── Priority 3: majority type of soldComps (>= 50 % threshold) ───────
-    _comps = _housing.get("soldComps") or _housing.get("value") or []
-    if _comps:
-        _type_counts: dict = {}
-        _typed_total = 0
-        for _c in _comps:
-            _ct = str((_c.get("property_type") or "")).strip().upper()
-            if _ct in _LR_VALID:
-                _type_counts[_ct] = _type_counts.get(_ct, 0) + 1
-                _typed_total += 1
-        if _typed_total > 0:
-            _dominant = max(_type_counts, key=_type_counts.__getitem__)
-            if _type_counts[_dominant] / _typed_total >= 0.50:
-                return _dominant
-
-    # ── Priority 4: unknown ───────────────────────────────────────────────
+    # ── Priority 3: unknown ─────────────────────────────────────────────────
+    # soldComps majority is NOT used: the distribution of nearby sold comps
+    # reflects the neighbourhood, not the subject's own physical form.
+    # source=unknown / confidence=unknown → engine applies TYPE_NEAR_EQUIV.
     return None
 
 

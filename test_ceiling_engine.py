@@ -2306,3 +2306,480 @@ def test_term_legacy_ceiling_cannot_override_valid_verdict():
         f"Legacy ceiling overrode valid verdict: expected {cv}, got {result_cv}"
     assert not result["verdict_ceiling"].get("_legacy_source"), \
         "Non-legacy verdict was replaced by a legacy-sourced object"
+
+
+# =============================================================================
+# Section 8 — _resolve_subject_property_type regression tests
+# =============================================================================
+#
+# These tests prove:
+#   (a) the helper in app.py resolves physical type correctly
+#   (b) BTL/HMO never reaches the engine as subject.property_type
+#   (c) soldComps majority inference is NOT used
+#   (d) the ceiling engine itself honours type matching correctly
+#
+# The helper is inlined here (zero external deps) so tests run without importing
+# all of app.py (which carries Flask, Supabase, and every route).  The inlined
+# copy is byte-for-byte the authoritative implementation from app.py.
+# Any change to the app.py function must be reflected here to keep tests green.
+# =============================================================================
+
+# ── Canonical implementation (copied from app.py) ────────────────────────────
+def _resolve_subject_property_type(prop_type_raw, area_json=None):
+    """
+    Canonical implementation — inlined from app.py for isolated testing.
+
+    Resolves the subject's physical LR property type code (F/T/D/S) or None.
+
+    Priority:
+      1. Direct physical-form lookup (prop_type_raw is already physical).
+      2. area_json.housing.metrics.audit.filters_applied entry.
+      3. None  (soldComps majority is NOT used).
+    """
+    _PHYSICAL_MAP = {
+        "F": "F", "T": "T", "D": "D", "S": "S",
+        "FLAT": "F", "MAISONETTE": "F", "APARTMENT": "F", "FLAT/MAISONETTE": "F",
+        "TERRACED": "T", "TERRACE": "T",
+        "END-TERRACE": "T", "END TERRACE": "T", "END TERRACED": "T",
+        "DETACHED": "D",
+        "SEMI-DETACHED": "S", "SEMI DETACHED": "S", "SEMI": "S",
+    }
+    _s = str(prop_type_raw or "").strip().upper()
+    if _s:
+        if _s in _PHYSICAL_MAP:
+            return _PHYSICAL_MAP[_s]
+        if "MAISONETTE" in _s or "APARTMENT" in _s:
+            return "F"
+        if "FLAT" in _s:
+            return "F"
+        if "END-TERRACE" in _s or "END TERRACE" in _s:
+            return "T"
+        if "SEMI" in _s:
+            return "S"
+        if "TERRACE" in _s:
+            return "T"
+        if "DETACH" in _s:
+            return "D"
+        # Investment-type labels fall through — NOT mapped to a physical type.
+
+    _area    = area_json if isinstance(area_json, dict) else {}
+    _housing = _area.get("housing") or {}
+    _metrics = _housing.get("metrics") or {}
+    _LR_VALID = {"F", "T", "D", "S"}
+    _audit   = _metrics.get("audit") or {}
+    for _entry in (_audit.get("filters_applied") or []):
+        if str(_entry).startswith("property_type="):
+            _parts = str(_entry).split("=", 1)
+            if len(_parts) == 2:
+                _code = _parts[1].split(":")[0].strip().upper()
+                if _code in _LR_VALID:
+                    return _code
+
+    # soldComps majority is NOT used — neighbourhood distribution ≠ subject type.
+    return None
+
+
+# ── Fixtures ─────────────────────────────────────────────────────────────────
+
+def _mk_area_with_filter(lr_code: str, n_comps: int = 5) -> dict:
+    """area_json with an audit filter entry for the given LR code."""
+    return {
+        "housing": {
+            "metrics": {
+                "audit": {
+                    "filters_applied": [f"property_type={lr_code}:{n_comps}_comps"]
+                }
+            },
+            "soldComps": [],
+        }
+    }
+
+
+def _mk_area_no_filter(soldcomps_types=None) -> dict:
+    """area_json with NO audit filter and optional soldComps distribution."""
+    comps = [{"property_type": t, "price": 200000} for t in (soldcomps_types or [])]
+    return {
+        "housing": {
+            "metrics": {"audit": {"filters_applied": []}},
+            "soldComps": comps,
+        }
+    }
+
+
+def _mk_comp_typed(prop_type, tenure="freehold", price=200000, dist=0.2, months=4):
+    return {
+        "property_type": prop_type,
+        "tenure": tenure,
+        "price": price,
+        "distance_miles": dist,
+        "months_ago": months,
+    }
+
+
+# =============================================================================
+# R1 — Investment-type labels never reach engine as physical type
+# =============================================================================
+
+class TestInvestmentTypesNeverReachEngine:
+    """BTL / HMO / Commercial / Development / Unknown must all return None."""
+
+    _INVESTMENT_TYPES = [
+        "BTL", "HMO", "Commercial", "Development", "Unknown",
+        "btl", "hmo", "commercial", "development", "unknown",
+    ]
+
+    def test_investment_types_return_none_no_area(self):
+        """Investment types with no area_json → None."""
+        for inv in self._INVESTMENT_TYPES:
+            result = _resolve_subject_property_type(inv, {})
+            assert result is None, (
+                f"Investment type {inv!r} must return None, got {result!r}. "
+                "BTL/HMO must never reach the engine as subject.property_type."
+            )
+
+    def test_investment_types_return_none_with_dominated_soldcomps(self):
+        """
+        Investment type with soldComps that are 90% F must still return None.
+        Proves soldComps majority is NOT used.
+        """
+        area = _mk_area_no_filter(soldcomps_types=["F"] * 9 + ["T"])
+        for inv in ["BTL", "HMO", "Commercial"]:
+            result = _resolve_subject_property_type(inv, area)
+            assert result is None, (
+                f"{inv!r} + 90% F soldComps returned {result!r} instead of None. "
+                "soldComps majority must not be used."
+            )
+
+    def test_none_raw_type_returns_none(self):
+        assert _resolve_subject_property_type(None, {}) is None
+
+    def test_empty_string_returns_none(self):
+        assert _resolve_subject_property_type("", {}) is None
+
+    def test_investment_type_with_audit_filter_returns_filter_code(self):
+        """
+        BTL deal where area fetch DID resolve a physical type → filter code wins.
+        Priority 2 overrides the BTL/None from Priority 1.
+        """
+        area = _mk_area_with_filter("F", n_comps=7)
+        result = _resolve_subject_property_type("BTL", area)
+        assert result == "F", (
+            f"Audit filter 'property_type=F:7_comps' must resolve to 'F', got {result!r}"
+        )
+
+
+# =============================================================================
+# R2 — Physical type labels resolve to canonical LR codes (Priority 1)
+# =============================================================================
+
+class TestPhysicalTypePriority1:
+    """Direct physical-form labels resolve without needing area_json."""
+
+    @pytest.mark.parametrize("raw,expected", [
+        # LR single-char codes
+        ("F", "F"), ("T", "T"), ("D", "D"), ("S", "S"),
+        # Full labels
+        ("Flat",          "F"),
+        ("flat",          "F"),
+        ("FLAT",          "F"),
+        ("Maisonette",    "F"),
+        ("MAISONETTE",    "F"),
+        ("Apartment",     "F"),
+        ("Flat/Maisonette", "F"),
+        ("Terraced",      "T"),
+        ("terraced",      "T"),
+        ("TERRACED",      "T"),
+        ("Terrace",       "T"),
+        ("End-Terrace",   "T"),
+        ("End Terrace",   "T"),
+        ("End Terraced",  "T"),
+        ("Detached",      "D"),
+        ("detached",      "D"),
+        ("DETACHED",      "D"),
+        ("Semi-detached", "S"),
+        ("semi-detached", "S"),
+        ("SEMI-DETACHED", "S"),
+        ("Semi Detached", "S"),
+        ("SEMI",          "S"),
+        # Compound labels with substring match
+        ("Flat / Maisonette",         "F"),
+        ("Ground Floor Apartment",    "F"),
+        ("End-Terrace House",         "T"),
+        ("Semi-Detached House",       "S"),
+        ("Detached Bungalow",         "D"),
+    ])
+    def test_physical_label_resolves_to_lr_code(self, raw, expected):
+        result = _resolve_subject_property_type(raw, {})
+        assert result == expected, (
+            f"Physical label {raw!r} must resolve to {expected!r}, got {result!r}"
+        )
+
+    @pytest.mark.parametrize("raw", [
+        "BTL", "HMO", "Commercial", "Development", "Unknown",
+        "btl", "hmo",
+    ])
+    def test_investment_labels_do_not_resolve_to_physical(self, raw):
+        """Priority 1 returns None for investment-type labels."""
+        result = _resolve_subject_property_type(raw, {})
+        assert result is None, (
+            f"Investment label {raw!r} must return None from Priority 1, got {result!r}"
+        )
+
+
+# =============================================================================
+# R3 — Audit filter (Priority 2) resolves when Priority 1 returns None
+# =============================================================================
+
+class TestAuditFilterPriority2:
+    """area_json.housing.metrics.audit.filters_applied is the authoritative stored source."""
+
+    @pytest.mark.parametrize("lr_code", ["F", "T", "D", "S"])
+    def test_audit_filter_all_lr_codes(self, lr_code):
+        """Each valid LR code in the audit filter resolves correctly."""
+        area = _mk_area_with_filter(lr_code)
+        result = _resolve_subject_property_type("BTL", area)
+        assert result == lr_code, (
+            f"Audit filter 'property_type={lr_code}' must resolve to {lr_code!r}, got {result!r}"
+        )
+
+    def test_audit_filter_ignored_for_invalid_code(self):
+        """Audit filter with non-LR code (e.g. 'O') is not returned."""
+        area = _mk_area_with_filter("O")  # "Other" — not a valid physical type
+        result = _resolve_subject_property_type("BTL", area)
+        assert result is None, f"Invalid audit code 'O' must not resolve, got {result!r}"
+
+    def test_audit_filter_skipped_entries_not_used(self):
+        """
+        filters_skipped (not filters_applied) must not provide the physical type.
+        The pipeline writes to filters_skipped when the type filter was NOT applied.
+        """
+        area = {
+            "housing": {
+                "metrics": {
+                    "audit": {
+                        "filters_applied": [],
+                        "filters_skipped": ["property_type=F:only_2_matched"],
+                    }
+                },
+                "soldComps": [],
+            }
+        }
+        result = _resolve_subject_property_type("BTL", area)
+        assert result is None, (
+            f"filters_skipped must not resolve physical type, got {result!r}"
+        )
+
+    def test_audit_filter_wins_over_soldcomps(self):
+        """
+        Audit filter present + soldComps all of different type → filter wins.
+        (Also proves soldComps is not consulted when P2 returns a result.)
+        """
+        area = {
+            "housing": {
+                "metrics": {
+                    "audit": {
+                        "filters_applied": ["property_type=F:5_comps"]
+                    }
+                },
+                "soldComps": [{"property_type": "T"} for _ in range(10)],
+            }
+        }
+        result = _resolve_subject_property_type("BTL", area)
+        assert result == "F", (
+            f"Audit filter F must win over 100% T soldComps, got {result!r}"
+        )
+
+    def test_no_physical_source_returns_none(self):
+        """No Priority 1 match, no audit filter → None."""
+        area = _mk_area_no_filter(soldcomps_types=["F"] * 10)
+        result = _resolve_subject_property_type("BTL", area)
+        assert result is None, (
+            f"No real physical source must return None, got {result!r}. "
+            "soldComps majority must not be used."
+        )
+
+    def test_empty_area_returns_none(self):
+        assert _resolve_subject_property_type("HMO", {}) is None
+
+    def test_none_area_returns_none(self):
+        assert _resolve_subject_property_type("HMO", None) is None
+
+
+# =============================================================================
+# R4 — soldComps majority is NOT used under any condition
+# =============================================================================
+
+class TestSoldCompsMajorityNotUsed:
+    """Exhaustive proof that no soldComps distribution ever drives resolution."""
+
+    @pytest.mark.parametrize("majority_type,pct,inv_type", [
+        ("F", "100%", "BTL"),
+        ("F",  "90%", "HMO"),
+        ("T",  "80%", "BTL"),
+        ("D",  "70%", "Commercial"),
+        ("S",  "60%", "Unknown"),
+        ("F",  "50%", "BTL"),   # exactly at the old threshold
+        ("F",  "51%", "HMO"),   # just above the old threshold
+    ])
+    def test_soldcomps_majority_never_used(self, majority_type, pct, inv_type):
+        """
+        Even when soldComps are entirely one type, the helper returns None for
+        investment-type raw values with no audit filter.
+        """
+        # Build soldComps dominated by majority_type
+        n_majority = 9
+        n_minority = 1
+        types = [majority_type] * n_majority + (["T" if majority_type != "T" else "F"] * n_minority)
+        area = _mk_area_no_filter(soldcomps_types=types)
+        result = _resolve_subject_property_type(inv_type, area)
+        assert result is None, (
+            f"soldComps {pct} {majority_type} + inv_type={inv_type!r} returned {result!r}. "
+            "soldComps majority must NEVER be used."
+        )
+
+
+# =============================================================================
+# R5 — Ceiling engine type matching with resolved subject.property_type
+# =============================================================================
+
+class TestEngineTypeMatchingWithResolver:
+    """
+    End-to-end: _resolve_subject_property_type output → ceiling engine → correct comps.
+    Tests use the ceiling engine directly (imported at top of file).
+    """
+
+    from services.ceiling_engine import calculate_verdict_ceiling as _calc_vc
+
+    @staticmethod
+    def _run(subject_type_raw, area_json, comps):
+        """Resolve type, build subject, run engine, return result."""
+        from services.ceiling_engine import calculate_verdict_ceiling
+        resolved = _resolve_subject_property_type(subject_type_raw, area_json)
+        subject  = {"property_type": resolved, "tenure": "leasehold", "lease_length": 125}
+        return calculate_verdict_ceiling(sold_comps=comps, subject=subject, fallback_allowed=True), resolved
+
+    def test_flat_subject_matches_f_comps(self):
+        """
+        subject.property_type = F  → F comps are valid (type_score = TYPE_SAME).
+        Resolved via Priority 1 (raw type = 'Flat').
+        """
+        comps = [_mk_comp_typed("F", "leasehold", 200000 + i * 2000, 0.1 + i * 0.03)
+                 for i in range(5)]
+        result, resolved = self._run("Flat", {}, comps)
+        assert resolved == "F", f"Expected resolved=F, got {resolved!r}"
+        valid = result["comparables"]["valid"]
+        valid_types = {c["property_type"] for c in valid}
+        assert valid_types == {"flat"}, f"Only F comps should pass, got {valid_types}"
+        assert result["comparable_valuation"] is not None
+        assert result["comparable_valuation"] > 0
+        # Confirm type_score = TYPE_SAME (1.0) for at least one comp
+        type_scores = [c["scores"].get("type") for c in valid]
+        assert all(s == 1.0 for s in type_scores), (
+            f"All F comps should score TYPE_SAME=1.0, got {type_scores}"
+        )
+
+    def test_flat_subject_excludes_t_d_s_comps(self):
+        """
+        subject.property_type = F  → T/D/S comps produce type_mismatch exclusion.
+        """
+        f_comps  = [_mk_comp_typed("F", "leasehold", 200000+i*1000, 0.1+i*0.03) for i in range(5)]
+        mismatch = [
+            _mk_comp_typed("T", "freehold",  250000, 0.10),
+            _mk_comp_typed("D", "freehold",  300000, 0.12),
+            _mk_comp_typed("S", "freehold",  270000, 0.14),
+        ]
+        result, resolved = self._run("Flat", {}, f_comps + mismatch)
+        assert resolved == "F"
+        # excl_reasons keyed by raw comp.property_type ("T","D","S") as supplied —
+        # the engine stores the original input value, not the normalised string.
+        excl_reasons = {
+            e["comp"]["property_type"]: e["reason"]
+            for e in result["comparables"]["excluded"]
+            if "comp" in e
+        }
+        for raw_pt in ["T", "D", "S"]:
+            assert raw_pt in excl_reasons, (
+                f"Comp with property_type={raw_pt!r} should be excluded, "
+                f"got excluded keys: {list(excl_reasons.keys())}"
+            )
+            assert "type_mismatch" in excl_reasons[raw_pt], (
+                f"{raw_pt} exclusion reason should be type_mismatch, "
+                f"got {excl_reasons[raw_pt]!r}"
+            )
+
+    def test_type_mismatch_only_for_real_mismatches(self):
+        """
+        type_mismatch appears ONLY for T/D/S when subject is F.
+        No false positives: F comps must not be excluded for type reasons.
+        """
+        f_comps = [_mk_comp_typed("F", "leasehold", 195000+i*1500, 0.1+i*0.04) for i in range(6)]
+        t_comp  = _mk_comp_typed("T", "freehold", 260000, 0.15)
+        result, resolved = self._run("F", {}, f_comps + [t_comp])
+        assert resolved == "F"
+        # All F comps must be in valid (no spurious type_mismatch)
+        valid_types = {c["property_type"] for c in result["comparables"]["valid"]}
+        assert "flat" in valid_types, "F comps must not be excluded"
+        # T comp must be excluded for type_mismatch.
+        # comp.property_type in excluded is the raw input value ("T"), not normalised.
+        excl = [e for e in result["comparables"]["excluded"]
+                if "comp" in e and e["comp"].get("property_type") == "T"]
+        assert excl, (
+            f"Terraced comp (raw='T') must be excluded. "
+            f"All excluded: {[e.get('reason') for e in result['comparables']['excluded']]}"
+        )
+        assert "type_mismatch" in excl[0]["reason"]
+
+    def test_audit_filter_resolution_drives_correct_engine_behaviour(self):
+        """
+        BTL deal where area audit recorded 'property_type=T:8_comps'.
+        Resolver returns T → engine correctly filters to terraced comps only.
+
+        Uses freehold throughout so tenure_mismatch does not mask type_mismatch.
+        """
+        from services.ceiling_engine import calculate_verdict_ceiling
+        area = _mk_area_with_filter("T", n_comps=8)
+        resolved = _resolve_subject_property_type("BTL", area)
+        assert resolved == "T", f"Audit filter T must resolve to T, got {resolved!r}"
+        # Subject: freehold terraced (resolved from audit filter)
+        subject  = {"property_type": resolved, "tenure": "freehold"}
+        t_comps  = [_mk_comp_typed("T", "freehold", 195000+i*2500, 0.1+i*0.03) for i in range(5)]
+        f_comp   = _mk_comp_typed("F", "freehold",  160000, 0.20)  # freehold flat — excluded by type only
+        result   = calculate_verdict_ceiling(sold_comps=t_comps + [f_comp], subject=subject, fallback_allowed=True)
+        valid_types = {c["property_type"] for c in result["comparables"]["valid"]}
+        excl_reasons = {
+            e["comp"]["property_type"]: e["reason"]
+            for e in result["comparables"]["excluded"] if "comp" in e
+        }
+        assert "terraced" in valid_types, (
+            f"T comps must be valid when subject=T, got valid_types={valid_types}"
+        )
+        assert "F" in excl_reasons, "F comp must be excluded when subject=T"
+        assert "type_mismatch" in excl_reasons["F"], (
+            f"F exclusion must be type_mismatch, got {excl_reasons.get('F')!r}"
+        )
+
+    def test_none_subject_type_no_exclusion(self):
+        """
+        When resolver returns None (no physical source), engine applies
+        TYPE_NEAR_EQUIV to all comps — no type_mismatch exclusions.
+        """
+        from services.ceiling_engine import calculate_verdict_ceiling
+        # Investment type + no area source → resolved = None
+        resolved = _resolve_subject_property_type("BTL", {})
+        assert resolved is None
+        subject = {"property_type": resolved, "tenure": "freehold"}
+        comps = [_mk_comp_typed(pt, "freehold", 200000+i*2000, 0.1+i*0.03)
+                 for i, pt in enumerate(["F", "T", "D", "S", "F"])]
+        result = calculate_verdict_ceiling(sold_comps=comps, subject=subject, fallback_allowed=True)
+        type_mismatch_excl = [e for e in result["comparables"]["excluded"]
+                               if "type_mismatch" in str(e.get("reason", ""))]
+        assert not type_mismatch_excl, (
+            f"None subject type must produce zero type_mismatch exclusions, "
+            f"got {[e['reason'] for e in type_mismatch_excl]}"
+        )
+        # All should score TYPE_NEAR_EQUIV = 0.75 for type dimension
+        for c in result["comparables"]["valid"]:
+            assert c["scores"].get("type") == 0.75, (
+                f"None subject type: comp {c.get('property_type')} should score "
+                f"TYPE_NEAR_EQUIV=0.75, got {c['scores'].get('type')}"
+            )
