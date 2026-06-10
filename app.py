@@ -1802,6 +1802,121 @@ def map_property_type_label(v: Any) -> str:
     return "Other"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _resolve_subject_property_type
+# ─────────────────────────────────────────────────────────────────────────────
+# Returns the physical-form Land Registry code (F | T | D | S) for the subject
+# property, or None when the physical form cannot be determined.
+#
+# Why this exists:
+#   summary_json.property.type is an investment-category label (BTL | HMO |
+#   Commercial | Development | Unknown), not a physical dwelling form.  Passing
+#   that label to the ceiling engine's subject dict caused every type-comparison
+#   in _assess_comp to produce type_mismatch, excluding all comps and forcing an
+#   incorrect insufficient_evidence result on every BTL / HMO deal.
+#
+# Priority chain (first non-None result wins):
+#   1. Direct physical-form lookup of prop_type_raw through _PHYSICAL_MAP.
+#      Handles deals where summary_json.property.type is already a physical label
+#      (e.g. "Flat", "Terraced", "F", "T") — returns the canonical LR code.
+#      Returns None for investment-category labels (BTL, HMO, etc.).
+#
+#   2. Stored audit filter from area_json.housing.metrics.audit.filters_applied.
+#      The area-fetch pipeline records "property_type=X:N_comps" when it
+#      successfully filtered comps by physical type.  Parsing this entry gives the
+#      LR code that was resolved at area-fetch time — the authoritative persisted
+#      record of the subject's physical type.
+#
+#   3. Majority type of area_json.housing.soldComps.
+#      When the audit filter is absent (area fetch ran without a type filter,
+#      typically because prop_type_raw was BTL/HMO/etc.), inspect the soldComps
+#      distribution.  If one LR code accounts for >= 50 % of comps that have a
+#      property_type field, that code is the dominant physical type in the subject
+#      postcode and is a reliable proxy for the subject's own physical form.
+#      Threshold of 50 % prevents noise in genuinely mixed-type postcodes.
+#
+#   4. None — physical type unknown; engine uses TYPE_NEAR_EQUIV for all comps
+#      (partial weight, no exclusion).
+# ─────────────────────────────────────────────────────────────────────────────
+def _resolve_subject_property_type(
+    prop_type_raw: Any,
+    area_json: Optional[Dict] = None,
+) -> Optional[str]:
+    """
+    Resolve subject physical property type to LR code (F/T/D/S) or None.
+    See module-level docstring above for priority chain.
+    """
+    # ── Priority 1: direct map from raw value ─────────────────────────────
+    _PHYSICAL_MAP: dict = {
+        # LR single-char codes (canonical)
+        "F": "F", "T": "T", "D": "D", "S": "S",
+        # Full physical-form labels  →  LR code
+        "FLAT": "F", "MAISONETTE": "F", "APARTMENT": "F",
+        "FLAT/MAISONETTE": "F",
+        "TERRACED": "T", "TERRACE": "T",
+        "END-TERRACE": "T", "END TERRACE": "T", "END TERRACED": "T",
+        "DETACHED": "D",
+        "SEMI-DETACHED": "S", "SEMI DETACHED": "S", "SEMI": "S",
+    }
+    _s = str(prop_type_raw or "").strip().upper()
+    if _s:
+        # Exact map lookup
+        if _s in _PHYSICAL_MAP:
+            return _PHYSICAL_MAP[_s]
+        # Substring fallback for compound labels (e.g. "Flat / Maisonette")
+        if "MAISONETTE" in _s or "APARTMENT" in _s:
+            return "F"
+        if "FLAT" in _s:
+            return "F"
+        if "END-TERRACE" in _s or "END TERRACE" in _s:
+            return "T"
+        if "SEMI" in _s:
+            return "S"
+        if "TERRACE" in _s:
+            return "T"
+        if "DETACH" in _s:
+            return "D"
+        # Investment-type labels (BTL, HMO, Commercial, Development, Unknown, …)
+        # fall through to None — do NOT return them as property_type.
+
+    # Priority 1 returned None.  Attempt sourcing from area_json.
+    _area = area_json if isinstance(area_json, dict) else {}
+    _housing = _area.get("housing") or {}
+    _metrics = _housing.get("metrics") or {}
+
+    # ── Priority 2: stored audit filter from area-fetch pipeline ─────────
+    # The area fetch records "property_type=X:N_comps" in filters_applied when
+    # it successfully applied a physical type filter to the RPC result.
+    _LR_VALID = {"F", "T", "D", "S"}
+    _audit = _metrics.get("audit") or {}
+    for _entry in (_audit.get("filters_applied") or []):
+        # Format: "property_type=F:5_comps"
+        if str(_entry).startswith("property_type="):
+            _parts = str(_entry).split("=", 1)
+            if len(_parts) == 2:
+                _code = _parts[1].split(":")[0].strip().upper()
+                if _code in _LR_VALID:
+                    return _code
+
+    # ── Priority 3: majority type of soldComps (>= 50 % threshold) ───────
+    _comps = _housing.get("soldComps") or _housing.get("value") or []
+    if _comps:
+        _type_counts: dict = {}
+        _typed_total = 0
+        for _c in _comps:
+            _ct = str((_c.get("property_type") or "")).strip().upper()
+            if _ct in _LR_VALID:
+                _type_counts[_ct] = _type_counts.get(_ct, 0) + 1
+                _typed_total += 1
+        if _typed_total > 0:
+            _dominant = max(_type_counts, key=_type_counts.__getitem__)
+            if _type_counts[_dominant] / _typed_total >= 0.50:
+                return _dominant
+
+    # ── Priority 4: unknown ───────────────────────────────────────────────
+    return None
+
+
 def build_housing_charts_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     price_bins = [
         ("<£100k", 0, 100_000),
@@ -6036,18 +6151,26 @@ def get_deal(deal_id: str):
                     or (isinstance(_vc, dict) and _vc.get("_legacy_source"))
                 )
                 if _needs_backfill:
+                    _backfill_prop = (_sj.get("property") or {})
+                    _backfill_area = deal.get("area_json") or {}
                     _sj = _ensure_ceiling_objects(
                         summary_json=dict(_sj),
-                        area_json=deal.get("area_json"),
+                        area_json=_backfill_area,
                         financials_json=deal.get("financials_json"),
                         legal_flags=(_sj.get("flags") or []),
                         current_bid=None,
                         strategy=(deal.get("financials_json") or {}).get("inputs", {}).get("strategy", "BTL"),
                         subject={
-                            "property_type": deal.get("deal_type"),
-                            "tenure":        (_sj.get("property") or {}).get("tenure"),
-                            "lease_length":  (_sj.get("property") or {}).get("lease_length"),
-                            "internal_area": (_sj.get("property") or {}).get("internal_area"),
+                            # Resolve physical-form LR code (F/T/D/S) from property type and
+                            # area_json.  summary_json.property.type is investment-category
+                            # (BTL/HMO/…); _resolve_subject_property_type falls through to the
+                            # area_json audit filter and soldComps majority when that returns None.
+                            "property_type": _resolve_subject_property_type(
+                                _backfill_prop.get("type"), _backfill_area
+                            ),
+                            "tenure":        _backfill_prop.get("tenure"),
+                            "lease_length":  _backfill_prop.get("lease_length"),
+                            "internal_area": _backfill_prop.get("internal_area"),
                         },
                     )
                     deal = dict(deal)
@@ -6632,7 +6755,12 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                     # Build subject dict for relational comparable engine
                     _prop = result.get("property") or {}
                     _subject = {
-                        "property_type": _prop.get("type") or _deal_data.get("deal_type"),
+                        # Resolve physical-form LR code (F/T/D/S).
+                        # _prop.get("type") is investment-category (BTL/HMO/…); the helper
+                        # falls through to the area_json audit filter then soldComps majority.
+                        "property_type": _resolve_subject_property_type(
+                            _prop.get("type"), _area
+                        ),
                         "tenure":        _prop.get("tenure") or _fins_inputs.get("tenure"),
                         "lease_length":  _prop.get("lease_length") or _fins_inputs.get("lease_length"),
                         "internal_area": _prop.get("internal_area") or _fins_inputs.get("internal_area"),
@@ -7594,7 +7722,12 @@ def ceiling_endpoint():
                     _sj = d.get("summary_json") or {}
                     _wb_prop = (_sj.get("property") or {})
                     _wb_subject = {
-                        "property_type": _wb_prop.get("type") or d.get("deal_type"),
+                        # Resolve physical-form LR code (F/T/D/S).
+                        # _wb_prop.get("type") is investment-category (BTL/HMO/…); the helper
+                        # falls through to area audit filter then soldComps majority type.
+                        "property_type": _resolve_subject_property_type(
+                            _wb_prop.get("type"), area
+                        ),
                         "tenure":        _wb_prop.get("tenure") or merged.get("tenure"),
                         "lease_length":  _wb_prop.get("lease_length") or merged.get("lease_length"),
                         "internal_area": _wb_prop.get("internal_area") or merged.get("internal_area"),
@@ -8130,7 +8263,13 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
         # Build subject dict for relational comparable engine
         _prop_rc = (_summary.get("property") or {})
         _subject_rc = {
-            "property_type": _prop_rc.get("type") or _d.get("deal_type"),
+            # Resolve physical-form LR code (F/T/D/S).
+            # _prop_rc.get("type") is investment-category (BTL/HMO/…); the helper
+            # falls through to area_data audit filter then soldComps majority type.
+            # area_data is the parameter passed into _recompute_deal_ceiling.
+            "property_type": _resolve_subject_property_type(
+                _prop_rc.get("type"), area_data
+            ),
             "tenure":        _prop_rc.get("tenure") or _fins_inputs.get("tenure"),
             "lease_length":  _prop_rc.get("lease_length") or _fins_inputs.get("lease_length"),
             "internal_area": _prop_rc.get("internal_area") or _fins_inputs.get("internal_area"),
