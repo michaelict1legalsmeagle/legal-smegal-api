@@ -7383,6 +7383,35 @@ def save_financials(deal_id: str):
         except Exception:
             pass
 
+    # ── Cleared purchase price: user explicitly removed their bid price ──
+    # Skip _calculate_financials (requires price). Write a minimal cleared stub
+    # that carries through non-price inputs (LTV, premium, legal, etc.) so the
+    # user doesn't lose those when they clear and re-enter a price later.
+    if data.get("_purchase_price_cleared"):
+        # Build an inputs dict from non-price fields so they persist across the clear
+        _non_price_keys = (
+            "buyers_premium_pct", "ltv_pct", "finance_rate_pct", "management_pct",
+            "maintenance_cost_pa", "insurance_pa", "ground_rent_pa", "service_charge_pa",
+            "legal_fees", "survey_cost", "renovation_cost", "monthly_rent",
+            "hold_years", "void_weeks", "target_yield",
+        )
+        _cleared_inputs = {k: data[k] for k in _non_price_keys if k in data}
+        _cleared_inputs["purchase_price"] = None  # explicit null
+        _cleared_result = {
+            "ok": False,
+            "_purchase_price_cleared": True,
+            "_purchase_price_is_user_entered": False,
+            "inputs": _cleared_inputs,
+        }
+        try:
+            supabase.table("deals").update({
+                "financials_json": _cleared_result,
+                "updated_at":      now_iso(),
+            }).eq("id", deal_id).execute()
+        except Exception as _ce:
+            app.logger.warning(f"Could not persist cleared financials: {_ce}")
+        return jsonify({"ok": True, "cleared": True}), 200
+
     result = _calculate_financials(data)
     if not result.get("ok"):
         return jsonify(result), 400
