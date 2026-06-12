@@ -4645,17 +4645,24 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
         # Subject: LAD code for HPI temporal adjustment
         _lad_code_for_hpi = _get_lad_code_for_postcode(_pc_norm)
-        _hpi_yoy = None  # latest annual_change for this LAD
+        # D-HPI-1: use average_price ratio method (sale_month → latest_month).
+        # annual_change is NULL across the whole table so the old compound
+        # formula never fired. Replace with two average_price lookups.
+        _hpi_yoy = None  # retained for downstream label compatibility only
+        _hpi_latest_avg   = None  # latest LAD average_price
+        _hpi_latest_month = None  # latest LAD month (for audit)
         if _lad_code_for_hpi:
             try:
-                _hpi_rows = supabase_data_query(
-                    "SELECT annual_change FROM public.uk_hpi_monthly WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+                _hpi_latest_rows = supabase_data_query(
+                    "SELECT date, average_price FROM public.uk_hpi_monthly "
+                    "WHERE area_code = %s ORDER BY date DESC LIMIT 1",
                     (_lad_code_for_hpi,)
                 )
-                if _hpi_rows:
-                    _hpi_yoy = safe_float(_hpi_rows[0].get("annual_change"))
+                if _hpi_latest_rows:
+                    _hpi_latest_avg   = safe_float(_hpi_latest_rows[0].get("average_price"))
+                    _hpi_latest_month = str(_hpi_latest_rows[0].get("date") or "")[:10]
             except Exception as _e:
-                _audit["warnings"].append(f"hpi_yoy_lookup_failed: {_e}")
+                _audit["warnings"].append(f"hpi_latest_lookup_failed: {_e}")
 
         # ── STEP 1: PROPERTY TYPE FILTER ────────────────────────────────────
         pt_filter = (property_type or "").strip().upper()
@@ -4785,14 +4792,20 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             else:
                 _audit["warnings"].append(f"IQR rejection skipped: only {len(_iqr_filtered)} comps survive fence lo={_fence_lo:.0f} hi={_fence_hi:.0f}")
 
-        # ── STEP 8: HPI TEMPORAL NORMALISATION ───────────────────────────────
-        # Adjusts historical nominal prices to current-equivalent using LAD-level HPI
-        # Formula: adjusted = nominal × (1 + hpi_yoy/100)^(age_months/12)
-        # Rationale: a comp from 18 months ago at £350k in a +3.5% YoY area
-        #            has current-equivalent value of £350k × 1.035^1.5 ≈ £368k
-        # Directionally valid; residual error from non-linear appreciation not addressed
+        # ── STEP 8: HPI TEMPORAL NORMALISATION (D-HPI-1) ────────────────────
+        # Method: average_price ratio — actual LAD market movement from sale
+        #         month to latest available month.
+        # Formula: hpi_multiplier = avg_price(latest_month) / avg_price(sale_month)
+        #          adjusted = nominal × hpi_multiplier × size_adj × tenure_adj × …
+        # Replaces: compound annual_change formula (annual_change is NULL in DB).
+        # Batch: collect all distinct sale-month strings, one IN() query for the
+        #        LAD. Avoids N per-comp round trips.
         _now = _dt.datetime.utcnow()
-        _hpi_adjusted_count = 0
+        _hpi_adjusted_count  = 0
+        _hpi_missing_count   = 0
+
+        # Step 8a: compute age_months and collect distinct sale months for batch
+        _sale_month_set: set = set()
         for _r in rows:
             _tx_date_str = str(_r.get("date_of_transfer") or "")[:10]
             _age_months = None
@@ -4801,21 +4814,79 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _age_months = (_now - _tx_dt).days / 30.44
             except Exception:
                 pass
-            _r["age_months"] = _age_months
+            _r["age_months"]    = _age_months
             _r["nominal_price"] = _r.get("price")
-            if _hpi_yoy is not None and _age_months is not None and _age_months > 3:
-                _age_years = _age_months / 12.0
-                _hpi_mult = (1.0 + _hpi_yoy / 100.0) ** _age_years
-                _adj = int((_r.get("price") or 0) * _hpi_mult)
-                _r["hpi_adjusted_price"] = _adj
-                _r["hpi_multiplier"] = round(_hpi_mult, 4)
+            # Normalise to first-of-month for HPI lookup
+            _sale_month_str = (_tx_date_str[:7] + "-01") if len(_tx_date_str) >= 7 else None
+            _r["_sale_month_str"] = _sale_month_str
+            if _sale_month_str:
+                _sale_month_set.add(_sale_month_str)
+
+        # Step 8b: batch-fetch sale-month average_price for the LAD
+        _sale_month_avg: dict = {}   # {"YYYY-MM-01": float}
+        if _lad_code_for_hpi and _hpi_latest_avg and _sale_month_set:
+            try:
+                _placeholders = ", ".join(["%s"] * len(_sale_month_set))
+                _sm_rows = supabase_data_query(
+                    f"SELECT date, average_price FROM public.uk_hpi_monthly "
+                    f"WHERE area_code = %s AND date IN ({_placeholders})",
+                    (_lad_code_for_hpi, *sorted(_sale_month_set))
+                )
+                for _smr in (_sm_rows or []):
+                    _smr_date = str(_smr.get("date") or "")[:10]
+                    _smr_avg  = safe_float(_smr.get("average_price"))
+                    if _smr_date and _smr_avg and _smr_avg > 0:
+                        _sale_month_avg[_smr_date] = _smr_avg
+            except Exception as _e:
+                _audit["warnings"].append(f"hpi_sale_month_batch_failed: {_e}")
+
+        # Step 8c: compute per-comp hpi_multiplier via ratio
+        for _r in rows:
+            _sm_str       = _r.get("_sale_month_str")
+            _sm_avg       = _sale_month_avg.get(_sm_str) if _sm_str else None
+            _age_months   = _r.get("age_months")
+            _raw_price    = _r.get("price") or 0
+            _hpi_method   = "none"
+            _hpi_warning  = None
+
+            if (_hpi_latest_avg and _hpi_latest_avg > 0
+                    and _sm_avg and _sm_avg > 0
+                    and _age_months is not None and _age_months > 3):
+                # Ratio method: actual market movement sale_month → latest_month
+                _hpi_mult = round(_hpi_latest_avg / _sm_avg, 6)
+                _adj      = round(_raw_price * _hpi_mult)
+                _hpi_method = "average_price_ratio"
                 _hpi_adjusted_count += 1
             else:
-                _r["hpi_adjusted_price"] = _r.get("price")
-                _r["hpi_multiplier"] = 1.0
+                # Fallback: no adjustment — log why
+                _hpi_mult = 1.0
+                _adj      = _raw_price
+                if not _hpi_latest_avg:
+                    _hpi_warning = "hpi_temporal_adjustment_unavailable: no latest avg_price for LAD"
+                elif not _sm_avg:
+                    _hpi_warning = f"hpi_temporal_adjustment_unavailable: no avg_price for sale_month {_sm_str}"
+                elif _age_months is None:
+                    _hpi_warning = "hpi_temporal_adjustment_unavailable: sale_date missing"
+                else:
+                    _hpi_warning = "hpi_temporal_adjustment_unavailable: comp age <= 3 months"
+                _hpi_missing_count += 1
+
+            _r["hpi_adjusted_price"] = _adj
+            _r["hpi_multiplier"]     = _hpi_mult
+            _r["_hpi_method"]        = _hpi_method
+            _r["_hpi_warning"]       = _hpi_warning
+            _r["_sale_month_avg"]    = _sm_avg
+
         _audit["hpi_adjusted_count"] = _hpi_adjusted_count
-        if _hpi_yoy is None:
-            _audit["warnings"].append("hpi_temporal_adjustment_skipped: no LAD HPI data — nominal prices used")
+        _audit["hpi_missing_count"]  = _hpi_missing_count
+        _audit["hpi_method"]         = "average_price_ratio"
+        _audit["hpi_latest_month"]   = _hpi_latest_month
+        _audit["hpi_latest_avg"]     = _hpi_latest_avg
+        if _hpi_missing_count > 0 and _hpi_adjusted_count == 0:
+            _audit["warnings"].append(
+                f"hpi_temporal_adjustment_skipped: {_hpi_missing_count} comps — "
+                f"no LAD avg_price data available"
+            )
 
         # ── STEP 9: SIMILARITY SCORING ───────────────────────────────────────
         # Weighted score: recency × proximity × type-match × room-match × tenure-match × age-match
@@ -5053,28 +5124,36 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # Every comp exposes full lineage: nominal, HPI-adjusted, normalised, factors, score
         for r in rows:
             r["_lineage"] = {
-                "nominal_price":             r.get("nominal_price") or r.get("price"),
-                "hpi_adjusted_price":         r.get("hpi_adjusted_price"),
-                "hpi_multiplier":             r.get("hpi_multiplier"),
-                "hpi_yoy_applied":            _hpi_yoy,
-                "price_normalised":          r.get("price_normalised"),
-                "normalisation_factor":      r.get("normalisation_factor"),
-                "subject_floor_area_m2":     _subject_area,
-                "comp_floor_area_m2":        r.get("floor_area"),
-                "price_used_for_median":     (
+                "nominal_price":                  r.get("nominal_price") or r.get("price"),
+                "hpi_adjusted_price":              r.get("hpi_adjusted_price"),
+                "hpi_multiplier":                  r.get("hpi_multiplier"),
+                "hpi_yoy_applied":                 _hpi_yoy,     # retained for compat; None post D-HPI-1
+                # D-HPI-1 audit fields
+                "hpi_method":                      r.get("_hpi_method", "none"),
+                "sale_hpi_month":                  r.get("_sale_month_str"),
+                "valuation_hpi_month":             _hpi_latest_month,
+                "sale_month_average_price":        r.get("_sale_month_avg"),
+                "valuation_month_average_price":   _hpi_latest_avg,
+                "hpi_warning":                     r.get("_hpi_warning"),
+                "price_normalised":                r.get("price_normalised"),
+                "normalisation_factor":            r.get("normalisation_factor"),
+                "subject_floor_area_m2":           _subject_area,
+                "comp_floor_area_m2":              r.get("floor_area"),
+                "price_used_for_median":           (
                     "normalised" if (_use_normalised and r.get("normalisation_factor") is not None)
-                    else "hpi_adjusted" if (_hpi_yoy is not None and r.get("age_months", 0) > 3)
+                    else "hpi_adjusted" if (r.get("_hpi_method") == "average_price_ratio")
                     else "nominal"
                 ),
-                "similarity_score":          r.get("_similarity_score"),
-                "score_components":          r.get("_score_components"),
+                "similarity_score":                r.get("_similarity_score"),
+                "score_components":                r.get("_score_components"),
             }
 
+        _hpi_ratio_applied = _hpi_adjusted_count > 0
         _methodology_label = (
-            "similarity_weighted_normalised"
-            if _use_normalised and _hpi_yoy is not None
-            else "similarity_weighted_hpi_adjusted"
-            if _hpi_yoy is not None
+            "similarity_weighted_normalised_hpi_ratio"
+            if _use_normalised and _hpi_ratio_applied
+            else "similarity_weighted_hpi_ratio"
+            if _hpi_ratio_applied
             else "similarity_weighted_area_normalised"
             if _use_normalised
             else "similarity_weighted_nominal"
@@ -5083,8 +5162,11 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _summary_parts = [f"{len(rows)} comps within {r_miles}mi"]
         if _use_normalised:
             _summary_parts.append(f"area-normalised ({_norm_coverage_pct:.0f}% coverage)")
-        if _hpi_yoy is not None:
-            _summary_parts.append(f"HPI-adjusted ({_hpi_yoy:+.1f}% YoY)")
+        if _hpi_ratio_applied:
+            _summary_parts.append(
+                f"HPI avg_price ratio adjusted "
+                f"({_hpi_latest_month}, LAD {_lad_code_for_hpi})"
+            )
         if _audit["outliers_rejected"]:
             _summary_parts.append(f"{_audit['outliers_rejected']} outliers rejected")
         if _audit["methodology_degraded"]:
@@ -5115,7 +5197,12 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "area_normalisation_applied":  _use_normalised,
             "area_normalisation_coverage": _area_normalised_count,
             "hpi_adjusted_count":          _hpi_adjusted_count,
-            "hpi_yoy_applied":             _hpi_yoy,
+            "hpi_missing_count":           _hpi_missing_count,
+            "hpi_yoy_applied":             _hpi_yoy,      # None post D-HPI-1
+            "hpi_method":                  _audit.get("hpi_method"),
+            "hpi_latest_month":            _hpi_latest_month,
+            "hpi_latest_average_price":    _hpi_latest_avg,
+            "hpi_lad_code":                _lad_code_for_hpi,
             "outliers_rejected":           _audit.get("outliers_rejected", 0),
             "methodology_degraded":        _audit.get("methodology_degraded", False),
             "insufficient_evidence":       _evidence_insufficient,
