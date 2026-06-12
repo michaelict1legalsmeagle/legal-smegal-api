@@ -4802,7 +4802,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         #        LAD. Avoids N per-comp round trips.
         _now = _dt.datetime.utcnow()
         _hpi_adjusted_count  = 0
-        _hpi_missing_count   = 0
+        _hpi_missing_count   = 0  # genuine data absence (Cases A, B, C)
+        _hpi_skipped_count   = 0  # intentional skip — comp too recent (Case D)
 
         # Step 8a: compute age_months and collect distinct sale months for batch
         _sale_month_set: set = set()
@@ -4863,13 +4864,16 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _adj      = _raw_price
                 if not _hpi_latest_avg:
                     _hpi_warning = "hpi_temporal_adjustment_unavailable: no latest avg_price for LAD"
+                    _hpi_missing_count += 1   # Case A: no LAD data
                 elif not _sm_avg:
                     _hpi_warning = f"hpi_temporal_adjustment_unavailable: no avg_price for sale_month {_sm_str}"
+                    _hpi_missing_count += 1   # Case B: no sale-month row
                 elif _age_months is None:
                     _hpi_warning = "hpi_temporal_adjustment_unavailable: sale_date missing"
+                    _hpi_missing_count += 1   # Case C: malformed sale date
                 else:
                     _hpi_warning = "hpi_temporal_adjustment_unavailable: comp age <= 3 months"
-                _hpi_missing_count += 1
+                    _hpi_skipped_count += 1   # Case D: intentional skip — not a data problem
 
             _r["hpi_adjusted_price"] = _adj
             _r["hpi_multiplier"]     = _hpi_mult
@@ -4879,9 +4883,11 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
         _audit["hpi_adjusted_count"] = _hpi_adjusted_count
         _audit["hpi_missing_count"]  = _hpi_missing_count
+        _audit["hpi_skipped_count"]  = _hpi_skipped_count   # intentional recent-sale skips
         _audit["hpi_method"]         = "average_price_ratio"
         _audit["hpi_latest_month"]   = _hpi_latest_month
         _audit["hpi_latest_avg"]     = _hpi_latest_avg
+        # Invariant: hpi_adjusted_count + hpi_missing_count + hpi_skipped_count = len(rows)
         if _hpi_missing_count > 0 and _hpi_adjusted_count == 0:
             _audit["warnings"].append(
                 f"hpi_temporal_adjustment_skipped: {_hpi_missing_count} comps — "
@@ -5198,6 +5204,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "area_normalisation_coverage": _area_normalised_count,
             "hpi_adjusted_count":          _hpi_adjusted_count,
             "hpi_missing_count":           _hpi_missing_count,
+            "hpi_skipped_count":           _hpi_skipped_count,
             "hpi_yoy_applied":             _hpi_yoy,      # None post D-HPI-1
             "hpi_method":                  _audit.get("hpi_method"),
             "hpi_latest_month":            _hpi_latest_month,
