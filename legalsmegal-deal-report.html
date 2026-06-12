@@ -1,0 +1,1667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>Deal Report — LegalSmegal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#080c10;--s1:#0d1219;--s2:#111820;--s3:#161e28;
+  --b1:#1c2530;--b2:#243040;
+  --tp:#e8edf2;--ts:#7a8fa3;--tt:#3d5068;
+  --acc:#c8a84b;--ad:rgba(200,168,75,.10);
+  --grn:#3ecf8e;--gd:rgba(62,207,142,.10);
+  --red:#e05c5c;--rd:rgba(224,92,92,.10);
+  --amb:#e8943a;--amd:rgba(232,148,58,.10);
+  --mono:'IBM Plex Mono',monospace;
+  --sans:'IBM Plex Sans',sans-serif;
+  --r:4px;
+  --footer-h:20vh;
+  --paper:#f5f0e8;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;font-family:var(--sans);font-size:12px;background:var(--bg);color:var(--tp);-webkit-font-smoothing:antialiased;overflow:hidden}
+button{cursor:pointer;font-family:var(--mono)}
+
+/* NAV */
+nav{position:fixed;top:0;left:0;right:0;z-index:300;height:44px;background:var(--s1);border-bottom:1px solid var(--b1);display:flex;align-items:center;justify-content:space-between;padding:0 20px}
+.nav-logo{font-family:var(--sans);font-size:13px;font-weight:600;color:var(--tp);text-decoration:none}
+.nav-logo span{color:var(--acc)}
+.nav-ctx-addr{font-family:var(--mono);font-size:10px;color:var(--tt);letter-spacing:.04em;margin-left:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px;text-transform:uppercase}
+.nav-right{display:flex;align-items:center;gap:5px}
+.nav-btn{font-family:var(--mono);font-size:9px;font-weight:500;height:26px;padding:0 10px;border-radius:var(--r);border:1px solid var(--b2);background:transparent;color:var(--tt);letter-spacing:.06em;text-transform:uppercase;transition:border-color .15s,color .15s;text-decoration:none;display:inline-flex;align-items:center;white-space:nowrap}
+.nav-btn:hover{border-color:var(--acc);color:var(--ts)}
+.nav-btn.active{border-color:var(--acc);color:var(--acc);background:var(--ad)}
+
+/* STEP BAR */
+.step-bar{position:fixed;top:44px;left:0;right:0;z-index:199;background:var(--bg);border-bottom:1px solid var(--b1);height:28px;display:flex;align-items:center;padding:0 20px;gap:0;overflow-x:auto;scrollbar-width:none}
+.step-bar::-webkit-scrollbar{display:none}
+.step-item{display:flex;align-items:center;gap:5px;padding:0 12px 0 0;font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;flex-shrink:0}
+.step-dot{width:4px;height:4px;border-radius:50%}
+.step-dot.done{background:var(--ts)}.step-dot.active{background:var(--acc);box-shadow:0 0 0 3px var(--ad)}.step-dot.pending{background:var(--tt)}
+.step-lbl.done{color:var(--ts)}.step-lbl.active{color:var(--acc)}.step-lbl.pending{color:var(--tt)}
+.step-sep{color:var(--tt);font-size:9px;padding:0 3px}
+
+/* SHELL */
+.shell{display:flex;flex-direction:column;height:calc(100vh - 72px);overflow:hidden;margin-top:72px}
+
+/* HEADER BAND */
+.hband{background:var(--s1);border-bottom:1px solid var(--b1);padding:8px 16px;display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-shrink:0}
+.hb-l{display:flex;flex-direction:column;gap:3px;min-width:0}
+.hb-eye{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--acc)}
+.hb-addr{font-family:var(--mono);font-size:16px;font-weight:400;letter-spacing:-.3px;color:var(--tp);line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:460px}
+.hb-tags{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.hbt{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;border-radius:2px;background:var(--s3);border:1px solid var(--b1);color:var(--tt)}
+.hbt.won{color:var(--grn);border-color:rgba(62,207,142,.3);background:var(--gd)}
+.hbt.lost{color:var(--red);border-color:rgba(224,92,92,.3);background:var(--rd)}
+.hbt.watch{color:var(--acc);border-color:rgba(200,168,75,.3);background:var(--ad)}
+.hb-r{display:flex;align-items:stretch;gap:0;flex-shrink:0}
+.hbs{display:flex;flex-direction:column;justify-content:center;gap:2px;padding:0 14px;border-left:1px solid var(--b1)}
+.hbs-l{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--tt)}
+.hbs-v{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--tp)}
+.hbs-v.acc{color:var(--acc)}.hbs-v.grn{color:var(--grn)}
+.sdot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:4px;vertical-align:middle}
+
+/* BODY WRAP */
+.body-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+
+/* COCKPIT 25/50/25 */
+.cockpit{flex:1;display:grid;grid-template-columns:25% 50% 25%;overflow:hidden;min-height:0}
+
+/* SECTIONS */
+.sect-hd{padding:7px 10px 6px;border-bottom:1px solid var(--b1);background:var(--s1);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.sect-lbl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--tp);display:flex;align-items:center;gap:5px}
+.sect-lbl::before{content:'';width:2px;height:8px;border-radius:1px;background:var(--acc);flex-shrink:0}
+.sect-meta{font-family:var(--mono);font-size:7px;color:var(--tt)}
+
+/* LEFT COLUMN */
+.lcol{border-right:1px solid var(--b1);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:var(--b2) transparent}
+.lcol::-webkit-scrollbar{width:3px}
+.lcol::-webkit-scrollbar-thumb{background:var(--b2);border-radius:2px}
+.bid-sect{padding:12px 12px 10px;border-bottom:1px solid var(--b1);flex-shrink:0}
+.bid-user{display:flex;align-items:center;gap:7px;margin-bottom:8px}
+.bid-avatar{width:24px;height:24px;border-radius:50%;background:var(--ad);border:1px solid rgba(200,168,75,.3);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:9px;font-weight:700;color:var(--acc);flex-shrink:0}
+.bid-username{font-family:var(--mono);font-size:9px;color:var(--ts);letter-spacing:.03em}
+.bid-lbl-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.bid-lbl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--tt)}
+.bid-badge{font-family:var(--mono);font-size:7px;font-weight:700;padding:2px 6px;border-radius:2px}
+.bid-badge.locked{background:var(--gd);border:1px solid rgba(62,207,142,.3);color:var(--grn)}
+.bid-badge.unlocked{background:var(--s3);border:1px solid var(--b1);color:var(--tt)}
+.bid-num{font-family:var(--mono);font-size:38px;font-weight:300;letter-spacing:-2px;line-height:1;transition:color .2s}
+.bid-num.live{color:var(--acc)}.bid-num.prev{color:var(--ts)}.bid-num.empty{color:var(--b2);font-size:32px}
+.bid-sub{font-family:var(--mono);font-size:8px;color:var(--tt);min-height:12px;margin-top:2px}
+.bid-inp-row{display:flex;align-items:center;gap:6px;margin-top:8px}
+.bid-inp{font-family:var(--mono);font-size:14px;font-weight:300;color:var(--tp);background:var(--s2);border:1px solid var(--b2);border-radius:var(--r);padding:7px 9px;flex:1;outline:none;letter-spacing:-.3px;transition:border-color .15s}
+.bid-inp:focus{border-color:var(--acc)}
+.bid-inp::placeholder{color:var(--b2);font-size:11px}
+.bid-lock-btn{height:32px;padding:0 10px;border-radius:var(--r);border:1px solid rgba(200,168,75,.4);background:var(--ad);color:var(--acc);font-size:8px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;transition:all .15s}
+.bid-lock-btn:hover{background:rgba(200,168,75,.18)}
+.bid-unlock-btn{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:3px 8px;border-radius:var(--r);background:var(--s3);border:1px solid var(--b2);color:var(--tt);transition:all .15s}
+.bid-unlock-btn:hover{border-color:var(--acc);color:var(--acc)}
+.ws-pills{display:flex;gap:5px;margin-top:10px}
+.wsp{flex:1;padding:6px 0;border-radius:var(--r);border:1px solid var(--b1);background:var(--s2);font-family:var(--mono);font-size:8px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--tt);text-align:center;transition:all .15s}
+.wsp:hover{border-color:var(--b2);color:var(--ts)}
+.wsp.on.watch{background:var(--ad);border-color:rgba(200,168,75,.4);color:var(--acc)}
+.wsp.on.won{background:var(--gd);border-color:rgba(62,207,142,.4);color:var(--grn)}
+.wsp.on.lost{background:var(--rd);border-color:rgba(224,92,92,.4);color:var(--red)}
+.flag-block{padding:10px 12px 6px;border-bottom:1px solid var(--b1);flex-shrink:0}
+.flag-counts{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:8px}
+.fc{display:flex;flex-direction:column;gap:1px}
+.fcn{font-family:var(--mono);font-size:22px;font-weight:300;letter-spacing:-1.5px;line-height:1}
+.fcn.c{color:var(--red)}.fcn.h{color:var(--amb)}.fcn.m{color:#e07830}.fcn.n{color:var(--ts)}
+.fcl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt)}
+.sev-bar{display:flex;height:3px;border-radius:2px;overflow:hidden;gap:1px;margin-bottom:8px}
+.sev-bar-seg{border-radius:1px;transition:width .4s}
+.hammer-sect{padding:10px 12px;border-bottom:1px solid var(--b1);flex-shrink:0}
+.hbtn{width:100%;padding:8px;border-radius:var(--r);border:none;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .2s}
+.hbtn.pre{background:var(--rd);border:1px solid rgba(224,92,92,.35);color:var(--red)}
+.hbtn.pre:hover{background:rgba(224,92,92,.18)}
+.hbtn.post{background:var(--gd);border:1px solid rgba(62,207,142,.35);color:var(--grn)}
+.win-row{display:flex;align-items:center;gap:6px;margin-top:7px}
+.win-inp{font-family:var(--mono);font-size:13px;font-weight:300;color:var(--tp);background:var(--s2);border:1px solid var(--b2);border-radius:var(--r);padding:6px 8px;flex:1;outline:none;letter-spacing:-.3px;transition:border-color .15s}
+.win-inp:focus{border-color:var(--grn)}
+.win-inp::placeholder{color:var(--b2);font-size:10px}
+.win-save-btn{height:30px;padding:0 9px;border-radius:var(--r);border:1px solid rgba(62,207,142,.4);background:var(--gd);color:var(--grn);font-size:7px;font-weight:700;letter-spacing:.07em;text-transform:uppercase}
+.win-locked-num{font-family:var(--mono);font-size:20px;font-weight:300;letter-spacing:-.8px;color:var(--grn);margin:4px 0 1px}
+.win-locked-sub{font-family:var(--mono);font-size:7px;color:var(--tt)}
+.op-row{display:flex;gap:5px;margin-top:7px}
+.op{flex:1;padding:5px 0;border-radius:var(--r);border:1px solid var(--b1);background:var(--s2);font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--tt);text-align:center;transition:all .15s}
+.op.on.won{background:var(--gd);border-color:rgba(62,207,142,.4);color:var(--grn)}
+.op.on.lost{background:var(--rd);border-color:rgba(224,92,92,.4);color:var(--red)}
+.wn-sect{padding:10px 12px;display:none;flex-shrink:0}
+.wn-sect.visible{display:block}
+.wn-dates{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
+.wnd{display:flex;flex-direction:column;gap:1px}
+.wndv{font-family:var(--mono);font-size:11px;color:var(--tp)}
+.wndl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt)}
+.countdown{border-radius:var(--r);padding:7px 9px;display:flex;align-items:center;justify-content:space-between;border:1px solid var(--b1);background:var(--s2);margin-bottom:7px}
+.countdown.g{background:var(--gd);border-color:rgba(62,207,142,.25)}
+.countdown.a{background:var(--amd);border-color:rgba(232,148,58,.25)}
+.countdown.r{background:var(--rd);border-color:rgba(224,92,92,.25)}
+.cd-days{font-family:var(--mono);font-size:22px;font-weight:300;letter-spacing:-.8px;line-height:1}
+.cd-lbl{font-family:var(--mono);font-size:7px;color:var(--tt);margin-top:1px}
+.comp-tasks{display:flex;flex-direction:column}
+.comp-task{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--b1);font-family:var(--mono);font-size:8px;color:var(--ts);cursor:pointer;transition:background .1s;border-radius:2px}
+.comp-task:last-child{border-bottom:none}
+.comp-task:hover{color:var(--tp)}
+.wn-cb{width:14px;height:14px;border-radius:2px;border:1px solid var(--b2);background:var(--s2);flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all .15s}
+.wn-cb.done{background:var(--grn);border-color:var(--grn)}
+.wn-cb.done::after{content:'✓';font-size:9px;color:#000;font-weight:700;line-height:1}
+.wn-task-txt{flex:1}
+.wn-task-txt.done{text-decoration:line-through;color:var(--tt)}
+.comp-period-sel{font-family:var(--mono);font-size:8px;color:var(--tp);background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:3px 6px;width:100%;outline:none;margin-top:6px;cursor:pointer}
+
+/* CENTRE */
+.ccol{display:flex;flex-direction:column;overflow:hidden;background:var(--s2)}
+.iframe-wrap{flex:1;position:relative;overflow:hidden}
+.iframe-wrap iframe{width:100%;height:100%;border:none;background:#fff}
+.iframe-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:var(--s2)}
+.iframe-loading-txt{font-family:var(--mono);font-size:10px;color:var(--tt);letter-spacing:.04em}
+.doc-footer{height:26px;border-top:1px solid var(--b1);background:var(--s1);display:flex;align-items:center;padding:0 12px;gap:8px;font-family:var(--mono);font-size:8px;color:var(--tt);flex-shrink:0}
+
+/* RIGHT COLUMN */
+.rcol{border-left:1px solid var(--b1);display:flex;flex-direction:column;overflow:hidden}
+.rs-body{overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:var(--b2) transparent;min-height:0}
+.rs-body::-webkit-scrollbar{width:3px}
+.rs-body::-webkit-scrollbar-thumb{background:var(--b2);border-radius:2px}
+.r-divider{height:1px;background:var(--b1);margin:0}
+/* CALCULATOR */
+.calc-lbl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt);margin-bottom:2px}
+.calc-inp{width:100%;font-family:var(--mono);font-size:11px;color:var(--tp);background:var(--s2);border:1px solid var(--b2);border-radius:var(--r);padding:4px 6px;outline:none;transition:border-color .15s}
+.calc-inp:focus{border-color:var(--acc)}
+.calc-inp::placeholder{color:var(--b2)}
+.calc-cell{background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:5px 6px;display:flex;flex-direction:column;gap:1px}
+.calc-val{font-family:var(--mono);font-size:13px;font-weight:300;letter-spacing:-.5px;color:var(--tp);line-height:1}
+.calc-val.pos{color:var(--grn)}.calc-val.neg{color:var(--red)}.calc-val.acc{color:var(--acc)}
+.calc-key{font-family:var(--mono);font-size:6px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt)}
+.wf-mini{padding:10px 10px 6px}
+.wf-svg-wrap{width:100%;overflow:visible}
+/* CALENDAR */
+.cal-wrap{padding:10px 10px 8px}
+.cal-header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.cal-month-name{font-family:var(--sans);font-size:13px;font-weight:700;color:var(--tp);letter-spacing:-.2px}
+.cal-year{font-family:var(--sans);font-size:13px;font-weight:700;color:var(--tp)}
+.cal-nav{display:flex;gap:4px;align-items:center}
+.cal-nav-btn{width:20px;height:20px;border-radius:3px;border:1px solid var(--b2);background:none;color:var(--ts);font-size:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s}
+.cal-nav-btn:hover{border-color:var(--acc);color:var(--acc)}
+.cal-divider{height:1px;background:var(--b2);margin-bottom:8px}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:0;row-gap:2px}
+.cal-dow{font-family:var(--sans);font-size:10px;font-weight:400;color:var(--ts);text-align:center;padding:4px 0 6px}
+.cal-day{font-family:var(--sans);font-size:11px;color:var(--ts);text-align:center;padding:4px 0;line-height:1.4;cursor:default;position:relative;border-radius:50%;transition:background .1s}
+.cal-day:hover:not(.empty){background:var(--s3)}
+.cal-day.other{color:var(--b2)}
+.cal-day.today{background:transparent}
+.cal-day.today span{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:#2a7d8c;color:#fff;font-weight:700}
+.cal-day.auction span{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--acc);color:#000;font-weight:700}
+.cal-day.hammer span{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--grn);color:#000;font-weight:700}
+.cal-day.deadline span{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--red);color:#fff;font-weight:700}
+.cal-day.deal-dot::after{content:'';position:absolute;bottom:1px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--acc)}
+.cal-day.empty{pointer-events:none}
+.cal-tooltip{position:fixed;z-index:9999;background:var(--s1);border:1px solid var(--b2);border-radius:var(--r);padding:6px 9px;font-family:var(--mono);font-size:9px;color:var(--tp);pointer-events:none;max-width:200px;white-space:normal;line-height:1.4;box-shadow:0 4px 12px rgba(0,0,0,.4)}
+.cal-legend{display:flex;gap:10px;margin-top:7px;padding-top:6px;border-top:1px solid var(--b1)}
+.cal-leg-item{display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:7px;color:var(--tp)}
+.cal-leg-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+/* FINANCIALS */
+.fin-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px}
+.fin-c{display:flex;flex-direction:column;gap:1px}
+.fin-v{font-family:var(--mono);font-size:16px;font-weight:300;letter-spacing:-.8px;line-height:1;color:var(--tp)}
+.fin-v.pos{color:var(--grn)}.fin-v.neg{color:var(--red)}.fin-v.acc{color:var(--acc)}
+.fin-l{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt)}
+.fin-signal{display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:var(--r);margin:0 10px 8px}
+.fin-signal.pos{background:var(--gd)}.fin-signal.neg{background:var(--rd)}.fin-signal.neu{background:var(--s2)}
+.sig-dot{width:4px;height:4px;border-radius:50%;flex-shrink:0}
+.fin-sig-txt{font-family:var(--mono);font-size:7px;color:var(--ts)}
+/* CHASE LIST */
+.chase-cat{border-bottom:1px solid var(--b1)}
+.chase-cat:last-child{border-bottom:none}
+.chase-cat-hd{display:flex;align-items:center;gap:6px;padding:7px 12px;cursor:pointer;font-family:var(--mono);font-size:8px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ts);transition:color .15s;user-select:none}
+.chase-cat-hd:hover{color:var(--tp)}
+.chase-cat-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.chase-cat-count{margin-left:auto;font-family:var(--mono);font-size:8px;color:var(--tt);font-weight:400;text-transform:none;letter-spacing:0}
+.chase-cat-chev{margin-left:4px;transition:transform .15s;color:var(--tt);flex-shrink:0}
+.chase-body{display:none;padding:0 12px 6px}
+.chase-body.open{display:block}
+.chase-task{display:flex;align-items:flex-start;gap:7px;padding:4px 0;border-bottom:1px solid var(--b1)}
+.chase-task:last-child{border-bottom:none}
+.chase-cb{width:13px;height:13px;border-radius:2px;border:1px solid var(--b2);background:var(--s2);flex-shrink:0;margin-top:1px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
+.chase-cb.done{background:var(--grn);border-color:var(--grn)}
+.chase-cb svg{display:none}
+.chase-cb.done svg{display:block}
+.chase-task-txt{font-family:var(--mono);font-size:8px;color:var(--ts);line-height:1.4;flex:1}
+.chase-task-txt.done{color:var(--tt);text-decoration:line-through}
+.chase-progress-bar{height:2px;background:var(--b1);margin:0 12px 4px;border-radius:1px}
+.chase-progress-fill{height:2px;border-radius:1px;background:var(--grn);transition:width .3s}
+/* AREA COMPS */
+.comp-block{padding:8px 10px}
+.comp-list{display:flex;flex-direction:column;gap:3px;margin-bottom:6px}
+.comp-row{display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid var(--b1)}
+.comp-row:last-child{border-bottom:none}
+.comp-num{font-family:var(--mono);font-size:8px;color:var(--tt);width:12px;flex-shrink:0}
+.comp-type{font-family:var(--mono);font-size:7px;text-transform:uppercase;letter-spacing:.05em;color:var(--ts);width:50px;flex-shrink:0}
+.comp-price{font-family:var(--mono);font-size:9px;font-weight:500;color:var(--tp);flex:1;text-align:right}
+.comp-dist{font-family:var(--mono);font-size:7px;color:var(--tt);width:30px;text-align:right;flex-shrink:0}
+/* AREA CONTEXT */
+.ac-stat{background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:5px 7px}
+.ac-stat-lbl{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt);margin-bottom:1px}
+.ac-stat-val{font-family:var(--mono);font-size:13px;font-weight:300;letter-spacing:-.4px;color:var(--tp);line-height:1}
+.ac-stat-val.grn{color:var(--grn)}.ac-stat-val.red{color:var(--red)}.ac-stat-val.amb{color:var(--amb)}
+.ac-stat-sub{font-family:var(--mono);font-size:7px;color:var(--tt);margin-top:1px}
+/* DONUT */
+.donut-wrap{display:flex;align-items:center;gap:8px;padding:0 10px 8px}
+.donut-legend{display:flex;flex-direction:column;gap:3px;flex:1}
+.dl-row{display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:8px;color:var(--ts)}
+.dl-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+/* DRILL LINKS */
+.drill-link{font-family:var(--mono);font-size:7px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--tt);text-decoration:none;border:1px solid var(--b1);border-radius:var(--r);padding:3px 7px;display:inline-flex;align-items:center;gap:3px;transition:all .15s;margin:0 10px 8px}
+.drill-link:hover{border-color:var(--acc);color:var(--acc)}
+
+/* FOOTER RESIZE */
+.fbar-resize{height:4px;background:var(--b1);cursor:ns-resize;flex-shrink:0;transition:background .15s}
+.fbar-resize:hover{background:var(--acc)}
+
+/* FOOTER — paper colour, Notes label */
+.fbar{
+  height:var(--footer-h);
+  border-top:2px solid var(--b2);
+  background:var(--paper);
+  padding:8px 16px;
+  display:flex;align-items:flex-start;gap:10px;
+  flex-shrink:0;min-height:36px;max-height:50vh;
+  overflow:hidden;
+}
+.fbar-inner{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}
+.fbar-label{font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#8a7a60}
+.note-inp{
+  flex:1;width:100%;
+  font-family:var(--mono);font-size:10px;
+  color:#2a1f0e;background:transparent;
+  border:none;outline:none;resize:none;
+  line-height:1.5;
+}
+.note-inp::placeholder{color:#c4ae88}
+.fbar-actions{display:flex;flex-direction:column;gap:5px;flex-shrink:0;padding-top:2px}
+.fb{font-family:var(--mono);font-size:8px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:5px 10px;border-radius:var(--r);display:inline-flex;align-items:center;gap:5px;transition:all .2s;white-space:nowrap}
+.fb svg{width:10px;height:10px}
+.fb-ghost{background:none;border:1px solid #c4ae88;color:#8a7a60}
+.fb-ghost:hover{border-color:#8a7a60;color:#2a1f0e}
+.fb-acc{background:var(--ad);border:1px solid rgba(200,168,75,.4);color:var(--acc)}
+.fb-acc:hover{background:rgba(200,168,75,.15)}
+.fb-saved{font-family:var(--mono);font-size:7px;color:#8a7a60;text-align:right}
+
+@media print{
+  nav,.step-bar,.fbar-resize{display:none!important}
+  html,body{overflow:visible;height:auto;background:#fff;color:#000}
+  .shell,.body-wrap{height:auto;overflow:visible;margin-top:0}
+  .cockpit{grid-template-columns:25% 50% 25%;overflow:visible}
+  .fbar{
+    background:var(--paper)!important;
+    border:1px solid #ccc!important;
+    height:auto!important;max-height:none!important;
+    page-break-inside:avoid;
+    margin-top:12px;
+  }
+  .note-inp{height:auto!important;min-height:60px}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+</style>
+</head>
+<body>
+
+<script>
+(function(){
+  var did=new URLSearchParams(window.location.search).get('deal_id');
+  if(!did)return;
+  function wire(){document.querySelectorAll('a[href*="legalsmegal-"]').forEach(function(a){var h=a.getAttribute('href')||'';if(h.includes('deal_id=')||h.includes('signin'))return;a.href=h+(h.includes('?')?'&':'?')+'deal_id='+did;});}
+  wire();
+  if(window.MutationObserver)new MutationObserver(wire).observe(document.body,{childList:true,subtree:true});
+})();
+</script>
+
+<nav>
+  <div style="display:flex;align-items:center;min-width:0">
+    <a href="legalsmegal-dashboard.html" class="nav-logo">Legal<span>Smegal</span></a>
+    <span class="nav-ctx-addr" id="navCtxAddr"></span>
+  </div>
+  <div class="nav-right">
+    <a href="legalsmegal-dashboard.html"   class="nav-btn">Dashboard</a>
+    <a href="legalsmegal-verdict.html"     class="nav-btn">Verdict</a>
+    <a href="legalsmegal-workbench.html"   class="nav-btn">Flag Workbench</a>
+    <a href="legalsmegal-financials.html"  class="nav-btn">Financial Model</a>
+    <a href="legalsmegal-area.html"        class="nav-btn">Area Intelligence</a>
+    <a href="legalsmegal-deal-report.html" class="nav-btn active">Deal Report</a>
+  </div>
+</nav>
+
+<div class="step-bar">
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Upload</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Verdict</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Flag Workbench</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Financial Model</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot done"></span><span class="step-lbl done">Area Intelligence</span></span><span class="step-sep">›</span>
+  <span class="step-item"><span class="step-dot active"></span><span class="step-lbl active">Deal Report</span></span>
+</div>
+
+<div class="shell">
+  <div class="hband">
+    <div class="hb-l">
+      <div class="hb-eye">Deal Report Finalisation</div>
+      <div class="hb-addr" id="dhAddr">—</div>
+      <div class="hb-tags" id="dhTags"></div>
+    </div>
+    <div class="hb-r">
+      <div class="hbs"><div class="hbs-l">Auction date</div><div class="hbs-v" id="dhDate">—</div></div>
+      <div class="hbs"><div class="hbs-l">Pack score</div><div class="hbs-v acc" id="dhScore">—</div></div>
+      <div class="hbs"><div class="hbs-l">Status</div><div class="hbs-v" id="dhStat"><span class="sdot" id="dhDot" style="background:var(--tt)"></span><span id="dhStatTxt">—</span></div></div>
+      <div class="hbs"><div class="hbs-l">Guide price</div><div class="hbs-v" id="dhGuide">—</div></div>
+    </div>
+  </div>
+
+  <div class="body-wrap">
+    <div class="cockpit">
+
+      <!-- ════ LEFT ════ -->
+      <div class="lcol">
+
+        <!-- MAX BID -->
+        <div class="sect-hd">
+          <div class="sect-lbl">Max Bid</div>
+          <span class="bid-badge unlocked" id="bidBadge">Unlocked</span>
+        </div>
+        <div class="bid-sect">
+          <div class="bid-user">
+            <div class="bid-avatar" id="bidAvatar">—</div>
+            <span class="bid-username" id="bidUsername">Loading…</span>
+          </div>
+          <div class="bid-lbl-row"><span class="bid-lbl">Max bid</span></div>
+          <div class="bid-num empty" id="bidNum">—</div>
+          <div class="bid-sub" id="bidSub"></div>
+          <div id="bidUnlocked" style="margin-top:8px">
+            <div class="bid-inp-row">
+              <input type="number" class="bid-inp" id="bcInput" placeholder="Enter max bid" min="1000" step="1000" oninput="previewBid()">
+              <button class="bid-lock-btn" onclick="lockBid()">Lock</button>
+            </div>
+          </div>
+          <div id="bidLocked" style="display:none;margin-top:7px">
+            <button class="bid-unlock-btn" onclick="unlockBid()">Unlock bid</button>
+          </div>
+          <div class="ws-pills">
+            <button class="wsp watch on" id="pill-watch" onclick="setWatchState('watch')">Watch</button>
+            <button class="wsp won"       id="pill-won"   onclick="setWatchState('won')">Won</button>
+            <button class="wsp lost"      id="pill-lost"  onclick="setWatchState('lost')">Lost</button>
+          </div>
+          <!-- TWO COMPACT WATERFALLS — left col, below pills -->
+          <div style="border-top:1px solid var(--b1);margin-top:10px;padding-top:6px">
+            <!-- 1. Verdict valuation-risk waterfall -->
+            <div style="font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--tt);margin-bottom:3px;padding:0 2px" id="drCompLabel">Value Reduction</div>
+            <div id="drHpiCaveat" style="font-family:var(--mono);font-size:6.5px;color:#e8943a;margin-bottom:4px;padding:0 2px;display:none"></div>
+            <svg id="wfVerdictSvg" style="width:100%;overflow:visible" viewBox="0 0 220 90" preserveAspectRatio="xMidYMid meet">
+              <text x="110" y="48" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="8" fill="#3d5068">No valuation data</text>
+            </svg>
+            <!-- Capital Stack text card -->
+            <div style="margin-top:8px">
+              <div style="font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--tt);margin-bottom:4px;padding:0 2px">Capital Stack</div>
+              <div id="finStackCard"><div style="color:var(--tt);font-size:7px;padding:2px">— save price in Financial Model —</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DISCLOSURE FLAGS -->
+        <div class="sect-hd"><div class="sect-lbl">Disclosure Flags</div></div>
+        <div class="flag-block">
+          <div class="flag-counts">
+            <div class="fc"><div class="fcn c" id="fcC">—</div><div class="fcl">Critical</div></div>
+            <div class="fc"><div class="fcn h" id="fcH">—</div><div class="fcl">Clarification</div></div>
+            <div class="fc"><div class="fcn m" id="fcM">—</div><div class="fcl">Missing</div></div>
+            <div class="fc"><div class="fcn n" id="fcN">—</div><div class="fcl">Notes</div></div>
+          </div>
+          <div class="sev-bar" id="sevBar">
+            <div class="sev-bar-seg" id="sevC" style="background:var(--red);width:0%"></div>
+            <div class="sev-bar-seg" id="sevH" style="background:var(--amb);width:0%"></div>
+            <div class="sev-bar-seg" id="sevM" style="background:#e07830;width:0%"></div>
+            <div class="sev-bar-seg" id="sevN" style="background:var(--ts);width:0%"></div>
+          </div>
+        </div>
+        <a id="wbLink" href="legalsmegal-workbench.html" class="drill-link" style="margin-top:2px">Open Workbench →</a>
+
+        <div class="sect-hd" id="hammerHd">
+          <div class="sect-lbl">Hammer Result</div>
+          <span class="bid-badge" id="hammerBadge" style="background:var(--s3);border:1px solid var(--b1);color:var(--tt)">Pre-hammer</span>
+        </div>
+        <div class="hammer-sect">
+          <div id="hPre">
+            <button class="hbtn pre" onclick="toggleHammer()">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 4l5 5-11 11H4v-5z"/></svg>
+              Hammer has fallen
+            </button>
+          </div>
+          <div id="hPost" style="display:none">
+            <button class="hbtn post" onclick="toggleHammer()">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              Hammer confirmed
+            </button>
+            <div id="wUnlocked" style="margin-top:7px">
+              <div style="font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--tt);margin-bottom:4px">Hammer price</div>
+              <div class="win-row">
+                <input type="number" class="win-inp" id="winInput" placeholder="Hammer price" min="1000" step="1000" oninput="previewWin()">
+                <button class="win-save-btn" onclick="saveWin()">Save</button>
+              </div>
+              <div style="font-family:var(--mono);font-size:7px;color:var(--tt);margin-top:3px" id="winPrev"></div>
+            </div>
+            <div id="wLocked" style="display:none;margin-top:7px">
+              <div class="win-locked-num" id="wLockedAmt">—</div>
+              <div class="win-locked-sub" id="wLockedSub"></div>
+              <button class="bid-unlock-btn" style="margin-top:5px" onclick="unlockWin()">Edit</button>
+            </div>
+            <div class="op-row">
+              <button class="op won on" id="opWon"  onclick="setOutcome('won')">Won</button>
+              <button class="op lost"   id="opLost" onclick="setOutcome('lost')">Lost</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- WHAT NEXT — hidden until hammer -->
+        <div class="sect-hd" id="wnHd" style="display:none">
+          <div class="sect-lbl">What Next</div>
+          <span class="sect-meta" id="wnBadge">In completion</span>
+        </div>
+        <div class="wn-sect" id="wnSect">
+          <div class="wn-dates">
+            <div class="wnd"><div class="wndv" id="wnAuct">—</div><div class="wndl">Auction date</div></div>
+            <div class="wnd"><div class="wndv" id="wnDl">—</div><div class="wndl">Comp. deadline</div></div>
+          </div>
+          <div class="countdown" id="cdBlock">
+            <div><div class="cd-days" id="cdDays">—</div><div class="cd-lbl" id="cdLbl">days to completion</div></div>
+            <div style="font-family:var(--mono);font-size:10px;font-weight:500;color:var(--tp)" id="cdDlFmt"></div>
+          </div>
+          <div class="comp-tasks" id="wnTasks">
+            <div class="comp-task" onclick="toggleWnTask(0)">
+              <div class="wn-cb" id="wnt-0"></div>
+              <span class="wn-task-txt" id="wntl-0">Solicitor instructed</span>
+            </div>
+            <div class="comp-task" onclick="toggleWnTask(1)">
+              <div class="wn-cb" id="wnt-1"></div>
+              <span class="wn-task-txt" id="wntl-1">10% deposit paid</span>
+            </div>
+            <div class="comp-task" onclick="toggleWnTask(2)">
+              <div class="wn-cb" id="wnt-2"></div>
+              <span class="wn-task-txt" id="wntl-2">Insurance from exchange arranged</span>
+            </div>
+            <div class="comp-task" onclick="toggleWnTask(3)">
+              <div class="wn-cb" id="wnt-3"></div>
+              <span class="wn-task-txt" id="wntl-3">Mortgage offer received</span>
+            </div>
+          </div>
+          <select class="comp-period-sel" id="compPeriod" onchange="applyCompPeriod()">
+            <option value="28">28 calendar days</option>
+            <option value="20">20 working days</option>
+            <option value="14">14 calendar days</option>
+            <option value="42">42 calendar days</option>
+            <option value="56">56 calendar days</option>
+          </select>
+        </div>
+      </div><!-- /lcol -->
+
+      <!-- ════ CENTRE ════ -->
+      <div class="ccol">
+        <div class="sect-hd">
+          <div class="sect-lbl">Legal Pack Report</div>
+          <span class="sect-meta" id="docMeta">Loading…</span>
+        </div>
+        <div class="iframe-wrap">
+          <div class="iframe-loading" id="iframeLoading">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
+            <span class="iframe-loading-txt" id="iframeLoadingTxt">Loading report…</span>
+          </div>
+          <iframe id="reportFrame" title="Legal Pack Report" style="display:none"></iframe>
+        </div>
+        <div class="doc-footer">
+          <span id="docFooterAddr" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <span>·</span>
+          <span id="docFooterScore"></span>
+          <span style="margin-left:auto;color:var(--tt)">↕ Scroll to read</span>
+        </div>
+      </div><!-- /ccol -->
+
+      <!-- ════ RIGHT ════ -->
+      <div class="rcol">
+        <div class="rs-body">
+
+          <!-- ① CALCULATOR PANEL -->
+          <div class="sect-hd">
+            <div class="sect-lbl">
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><circle cx="9" cy="11" r="1" fill="currentColor"/><circle cx="12" cy="11" r="1" fill="currentColor"/><circle cx="15" cy="11" r="1" fill="currentColor"/><circle cx="9" cy="15" r="1" fill="currentColor"/><circle cx="12" cy="15" r="1" fill="currentColor"/><circle cx="15" cy="15" r="1" fill="currentColor"/><circle cx="9" cy="19" r="1" fill="currentColor"/><circle cx="12" cy="19" r="1" fill="currentColor"/><circle cx="15" cy="19" r="1" fill="currentColor"/></svg>
+              Calculator
+            </div>
+          </div>
+          <div style="padding:10px 10px 8px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px">
+              <div>
+                <div class="calc-lbl">Purchase price</div>
+                <input type="number" class="calc-inp" id="calcPrice" placeholder="£" oninput="calcRun()">
+              </div>
+              <div>
+                <div class="calc-lbl">Deposit %</div>
+                <input type="number" class="calc-inp" id="calcDeposit" placeholder="25" value="25" oninput="calcRun()">
+              </div>
+              <div>
+                <div class="calc-lbl">Monthly rent</div>
+                <input type="number" class="calc-inp" id="calcRent" placeholder="£" oninput="calcRun()">
+              </div>
+              <div>
+                <div class="calc-lbl">Rate % p.a.</div>
+                <input type="number" class="calc-inp" id="calcRate" placeholder="5.5" value="5.5" oninput="calcRun()">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px" id="calcOut">
+              <div class="calc-cell"><div class="calc-val" id="cGY">—</div><div class="calc-key">Gross yield</div></div>
+              <div class="calc-cell"><div class="calc-val" id="cNY">—</div><div class="calc-key">Net yield</div></div>
+              <div class="calc-cell"><div class="calc-val" id="cMortgage">—</div><div class="calc-key">Mortgage/mo</div></div>
+              <div class="calc-cell"><div class="calc-val" id="cCF">—</div><div class="calc-key">Cashflow/mo</div></div>
+              <div class="calc-cell"><div class="calc-val" id="cROI">—</div><div class="calc-key">Ann. ROI</div></div>
+              <div class="calc-cell"><div class="calc-val" id="cLTV">—</div><div class="calc-key">LTV</div></div>
+            </div>
+          </div>
+
+          <div class="r-divider"></div>
+
+          <!-- ② CALENDAR PANEL -->
+          <div class="sect-hd">
+            <div class="sect-lbl">
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              Calendar
+            </div>
+            <div class="cal-nav">
+              <button class="cal-nav-btn" onclick="calPrev()">‹</button>
+              <button class="cal-nav-btn" onclick="calNext()">›</button>
+            </div>
+          </div>
+          <div class="cal-wrap">
+            <div class="cal-header">
+              <span class="cal-month-name" id="calMonthName">—</span>
+              <span class="cal-year" id="calYearName">—</span>
+            </div>
+            <div class="cal-divider"></div>
+            <div id="calGrid"></div>
+            <div class="cal-legend">
+              <div class="cal-leg-item"><div class="cal-leg-dot" style="background:#2a7d8c"></div>Today</div>
+              <div class="cal-leg-item"><div class="cal-leg-dot" style="background:var(--acc)"></div>Auction</div>
+              <div class="cal-leg-item"><div class="cal-leg-dot" style="background:var(--grn)"></div>Hammer</div>
+              <div class="cal-leg-item"><div class="cal-leg-dot" style="background:var(--red)"></div>Deadline</div>
+            </div>
+          </div>
+          <!-- hidden tooltip -->
+          <div class="cal-tooltip" id="calTooltip" style="display:none"></div>
+
+          <div class="r-divider"></div>
+
+          <!-- ③ CHASE LIST -->
+          <div class="sect-hd">
+            <div class="sect-lbl">
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+              Chase List
+            </div>
+            <span class="sect-meta" id="chaseProgress">0/0</span>
+          </div>
+          <div id="chaseListWrap" style="padding:6px 0 4px"></div>
+          <a href="legalsmegal-workbench.html" class="drill-link" id="wbDrillLink">Open Workbench →</a>
+
+          <div class="r-divider"></div>
+
+          <!-- ④ AREA CONTEXT -->
+          <div class="sect-hd">
+            <div class="sect-lbl">Area Context</div>
+            <span class="sect-meta" id="areaPostcode">—</span>
+          </div>
+          <div style="padding:8px 10px 6px">
+
+            <!-- Area Score -->
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <div style="flex-shrink:0">
+                <svg width="52" height="52" viewBox="0 0 52 52">
+                  <circle cx="26" cy="26" r="21" fill="none" stroke="var(--b2)" stroke-width="4"/>
+                  <circle id="areaArc" cx="26" cy="26" r="21" fill="none" stroke="var(--grn)" stroke-width="4"
+                    stroke-dasharray="0 131.9" stroke-linecap="round" transform="rotate(-90 26 26)"/>
+                  <text id="areaScoreTxt" x="26" y="30" text-anchor="middle"
+                    font-family="IBM Plex Mono,monospace" font-size="12" font-weight="500" fill="var(--tp)">—</text>
+                </svg>
+              </div>
+              <div style="flex:1">
+                <div style="font-family:var(--mono);font-size:8px;font-weight:700;letter-spacing:.04em;margin-bottom:5px" id="areaScorePill">—</div>
+                <div style="display:flex;flex-direction:column;gap:3px">
+                  <div style="display:flex;align-items:center;gap:4px">
+                    <span style="font-family:var(--mono);font-size:7px;color:var(--tt);width:36px">Local</span>
+                    <div style="flex:1;height:3px;background:var(--b2);border-radius:1px"><div id="aScoreLocalBar" style="height:3px;background:var(--acc);border-radius:1px;width:0%"></div></div>
+                    <span style="font-family:var(--mono);font-size:7px;color:var(--tp);width:18px;text-align:right" id="aScoreLocal">—</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:4px">
+                    <span style="font-family:var(--mono);font-size:7px;color:var(--tt);width:36px">Regional</span>
+                    <div style="flex:1;height:3px;background:var(--b2);border-radius:1px"><div id="aScoreRegBar" style="height:3px;background:var(--ts);border-radius:1px;width:0%"></div></div>
+                    <span style="font-family:var(--mono);font-size:7px;color:var(--tp);width:18px;text-align:right" id="aScoreReg">—</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:4px">
+                    <span style="font-family:var(--mono);font-size:7px;color:var(--tt);width:36px">National</span>
+                    <div style="flex:1;height:3px;background:var(--b2);border-radius:1px"><div id="aScoreNatBar" style="height:3px;background:var(--tt);border-radius:1px;width:0%"></div></div>
+                    <span style="font-family:var(--mono);font-size:7px;color:var(--tp);width:18px;text-align:right" id="aScoreNat">—</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Stats grid: Crime / Transport / Flood / Rental -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:6px">
+              <div class="ac-stat">
+                <div class="ac-stat-lbl">Crime / 1k</div>
+                <div class="ac-stat-val" id="aCrimeLocal">—</div>
+                <div class="ac-stat-sub">national: <span id="aCrimeNat">—</span></div>
+              </div>
+              <div class="ac-stat">
+                <div class="ac-stat-lbl">Transport</div>
+                <div class="ac-stat-val" id="aTransportRating">—</div>
+                <div class="ac-stat-sub" id="aTransportStats">—</div>
+              </div>
+              <div class="ac-stat">
+                <div class="ac-stat-lbl">Flood risk</div>
+                <div class="ac-stat-val" id="aFloodRisk">—</div>
+              </div>
+              <div class="ac-stat">
+                <div class="ac-stat-lbl">Rental growth</div>
+                <div class="ac-stat-val grn" id="aRentalGrowth">—</div>
+              </div>
+            </div>
+
+            <!-- Market Activity -->
+            <div style="background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);padding:7px 9px;margin-bottom:6px">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px">
+                <span style="font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--tt)">Market Activity (12mo)</span>
+                <span style="font-family:var(--mono);font-size:7px;color:var(--tt)" id="aMarketYoY">—</span>
+              </div>
+              <div style="font-family:var(--mono);font-size:18px;font-weight:300;letter-spacing:-1px;color:var(--tp);line-height:1" id="aMarketTx">—</div>
+              <div style="font-family:var(--mono);font-size:7px;color:var(--tt);margin-top:1px">transactions · Demand: <span id="aDemandTrend" style="color:var(--grn)">—</span></div>
+            </div>
+
+            <!-- Area summary -->
+            <div style="font-family:var(--mono);font-size:8px;color:var(--tt);line-height:1.5;padding:0 1px" id="aAreaSummary"></div>
+          </div>
+          <a id="areaLink" href="legalsmegal-area.html" class="drill-link">Open Area Intelligence →</a>
+
+        </div><!-- /rs-body -->
+      </div><!-- /rcol -->
+
+    </div><!-- /cockpit -->
+
+    <!-- FOOTER RESIZE HANDLE -->
+    <div class="fbar-resize" id="fbarResize"></div>
+
+    <!-- FOOTER — paper colour, Notes -->
+    <div class="fbar" id="fbar">
+      <div class="fbar-inner">
+        <div class="fbar-label">📝 Notes</div>
+        <textarea class="note-inp" id="noteInp" placeholder="Notes for this deal — printed with the report…" oninput="scheduleNoteSave()"></textarea>
+        <div class="fb-saved" id="fbSaved"></div>
+      </div>
+      <div class="fbar-actions">
+        <button class="fb fb-ghost" onclick="window.print()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6z"/></svg>
+          Print / PDF
+        </button>
+        <button class="fb fb-acc" id="lockSaveBtn" onclick="lockAndSave()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          Lock &amp; Save
+        </button>
+      </div>
+    </div>
+
+  </div><!-- /body-wrap -->
+</div><!-- /shell -->
+
+<!-- NON-MODULE JS -->
+<script>
+const fmt  = n=>n!=null&&!isNaN(n)?'£'+Math.round(n).toLocaleString('en-GB'):'—';
+const fmtP = n=>n!=null&&!isNaN(n)?parseFloat(n).toFixed(1)+'%':'—';
+
+function previewBid(){
+  const v=parseFloat(document.getElementById('bcInput').value)||0;
+  const num=document.getElementById('bidNum'),sub=document.getElementById('bidSub');
+  if(v>1000){num.textContent=fmt(v);num.className='bid-num prev';sub.textContent='Preview — confirm before auction';}
+  else{num.textContent='—';num.className='bid-num empty';sub.textContent='';}
+}
+function lockBid(){
+  const v=parseFloat(document.getElementById('bcInput').value)||0;if(v<1000)return;
+  document.getElementById('bidNum').textContent=fmt(v);document.getElementById('bidNum').className='bid-num live';
+  document.getElementById('bidSub').textContent='Locked';
+  const b=document.getElementById('bidBadge');b.textContent='Locked';b.className='bid-badge locked';
+  document.getElementById('bidUnlocked').style.display='none';document.getElementById('bidLocked').style.display='block';
+  try{localStorage.setItem('ls_bid_'+(window._dealId||'x'),v);}catch(e){}
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({bid_ceiling:v})}).catch(()=>{});
+}
+function unlockBid(){
+  document.getElementById('bidUnlocked').style.display='block';document.getElementById('bidLocked').style.display='none';
+  const b=document.getElementById('bidBadge');b.textContent='Unlocked';b.className='bid-badge unlocked';
+  const v=parseFloat(document.getElementById('bcInput').value)||0;
+  if(v>1000){document.getElementById('bidNum').textContent=fmt(v);document.getElementById('bidNum').className='bid-num prev';}
+}
+function setWatchState(s){
+  ['watch','won','lost'].forEach(p=>{const el=document.getElementById('pill-'+p);if(el)el.classList.remove('on');});
+  const el=document.getElementById('pill-'+s);if(el)el.classList.add('on');
+  const tags=document.getElementById('dhTags');
+  if(tags){const old=tags.querySelector('.hbt.watch,.hbt.won,.hbt.lost');if(old){old.className='hbt '+s;old.textContent=s.charAt(0).toUpperCase()+s.slice(1);}}
+}
+let _hConfirmed=false;
+function toggleHammer(){
+  _hConfirmed=!_hConfirmed;
+  const pre=document.getElementById('hPre'),post=document.getElementById('hPost');
+  const badge=document.getElementById('hammerBadge');
+  const wnHd=document.getElementById('wnHd'),wnSect=document.getElementById('wnSect');
+  if(_hConfirmed){
+    pre.style.display='none';post.style.display='block';
+    const hammerHd=document.getElementById('hammerHd');
+    if(hammerHd)hammerHd.style.background='rgba(62,207,142,.06)';
+    badge.textContent='Fallen';badge.style.cssText='background:var(--gd);border:1px solid rgba(62,207,142,.3);color:var(--grn);font-size:7px;font-weight:700;padding:2px 6px;border-radius:2px;font-family:var(--mono)';
+    wnHd.style.display='';wnSect.classList.add('visible');
+    const now=new Date();
+    const pad=n=>String(n).padStart(2,'0');
+    const todayLocal=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+    window._hammerDate=window._hammerDate||todayLocal;
+    window._calHammerDate=window._hammerDate;
+    updateCountdown();
+    window.renderCalendar();
+    if(window._API_BASE&&window._headers&&window._dealId)
+      fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({outcome:'won',status:'won',hammer_date:window._hammerDate})}).catch(()=>{});
+    try{localStorage.setItem('ls_comp_'+(window._dealId||'x'),'true');}catch(e){}
+  }else{
+    pre.style.display='block';post.style.display='none';
+    const hammerHd2=document.getElementById('hammerHd');
+    if(hammerHd2)hammerHd2.style.background='';
+    badge.textContent='Pre-hammer';badge.style.cssText='background:var(--s3);border:1px solid var(--b1);color:var(--tt);font-size:7px;font-weight:700;padding:2px 6px;border-radius:2px;font-family:var(--mono)';
+    wnHd.style.display='none';wnSect.classList.remove('visible');
+    if(window._API_BASE&&window._headers&&window._dealId)
+      fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({outcome:null,status:'active'})}).catch(()=>{});
+    try{localStorage.removeItem('ls_comp_'+(window._dealId||'x'));}catch(e){}
+  }
+}
+function previewWin(){const v=parseFloat(document.getElementById('winInput').value)||0;const el=document.getElementById('winPrev');if(el)el.textContent=v>1000?fmt(v)+' · Deposit: '+fmt(Math.round(v*.05)):'';}
+function saveWin(){
+  const v=parseFloat(document.getElementById('winInput').value)||0;if(v<1000)return;
+  document.getElementById('wLockedAmt').textContent=fmt(v);
+  document.getElementById('wLockedSub').textContent='Deposit: '+fmt(Math.round(v*.05));
+  document.getElementById('wUnlocked').style.display='none';document.getElementById('wLocked').style.display='block';
+  try{localStorage.setItem('ls_wb_'+(window._dealId||'x'),v);}catch(e){}
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({hammer_price:v})}).catch(()=>{});
+}
+function unlockWin(){document.getElementById('wUnlocked').style.display='block';document.getElementById('wLocked').style.display='none';}
+function setOutcome(o){
+  ['won','lost'].forEach(p=>{const el=document.getElementById('op'+p.charAt(0).toUpperCase()+p.slice(1));if(el)el.classList.remove('on');});
+  const el=document.getElementById('op'+o.charAt(0).toUpperCase()+o.slice(1));if(el)el.classList.add('on');
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({outcome:o})}).catch(()=>{});
+}
+function applyCompPeriod(){
+  updateCountdown();
+  const d=parseInt(document.getElementById('compPeriod').value)||28;
+  // Recompute deadline from hammer date (if fallen) or auction date
+  const anchor=window._calHammerDate||window._calAuctionDate||null;
+  if(anchor){
+    const[ay,am,ad]=anchor.split('-').map(Number);
+    const aDate=new Date(ay,am-1,ad);
+    const dl=new Date(aDate);dl.setDate(aDate.getDate()+d);
+    const pad=n=>String(n).padStart(2,'0');
+    const newDeadline=`${dl.getFullYear()}-${pad(dl.getMonth()+1)}-${pad(dl.getDate())}`;
+    window._calCurrentDeadline=newDeadline;
+    window._calYear=dl.getFullYear();
+    window._calMonth=dl.getMonth();
+    window.renderCalendar();
+  }
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({completion_period:d})}).catch(()=>{});
+  try{localStorage.setItem('ls_cp_'+(window._dealId||'x'),d);}catch(e){}
+}
+function updateCountdown(){
+  const anchorStr=window._hammerDate||window._calAuctionDate||null;
+  if(!anchorStr)return;
+  const[ay,am,ad]=anchorStr.split('-').map(Number);
+  const hammer=new Date(ay,am-1,ad);
+  const period=parseInt(document.getElementById('compPeriod').value)||28;
+  const dl=new Date(hammer);dl.setDate(hammer.getDate()+period);
+  const today=new Date();today.setHours(0,0,0,0);
+  const diff=Math.ceil((dl-today)/86400000);
+  const wnDl=document.getElementById('wnDl');if(wnDl)wnDl.textContent=dl.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+  const daysEl=document.getElementById('cdDays');
+  if(daysEl){daysEl.textContent=diff>0?diff:'Overdue';daysEl.style.color=diff<=3?'var(--red)':diff<=7?'var(--amb)':'var(--grn)';}
+  const lblEl=document.getElementById('cdLbl');if(lblEl)lblEl.textContent=diff>0?'days to completion':'';
+  const dlEl=document.getElementById('cdDlFmt');if(dlEl)dlEl.textContent=dl.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
+  const block=document.getElementById('cdBlock');if(block)block.className='countdown '+(diff<=3?'r':diff<=7?'a':'g');
+}
+function onFrameLoad(){
+  document.getElementById('iframeLoading').style.display='none';
+  document.getElementById('reportFrame').style.display='block';
+  document.getElementById('docMeta').textContent='Loaded';
+}
+function onFrameError(){document.getElementById('iframeLoadingTxt').textContent='Could not load report — open separately';}
+function lockAndSave(){
+  const btn=document.getElementById('lockSaveBtn'),sv=document.getElementById('fbSaved');
+  btn.textContent='Saving…';
+  if(window._API_BASE&&window._headers&&window._dealId)
+    fetch(window._API_BASE+'/api/deals/'+window._dealId,{method:'PATCH',headers:{...window._headers,'Content-Type':'application/json'},body:JSON.stringify({status:'active'})})
+      .then(()=>{btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg> Lock &amp; Save';if(sv)sv.textContent='Saved '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});})
+      .catch(()=>{btn.innerHTML='Save failed';});
+  else btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg> Lock &amp; Save';
+}
+let _nst=null;
+function scheduleNoteSave(){clearTimeout(_nst);const sv=document.getElementById('fbSaved');if(sv)sv.textContent='Unsaved…';_nst=setTimeout(saveNote,1800);}
+function saveNote(){
+  const txt=document.getElementById('noteInp').value||'';
+  try{localStorage.setItem('ls_note_'+(window._dealId||'x'),txt);const el=document.getElementById('fbSaved');if(el)el.textContent='Saved '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});}catch(e){}
+}
+function loadNote(){
+  try{const txt=localStorage.getItem('ls_note_'+(window._dealId||'x'))||'';document.getElementById('noteInp').value=txt;}catch(e){}
+}
+
+// CALENDAR — full implementation
+window._calYear=new Date().getFullYear();
+window._calMonth=new Date().getMonth();
+window._calDeals=[]; // {date, deadline, address, outcome}
+
+function calPrev(){
+  window._calMonth--;
+  if(window._calMonth<0){window._calMonth=11;window._calYear--;}
+  renderCalendar();
+}
+function calNext(){
+  window._calMonth++;
+  if(window._calMonth>11){window._calMonth=0;window._calYear++;}
+  renderCalendar();
+}
+window.calPrev=calPrev;window.calNext=calNext;
+
+function renderCalendar(auctionDateStr,deadlineDateStr,allDeals,hammerDateStr){
+  // Seed state from args only on first call (before navigate-to-deadline override)
+  if(auctionDateStr&&!window._calInitDone){
+    const anchor=new Date(auctionDateStr);
+    window._calYear=anchor.getFullYear();
+    window._calMonth=anchor.getMonth();
+    window._calInitDone=true;
+  }
+  if(allDeals)window._calDeals=allDeals;
+  if(hammerDateStr!==undefined)window._calHammerDate=hammerDateStr;
+
+  const grid=document.getElementById('calGrid');if(!grid)return;
+  const year=window._calYear,month=window._calMonth;
+  const today=new Date();today.setHours(0,0,0,0);
+
+  // Update header
+  const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const mnEl=document.getElementById('calMonthName'),yrEl=document.getElementById('calYearName');
+  if(mnEl)mnEl.textContent=MONTHS[month];
+  if(yrEl)yrEl.textContent=year;
+
+  const firstDay=new Date(year,month,1);
+  const lastDay=new Date(year,month+1,0);
+  const startDow=firstDay.getDay(); // Sun=0
+
+  // Build date→deals map for this month
+  const dateMap={};
+  (window._calDeals||[]).forEach(d=>{
+    if(d.auction_date){
+      const[ay,am,ad2]=d.auction_date.split('-').map(Number);
+      if(ay===year&&am-1===month){
+        const key=ad2;
+        if(!dateMap[key])dateMap[key]=[];
+        dateMap[key].push({type:'auction',deal:d});
+      }
+    }
+    if(d._deadline){
+      const[dy,dm,dd2]=d._deadline.split('-').map(Number);
+      if(dy===year&&dm-1===month){
+        const key=dd2;
+        if(!dateMap[key])dateMap[key]=[];
+        dateMap[key].push({type:'deadline',deal:d});
+      }
+    }
+  });
+
+  // Current deal highlights
+  // Parse a YYYY-MM-DD string as LOCAL date (avoids UTC→BST off-by-one)
+  const parseLocal=s=>{if(!s)return null;const[y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d);};
+
+  const curAuction=auctionDateStr||window._calCurrentAuction;
+  const curDeadline=deadlineDateStr||window._calCurrentDeadline;
+  if(auctionDateStr)window._calCurrentAuction=auctionDateStr;
+  if(deadlineDateStr)window._calCurrentDeadline=deadlineDateStr;
+
+  const aDate=parseLocal(curAuction);
+  const dDate=parseLocal(curDeadline);
+  const hDate=parseLocal(window._calHammerDate);
+
+  const DOWS=['S','M','T','W','T','F','S'];
+  let html='<div class="cal-grid">';
+  DOWS.forEach(d=>{html+=`<div class="cal-dow">${d}</div>`;});
+  // Empty cells before first day
+  for(let i=0;i<startDow;i++)html+='<div class="cal-day empty"></div>';
+
+  for(let d=1;d<=lastDay.getDate();d++){
+    const thisDate=new Date(year,month,d);
+    const entries=dateMap[d]||[];
+    const isToday=thisDate.getTime()===today.getTime();
+    const isCurAuction=aDate&&thisDate.getTime()===aDate.getTime();
+    const isCurDeadline=dDate&&thisDate.getTime()===dDate.getTime();
+    const isCurHammer=hDate&&thisDate.getTime()===hDate.getTime();
+    const isPast=thisDate<today;
+    let cls='cal-day';
+    if(!isToday&&!isCurAuction&&!isCurDeadline&&!isCurHammer&&isPast)cls+=' other';
+    if(isToday&&!isCurAuction&&!isCurDeadline&&!isCurHammer)cls+=' today';
+    if(isCurHammer&&!isCurDeadline)cls+=' hammer';
+    if(isCurAuction&&!isCurHammer)cls+=' auction';
+    if(isCurDeadline&&!isCurAuction&&!isCurHammer)cls+=' deadline';
+    if(isCurDeadline&&isCurHammer)cls+=' hammer deadline';
+    if(entries.length>0&&!isCurAuction&&!isCurDeadline&&!isCurHammer)cls+=' deal-dot';
+    // Build tooltip data attr
+    const tipParts=[];
+    entries.forEach(e=>{
+      const addr=e.deal.address||e.deal.deal_name||'Unknown';
+      const oc=e.deal.outcome||'active';
+      tipParts.push(`${e.type==='auction'?'🔨':'📋'} ${addr} (${oc})`);
+    });
+    if(isCurAuction&&window._currentDeal){tipParts.unshift('🔨 '+((window._currentDeal.summary_json?.property?.address)||window._currentDeal.deal_name||'This deal')+' — Auction');}
+    if(isCurHammer&&window._currentDeal){tipParts.unshift('🟢 '+((window._currentDeal.summary_json?.property?.address)||window._currentDeal.deal_name||'This deal')+' — Hammer fallen');}
+    if(isCurDeadline&&window._currentDeal){tipParts.push('📋 '+((window._currentDeal.summary_json?.property?.address)||window._currentDeal.deal_name||'This deal')+' — Completion deadline');}
+    const tip=tipParts.join('\n');
+    const dataAttr=tip?` data-tip="${tip.replace(/"/g,'&quot;')}"` : '';
+    html+=`<div class="${cls}"${dataAttr}><span>${d}</span></div>`;
+  }
+  html+='</div>';
+  grid.innerHTML=html;
+
+  // Attach tooltip listeners
+  const tooltip=document.getElementById('calTooltip');
+  if(tooltip){
+    grid.querySelectorAll('.cal-day[data-tip]').forEach(el=>{
+      el.addEventListener('mouseenter',function(e){
+        tooltip.textContent=this.dataset.tip;
+        tooltip.style.display='block';
+        const r=this.getBoundingClientRect();
+        tooltip.style.left=(r.left-tooltip.offsetWidth-6)+'px';
+        tooltip.style.top=(r.top)+'px';
+      });
+      el.addEventListener('mousemove',function(e){
+        tooltip.style.left=(e.clientX-tooltip.offsetWidth-10)+'px';
+        tooltip.style.top=(e.clientY-10)+'px';
+      });
+      el.addEventListener('mouseleave',function(){tooltip.style.display='none';});
+    });
+  }
+}
+window.renderCalendar=renderCalendar;
+
+// MINI WATERFALL
+// renderMiniWF removed
+
+// CAPITAL STACK — text table matching Financials _renderWF
+// Source: deal.financials_json (loaded with the deal row at page open)
+// Guard: purchase_price < 10000 → placeholder (catches legacy _gbp /100 corruption)
+function renderFinStack(fj, ceilVal) {
+  const el = document.getElementById('finStackCard');
+  if (!el) return;
+  const _fj = (fj && fj.inputs) ? fj.inputs : (fj || {});
+  const price = Number(_fj.purchase_price) >= 10000 ? Number(_fj.purchase_price) : 0;
+  if (!price) {
+    el.innerHTML = '<div style="color:var(--tt);font-size:7px;padding:2px 0">— save price in Financial Model —</div>';
+    return;
+  }
+  const prem=(Number(_fj.buyers_premium_pct)||0)/100,
+        adm=Number(_fj.admin_fee)||350,
+        leg=Number(_fj.legal_fees)||0,
+        surv=Number(_fj.survey_cost)||0,
+        ref=Number(_fj.renovation_cost)||0,
+        bri=Number(_fj.bridging)||0,
+        ins=Number(_fj.insurance)||800,
+        ltv=(Number(_fj.ltv_pct)||75)/100,
+        sdlt=Number(_fj.stamp_duty)||0,
+        ceil=Number(ceilVal)>0?Number(ceilVal):0;
+  const acq=Math.round(price*prem)+adm+sdlt+leg+surv+ref+bri+ins,
+        tot=price+acq,
+        debt=Math.round(price*ltv),
+        eq=price-debt,
+        cash=eq+acq,
+        hdm=ceil>0?ceil-tot:null;
+  const K=n=>{if(n==null||isNaN(n))return'—';const a=Math.abs(Math.round(n)),s=n<0?'-£':'£';return a>=1e6?s+(a/1e6).toFixed(1)+'m':a>=1e5?s+Math.round(a/1e3)+'k':a>=1e4?s+(a/1e3).toFixed(0)+'k':a>=1e3?s+(a/1e3).toFixed(1)+'k':s+a.toLocaleString('en-GB');};
+  const R='display:flex;justify-content:space-between;padding:2px;border-bottom:1px solid var(--b1)',
+        L='color:var(--tt);font-size:7px',V='font-weight:700;font-size:8px',
+        hc=hdm==null?'var(--tt)':hdm>=0?'var(--grn)':'var(--red)';
+  let h='';
+  [['Price',K(price),'color:var(--acc)'],['Acq. costs',K(acq),''],['Total cost',K(tot),'color:var(--ts)'],['Debt ('+Math.round(ltv*100)+'%)',K(debt),'color:#a78bfa'],['Equity ('+Math.round((1-ltv)*100)+'%)',K(eq),'color:#3ecf8e'],['Cash req.',K(cash),'color:#4a9eff']].forEach(([l,v,s])=>h+=`<div style="${R}"><span style="${L}">${l}</span><span style="${V};${s}">${v}</span></div>`);
+  if(ceil>0){
+    h+=`<div style="padding:2px 0 0"><span style="${L};font-size:6px;text-transform:uppercase;letter-spacing:.06em">Current val – risk</span></div>`;
+    h+=`<div style="${R}"><span style="${L}">Ceiling</span><span style="${V};color:#d6a93e">${K(ceil)}</span></div>`;
+    if(hdm!=null)h+=`<div style="${R}"><span style="${L}">Headroom</span><span style="${V};color:${hc}">${hdm>=0?'+':''}${K(hdm)}</span></div>`;
+  }
+  el.innerHTML=h;
+}
+window.renderFinStack=renderFinStack;
+
+// DONUT
+function renderDonut(ptCounts){
+  const svg=document.getElementById('donutSvg'),leg=document.getElementById('donutLegend'),wrap=document.getElementById('donutWrap');
+  if(!svg||!ptCounts)return;
+  const abbrev=k=>{const s=(k||'').toLowerCase();if(s.includes('detach')&&!s.includes('semi'))return'Detached';if(s.includes('semi'))return'Semi-det';if(s.includes('terrace'))return'Terraced';if(s.includes('flat')||s.includes('maisonette'))return'Flat';return k.slice(0,8);};
+  const entries=Object.entries(ptCounts).map(([k,v])=>[abbrev(k),Number(v)||0]).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+  if(!entries.length)return;
+  const total=entries.reduce((s,[,v])=>s+v,0);
+  const COLS=['#c8a84b','#3ecf8e','#4a9eff','#e8943a','#e05c5c'];
+  const CX=28,CY=28,R=22,IR=14;
+  let svgOut='',legOut='',angle=-Math.PI/2;
+  entries.forEach(([lbl,cnt],i)=>{
+    const slice=(cnt/total)*Math.PI*2;
+    const x1=CX+R*Math.cos(angle),y1=CY+R*Math.sin(angle);
+    const x2=CX+R*Math.cos(angle+slice),y2=CY+R*Math.sin(angle+slice);
+    const xi1=CX+IR*Math.cos(angle),yi1=CY+IR*Math.sin(angle);
+    const xi2=CX+IR*Math.cos(angle+slice),yi2=CY+IR*Math.sin(angle+slice);
+    const large=slice>Math.PI?1:0,col=COLS[i%COLS.length];
+    svgOut+=`<path d="M${xi1.toFixed(1)},${yi1.toFixed(1)} L${x1.toFixed(1)},${y1.toFixed(1)} A${R},${R} 0 ${large},1 ${x2.toFixed(1)},${y2.toFixed(1)} L${xi2.toFixed(1)},${yi2.toFixed(1)} A${IR},${IR} 0 ${large},0 ${xi1.toFixed(1)},${yi1.toFixed(1)} Z" fill="${col}" opacity="0.85"/>`;
+    legOut+=`<div class="dl-row"><div class="dl-dot" style="background:${col}"></div>${lbl}<span style="margin-left:auto;color:var(--ts)">${Math.round(cnt/total*100)}%</span></div>`;
+    angle+=slice;
+  });
+  svg.innerHTML=svgOut;if(leg)leg.innerHTML=legOut;if(wrap)wrap.style.display='flex';
+}
+
+// CALCULATOR
+function calcRun(){
+  const price=parseFloat(document.getElementById('calcPrice').value)||0;
+  const depositPct=parseFloat(document.getElementById('calcDeposit').value)||25;
+  const rent=parseFloat(document.getElementById('calcRent').value)||0;
+  const rate=parseFloat(document.getElementById('calcRate').value)||5.5;
+  const fmtV=n=>n!=null&&!isNaN(n)?'£'+Math.round(n).toLocaleString('en-GB'):'—';
+  const fmtP=n=>n!=null&&!isNaN(n)?parseFloat(n).toFixed(1)+'%':'—';
+  const set=(id,v,cls)=>{const el=document.getElementById(id);if(el){el.textContent=v;el.className='calc-val'+(cls?' '+cls:'');}};
+  if(!price||!rent){set('cGY','—','');set('cNY','—','');set('cMortgage','—','');set('cCF','—','');set('cROI','—','');set('cLTV','—','');return;}
+  const annRent=rent*12;
+  const grossYield=annRent/price*100;
+  const expenses=annRent*0.25; // 25% allowance
+  const netAnnRent=annRent-expenses;
+  const netYield=netAnnRent/price*100;
+  const loan=price*(1-depositPct/100);
+  const monthlyRate=rate/100/12;
+  const term=25*12;
+  const mortgage=loan>0&&monthlyRate>0?loan*monthlyRate*Math.pow(1+monthlyRate,term)/(Math.pow(1+monthlyRate,term)-1):0;
+  const cf=rent-mortgage;
+  const deposit=price*depositPct/100;
+  const annROI=deposit>0?(netAnnRent-mortgage*12)/deposit*100:0;
+  const ltv=price>0?loan/price*100:0;
+  set('cGY',fmtP(grossYield),'acc');
+  set('cNY',fmtP(netYield),'');
+  set('cMortgage',fmtV(mortgage),'');
+  set('cCF',fmtV(cf),cf>=0?'pos':'neg');
+  set('cROI',fmtP(annROI),annROI>=0?'acc':'neg');
+  set('cLTV',fmtP(ltv),'');
+}
+window.calcRun=calcRun;
+
+// ── CHASE LIST — synced with workbench via localStorage ──────────────────
+const CHASE_CATEGORIES=[
+  {id:'solicitor', label:'Solicitor',      color:'#7C3AED',
+   tasks:['Chase title query response','Request search results','Confirm special conditions review','Get indemnity insurance quote','Chase completion timeline confirmation']},
+  {id:'auctioneer',label:'Auctioneer',     color:'#e8943a',
+   tasks:["Confirm VP / tenanted status","Ask buyer's premium % and admin fee","Check for addendum or updated legal pack","Confirm auction date and time","Ask about reserve and guide price rationale"]},
+  {id:'lender',    label:'Lender / Broker',color:'#3B82F6',
+   tasks:['Get Decision in Principle','Confirm valuation instruction sent','Chase mortgage offer letter','Confirm completion date achievable','Check ICR / RCR stress test result']},
+  {id:'surveyor',  label:'Surveyor',       color:'#10B981',
+   tasks:['Instruct structural survey','Chase survey report','Confirm coal mining / drainage check','Get refurb cost estimate']},
+  {id:'own',       label:'My actions',     color:'#3ecf8e',
+   tasks:['Viewed property in person','Checked planning history on portal','Confirmed insurance available','Checked comparable sales','Set auction day reminder']}
+];
+function chaseKey(){return'ls_chase_'+(window._dealId||'unknown');}
+function loadChaseState(){try{return JSON.parse(localStorage.getItem(chaseKey())||'{}');}catch(e){return{};}}
+function saveChaseState(s){try{localStorage.setItem(chaseKey(),JSON.stringify(s));}catch(e){}}
+
+function renderChaseList(){
+  const wrap=document.getElementById('chaseListWrap');
+  const prog=document.getElementById('chaseProgress');
+  if(!wrap)return;
+  const state=loadChaseState();
+  let totalDone=0,totalAll=0,html='';
+  // Determine which cat is open — first one by default
+  const openId=window._chaseOpenId||(window._chaseOpenId=CHASE_CATEGORIES[0].id);
+  CHASE_CATEGORIES.forEach(cat=>{
+    const cs=state[cat.id]||{};
+    const tasks=cs.tasks||cat.tasks.slice();
+    const done=cs.done||{};
+    const doneCount=tasks.filter((_,i)=>done[i]).length;
+    totalDone+=doneCount;totalAll+=tasks.length;
+    const isOpen=cat.id===openId;
+    const pct=tasks.length?Math.round(doneCount/tasks.length*100):0;
+    html+=`<div class="chase-cat">
+      <div class="chase-cat-hd" onclick="toggleChaseCat('${cat.id}')">
+        <div class="chase-cat-dot" style="background:${cat.color}"></div>
+        ${cat.label}
+        <span class="chase-cat-count">${doneCount}/${tasks.length}</span>
+        <svg class="chase-cat-chev" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="transform:rotate(${isOpen?'0':'-90'}deg)"><path d="M6 9l6 6 6-6"/></svg>
+      </div>
+      <div class="chase-progress-bar"><div class="chase-progress-fill" style="width:${pct}%;background:${cat.color}"></div></div>
+      <div class="chase-body ${isOpen?'open':''}" id="cb-${cat.id}">`;
+    tasks.forEach((t,i)=>{
+      const isDone=!!done[i];
+      html+=`<div class="chase-task">
+        <div class="chase-cb ${isDone?'done':''}" onclick="toggleChaseTask('${cat.id}',${i})">
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <span class="chase-task-txt ${isDone?'done':''}">${t}</span>
+      </div>`;
+    });
+    html+='</div></div>';
+  });
+  wrap.innerHTML=html;
+  if(prog)prog.textContent=totalDone+'/'+totalAll;
+}
+
+function toggleChaseCat(catId){
+  window._chaseOpenId=(window._chaseOpenId===catId)?null:catId;
+  renderChaseList();
+}
+
+function toggleChaseTask(catId,idx){
+  const state=loadChaseState();
+  if(!state[catId])state[catId]={};
+  if(!state[catId].done)state[catId].done={};
+  state[catId].done[idx]=!state[catId].done[idx];
+  saveChaseState(state);
+  renderChaseList();
+}
+window.renderChaseList=renderChaseList;
+window.toggleChaseCat=toggleChaseCat;
+window.toggleChaseTask=toggleChaseTask;
+
+// WHAT NEXT TASKS — checkable, persisted to localStorage
+function wnTaskKey(){return'ls_wntasks_'+(window._dealId||'x');}
+function loadWnTasks(){try{return JSON.parse(localStorage.getItem(wnTaskKey())||'{}');}catch(e){return{};}}
+function saveWnTasks(s){try{localStorage.setItem(wnTaskKey(),JSON.stringify(s));}catch(e){}}
+function renderWnTasks(){
+  const state=loadWnTasks();
+  for(let i=0;i<4;i++){
+    const cb=document.getElementById('wnt-'+i);
+    const lbl=document.getElementById('wntl-'+i);
+    const done=!!state[i];
+    if(cb){cb.className='wn-cb'+(done?' done':'');}
+    if(lbl){lbl.className='wn-task-txt'+(done?' done':'');}
+  }
+}
+function toggleWnTask(idx){
+  const state=loadWnTasks();
+  state[idx]=!state[idx];
+  saveWnTasks(state);
+  renderWnTasks();
+}
+window.toggleWnTask=toggleWnTask;
+window.renderWnTasks=renderWnTasks;
+
+// EXPOSE GLOBALS
+window.previewBid=previewBid;window.lockBid=lockBid;window.unlockBid=unlockBid;
+window.setWatchState=setWatchState;window.toggleHammer=toggleHammer;
+window.previewWin=previewWin;window.saveWin=saveWin;window.unlockWin=unlockWin;
+window.setOutcome=setOutcome;window.applyCompPeriod=applyCompPeriod;
+window.updateCountdown=updateCountdown;window.onFrameLoad=onFrameLoad;
+window.onFrameError=onFrameError;window.lockAndSave=lockAndSave;
+window.scheduleNoteSave=scheduleNoteSave;window.loadNote=loadNote;
+
+// ── renderVerdictMiniWF ──────────────────────────────────────────────────────
+// Compact version of Verdict _renderWaterfall:
+//   start = comparable_valuation
+//   reduction bars = severity buckets from workbench_ceiling.legal_pack_value_risks.risks
+//     (critical / high / missing / other — same four fixed buckets as Verdict)
+//   end = risk_adjusted_value
+// Data: wc = sj.workbench_ceiling (or verdict_ceiling as fallback)
+function renderVerdictMiniWF(wc) {
+  const svg = document.getElementById('wfVerdictSvg'); if (!svg) return;
+  const fmtK = v => { const a=Math.abs(Math.round(v)); const s=v<0?'-£':'£'; return a>=100000?s+Math.round(a/1000)+'k':a>=1000?s+(a/1000).toFixed(1)+'k':s+a; };
+
+  // Extract canonical values from workbench_ceiling
+  const comparableVal = Number(
+    (wc && wc.comparable_valuation) ||
+    (wc && wc.base_valuation) ||
+    (wc && wc.base && wc.base.value) || 0
+  );
+  const riskAdjVal = Number(
+    (wc && wc.risk_adjusted_value != null ? wc.risk_adjusted_value : null) ||
+    (wc && wc.valuation_range && wc.valuation_range.midpoint != null ? wc.valuation_range.midpoint : null) ||
+    comparableVal || 0
+  );
+
+  if (comparableVal <= 0) {
+    svg.innerHTML = '<text x="110" y="48" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="8" fill="#3d5068">No valuation data</text>';
+    return;
+  }
+
+  const base = Math.round(comparableVal);
+  const rav  = Math.round(riskAdjVal);
+  const totalReduction = Math.max(0, base - rav);
+
+  // Build four fixed severity buckets (same as Verdict page)
+  const rawRisks = (wc && wc.legal_pack_value_risks && Array.isArray(wc.legal_pack_value_risks.risks))
+    ? wc.legal_pack_value_risks.risks.filter(r => r.value_adjustment > 0)
+    : [];
+  const steps = [];
+  if (rawRisks.length > 0 && totalReduction > 0) {
+    const bkt = {critical:0, high:0, missing:0, note:0};
+    rawRisks.forEach(r => {
+      const s = (r.severity||'note').toLowerCase();
+      if      (s==='critical') bkt.critical += r.value_adjustment;
+      else if (s==='high')     bkt.high     += r.value_adjustment;
+      else if (s==='missing')  bkt.missing  += r.value_adjustment;
+      else                     bkt.note     += r.value_adjustment;
+    });
+    const defs = [
+      {key:'critical', label:'Critical',  col:'#e05c5c'},
+      {key:'high',     label:'High',      col:'#e8943a'},
+      {key:'missing',  label:'Missing',   col:'#e8943a'},
+      {key:'note',     label:'Other',     col:'#8fa1bb'},
+    ];
+    const active = defs.filter(d => bkt[d.key] > 0);
+    const sumAdj = active.reduce((s,d) => s + bkt[d.key], 0);
+    let allocated = 0;
+    active.forEach((d, i) => {
+      const amt = i === active.length - 1
+                  ? totalReduction - allocated
+                  : Math.round(totalReduction * bkt[d.key] / sumAdj);
+      allocated += amt;
+      if (amt > 0) steps.push({label: d.label, amount: amt, col: d.col});
+    });
+  } else if (totalReduction > 0) {
+    steps.push({label:'Risk', amount: totalReduction, col:'#e8943a'});
+  }
+
+  // Layout: 220×90, padL=2, axisY=72, padT=10
+  const W=220, padL=2, padR=2, padT=10, axisY=72;
+  const chartW = W - padL - padR;
+  const nReduction = Math.max(1, steps.length);
+  const nSlots = 1 + nReduction + 1;
+  const yMax = (function(v){if(!v||v<=0)return 1;const p=Math.pow(10,Math.floor(Math.log10(v)));const n=v/p;return(n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10)*p;})(base * 1.08);
+  const pxPU = (axisY - padT) / yMax;
+  const yOf = v => axisY - v * pxPU;
+
+  const stdSlotW  = chartW / (nSlots - 1 + 1.3);
+  const endSlotW  = stdSlotW * 1.3;
+  const barW      = Math.max(10, Math.min(24, stdSlotW * 0.72));
+  const endBarW   = Math.max(12, Math.min(26, endSlotW * 0.72));
+  const slotX = i => {
+    const bw = i === nSlots-1 ? endBarW : barW;
+    return (i < nSlots-1 ? padL + i * stdSlotW : padL + (nSlots-1)*stdSlotW) + (stdSlotW - bw)/2;
+  };
+  const bwOf = i => i === nSlots-1 ? endBarW : barW;
+
+  let out = '';
+  // Grid
+  for (let g=1;g<=3;g++){const gy=yOf(yMax*(g/4));out+=`<line x1="${padL}" y1="${gy}" x2="${W-padR}" y2="${gy}" stroke="#1c2530" stroke-width="0.5"/>`;}
+  out += `<line x1="${padL}" y1="${axisY}" x2="${W-padR}" y2="${axisY}" stroke="#243040" stroke-width="0.5"/>`;
+
+  // Bar 0: Comparable valuation (green)
+  const x0=slotX(0), b0=bwOf(0), startY=yOf(base);
+  out+=`<rect x="${x0}" y="${startY}" width="${b0}" height="${Math.max(1,axisY-startY)}" fill="#3ecf8e" rx="1"/>`;
+  out+=`<text x="${x0+b0/2}" y="${startY-2}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="6" fill="#3ecf8e">${fmtK(base)}</text>`;
+  out+=`<text x="${x0+b0/2}" y="${axisY+8}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="5.5" fill="#3d5068">Comp val</text>`;
+
+  // Reduction bars
+  let running = base;
+  for (let ri=0; ri<nReduction; ri++) {
+    const si = ri+1;
+    const xi = slotX(si), bwi = bwOf(si);
+    const step = steps[ri];
+    const drop = step ? step.amount : 0;
+    const col  = step ? step.col : '#526882';
+    const prevX = slotX(si-1), prevB = bwOf(si-1);
+    // Connector
+    out+=`<line x1="${prevX+prevB}" y1="${yOf(running)}" x2="${xi}" y2="${yOf(running)}" stroke="#3d5068" stroke-width="0.5" stroke-dasharray="2,1"/>`;
+    if (drop > 0) {
+      const dTop=yOf(running), dH=Math.max(1, yOf(running-drop)-dTop);
+      out+=`<rect x="${xi}" y="${dTop}" width="${bwi}" height="${dH}" fill="${col}" rx="1"/>`;
+      out+=`<text x="${xi+bwi/2}" y="${dTop-2}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="5.5" fill="${col}">−${fmtK(drop)}</text>`;
+    } else {
+      out+=`<rect x="${xi}" y="${yOf(running)-1}" width="${bwi}" height="1.5" fill="${col}" rx="0.5" opacity="0.4"/>`;
+    }
+    const lbl = step ? step.label : '—';
+    out+=`<text x="${xi+bwi/2}" y="${axisY+8}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="5.5" fill="#3d5068">${lbl}</text>`;
+    running -= drop;
+  }
+
+  // End bar: Current val - risk (gold/hatch)
+  const ei=nSlots-1, xe=slotX(ei), bwe=bwOf(ei), eMidX=xe+bwe/2;
+  const prevXe=slotX(ei-1), prevBe=bwOf(ei-1);
+  out+=`<line x1="${prevXe+prevBe}" y1="${yOf(running)}" x2="${xe}" y2="${yOf(running)}" stroke="#3d5068" stroke-width="0.5" stroke-dasharray="2,1"/>`;
+  if (rav > 0) {
+    const cy=yOf(rav), solidY=yOf(Math.min(base,rav)), solidH=axisY-solidY, hatchH=Math.max(0,solidY-cy);
+    out+=`<defs><pattern id="drVHatch" patternUnits="userSpaceOnUse" width="4" height="4" patternTransform="rotate(45)"><rect width="4" height="4" fill="#d6a93e" opacity="0.85"/><line x1="0" y1="0" x2="0" y2="4" stroke="#0e1828" stroke-width="1.5"/></pattern></defs>`;
+    if(solidH>0) out+=`<rect x="${xe}" y="${solidY}" width="${bwe}" height="${solidH}" fill="#d6a93e" rx="1"/>`;
+    if(hatchH>0) out+=`<rect x="${xe}" y="${cy}" width="${bwe}" height="${hatchH}" fill="url(#drVHatch)"/>`;
+    out+=`<text x="${eMidX}" y="${Math.min(cy,yOf(base))-3}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="6" font-weight="600" fill="#d6a93e">${fmtK(rav)}</text>`;
+    const diff=rav-base;
+    out+=`<text x="${eMidX}" y="${axisY+8}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="5" fill="${diff>=0?'#3ecf8e':'#e05c5c'}">${diff>=0?'+':''}${fmtK(diff)}</text>`;
+  } else {
+    out+=`<rect x="${xe}" y="${yOf(base*0.5)}" width="${bwe}" height="${Math.max(1,axisY-yOf(base*0.5))}" fill="#1d2a41" rx="1" stroke="#526882" stroke-width="0.5" stroke-dasharray="3,2"/>`;
+  }
+  out+=`<text x="${eMidX}" y="${axisY+14}" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="5" fill="#3d5068">Risk adj</text>`;
+  svg.innerHTML = out;
+}
+
+window.renderDonut=renderDonut;
+
+// FOOTER RESIZE
+(function(){
+  const handle=document.getElementById('fbarResize'),fbar=document.getElementById('fbar');
+  if(!handle||!fbar)return;
+  let dragging=false,startY=0,startH=0;
+  handle.addEventListener('mousedown',function(e){dragging=true;startY=e.clientY;startH=fbar.offsetHeight;document.body.style.userSelect='none';e.preventDefault();});
+  document.addEventListener('mousemove',function(e){if(!dragging)return;const newH=Math.min(Math.max(startH+(startY-e.clientY),36),window.innerHeight*0.5);fbar.style.height=newH+'px';});
+  document.addEventListener('mouseup',function(){dragging=false;document.body.style.userSelect='';});
+})();
+</script>
+
+<!-- MODULE: DATA LOAD -->
+<script type="module">
+import{createClient}from'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+const SUPABASE_URL='https://qdgxmwdvmfrcicgpukhs.supabase.co';
+const SUPABASE_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkZ3htd2R2bWZyY2ljZ3B1a2hzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk1MTY3MzIsImV4cCI6MjA3NTA5MjczMn0.Xpw9u14JWCcTkhkxgt5YzeLfNMG5rGWo4R_C7zRwz-c';
+const API_BASE='https://legal-smegal-api-final.onrender.com';
+window._API_BASE=API_BASE;
+const sb=createClient(SUPABASE_URL,SUPABASE_ANON);
+const{data:{session}}=await sb.auth.getSession();
+if(!session){window.location.href='legalsmegal-signin.html';}
+const headers={'Authorization':'Bearer '+session.access_token};
+window._headers=headers;
+const params=new URLSearchParams(window.location.search);
+const dealId=params.get('deal_id');
+window._dealId=dealId;
+const fmt=n=>n!=null&&!isNaN(n)?'£'+Math.round(n).toLocaleString('en-GB'):'—';
+const fmtP=n=>n!=null&&!isNaN(n)?parseFloat(n).toFixed(1)+'%':'—';
+
+function wireLinks(){document.querySelectorAll('a[href*="legalsmegal-"]').forEach(a=>{const h=a.getAttribute('href')||'';if(!h.includes('deal_id=')&&!h.includes('signin')&&dealId)a.href=h+(h.includes('?')?'&':'?')+'deal_id='+dealId;});}
+
+async function load(){
+  if(!dealId){window.location.href='legalsmegal-dashboard.html';return;}
+  let deal;
+  try{
+    const r=await fetch(`${API_BASE}/api/deals/${dealId}`,{headers});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();deal=d.deal||d;
+    if(!deal)throw new Error('no data');
+  }catch(e){document.getElementById('dhAddr').textContent='Could not load: '+e.message;return;}
+
+  window._currentDeal=deal;
+  const sj=deal.summary_json||{},prop=sj.property||{};
+  const area=deal.area_json||{},fj=deal.financials_json||{};
+  const addr=prop.address||deal.address||deal.deal_name||'—';
+  window._hammerDate=deal.hammer_date||deal.auction_date;
+
+  // HEADER
+  const nc=document.getElementById('navCtxAddr');if(nc)nc.textContent=addr;
+  document.title='Deal Report — '+addr;
+  document.getElementById('dhAddr').textContent=addr;
+  const tags=document.getElementById('dhTags');
+  if(tags){
+    const ts=[prop.lot_number?'Lot '+prop.lot_number:null,prop.tenure,prop.type].filter(Boolean);
+    const oc=deal.outcome||'watch';
+    tags.innerHTML=ts.map(t=>`<span class="hbt">${t}</span>`).join('')+`<span class="hbt ${oc}">${oc.charAt(0).toUpperCase()+oc.slice(1)}</span>`;
+  }
+  if(deal.auction_date){
+    const ds=new Date(deal.auction_date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+    const el=document.getElementById('dhDate');if(el)el.textContent=ds;
+    const wa=document.getElementById('wnAuct');if(wa)wa.textContent=ds;
+  }
+  document.getElementById('dhScore').textContent=deal.deal_score??'—';
+  if(deal.guide_price)document.getElementById('dhGuide').textContent=fmt(deal.guide_price);
+  const oc=deal.outcome;
+  document.getElementById('dhStatTxt').textContent=oc?oc.charAt(0).toUpperCase()+oc.slice(1):'Active';
+  document.getElementById('dhDot').style.background=oc==='won'?'var(--grn)':oc==='lost'?'var(--red)':'var(--acc)';
+
+  // USER
+  const email=session.user?.email||'';
+  document.getElementById('bidAvatar').textContent=email?email.slice(0,2).toUpperCase():'—';
+  document.getElementById('bidUsername').textContent=email||'Analyst';
+
+  // BID
+  const savedBid=parseFloat(localStorage.getItem('ls_bid_'+dealId))||deal.bid_ceiling||0;
+  if(savedBid>0){document.getElementById('bcInput').value=savedBid;window.lockBid();}
+  if(oc==='won')window.setWatchState('won');else if(oc==='lost')window.setWatchState('lost');else window.setWatchState('watch');
+
+  // HAMMER STATE
+  const sp=localStorage.getItem('ls_cp_'+dealId)||deal.completion_period;
+  if(sp){const sel=document.getElementById('compPeriod');if(sel){const o=Array.from(sel.options).find(x=>x.value===String(sp));if(o)sel.value=o.value;}}
+  if(oc==='won'||localStorage.getItem('ls_comp_'+dealId)==='true'){
+    window._hConfirmed=false;window.toggleHammer();
+    const sw=parseFloat(localStorage.getItem('ls_wb_'+dealId))||deal.hammer_price||0;
+    if(sw>0){const wi=document.getElementById('winInput');if(wi){wi.value=sw;window.saveWin();}}
+    if(oc==='won')window.setOutcome('won');else if(oc==='lost')window.setOutcome('lost');
+  }
+  window.updateCountdown();
+  window.renderWnTasks();
+
+  // FLAGS (left col)
+  const counts=sj.flag_counts||{};
+  const fc=counts.critical||0,fh=counts.high||0,fm=counts.missing||0,fn=counts.note||0;
+  const setFc=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v??0;};
+  setFc('fcC',fc);setFc('fcH',fh);setFc('fcM',fm);setFc('fcN',fn);
+  const ft=fc+fh+fm+fn;
+  if(ft>0){
+    const fv=[fc,fh,fm,fn];
+    ['C','H','M','N'].forEach((k,i)=>{const el=document.getElementById('sev'+k);if(el)el.style.width=Math.round(fv[i]/ft*100)+'%';});
+  }
+
+  // CALENDAR — use window._hammerDate (set by toggleHammer if won) or deal dates
+  // IMPORTANT: toggleHammer() fires before this block, so window._hammerDate is already set
+  const effectiveHammerDate=window._hammerDate||deal.hammer_date||null;
+  const anchorDateStr=effectiveHammerDate||deal.auction_date||null;
+  let deadlineStr=null;
+  const pad=n=>String(n).padStart(2,'0');
+  if(anchorDateStr){
+    const[ay,am,ad]=anchorDateStr.split('-').map(Number);
+    const anchorLocal=new Date(ay,am-1,ad);
+    const period=parseInt(document.getElementById('compPeriod')?.value)||28;
+    const dl=new Date(anchorLocal);dl.setDate(anchorLocal.getDate()+period);
+    deadlineStr=`${dl.getFullYear()}-${pad(dl.getMonth()+1)}-${pad(dl.getDate())}`;
+  }
+  // Store effective dates — do NOT overwrite _hammerDate set by toggleHammer
+  window._calHammerDate=effectiveHammerDate;
+  window._calAuctionDate=deal.auction_date||null;
+  // Fetch all user deals for pipeline overlay
+  let allDeals=[];
+  try{
+    const dr=await fetch(`${API_BASE}/api/deals`,{headers});
+    if(dr.ok){
+      const dd=await dr.json();
+      const list=Array.isArray(dd)?dd:(dd.deals||[]);
+      allDeals=list.map(d=>{
+        const p=parseInt(d.completion_period)||28;
+        let _deadline=null;
+        const dAnchor=d.hammer_date||d.auction_date;
+        if(dAnchor){
+          const[ay,am,ad]=dAnchor.split('-').map(Number);
+          const aLocal=new Date(ay,am-1,ad);
+          const dl2=new Date(aLocal);dl2.setDate(aLocal.getDate()+p);
+          const pad=n=>String(n).padStart(2,'0');
+          _deadline=`${dl2.getFullYear()}-${pad(dl2.getMonth()+1)}-${pad(dl2.getDate())}`;
+        }
+        const addr=(d.summary_json?.property?.address)||d.address||d.deal_name||'Deal';
+        return{...d,_deadline,address:addr};
+      });
+    }
+  }catch(e){}
+  window.renderCalendar(deal.auction_date,deadlineStr,allDeals,effectiveHammerDate);
+  // Navigate calendar to deadline month if not current month
+  if(deadlineStr){
+    const[dy,dm]=deadlineStr.split('-').map(Number);
+    const today=new Date();
+    if(dy!==today.getFullYear()||dm-1!==today.getMonth()){
+      window._calYear=dy;
+      window._calMonth=dm-1;
+      window.renderCalendar();
+    }
+  }
+
+  // TWO WATERFALLS:
+  // 1. Verdict waterfall: comparable_valuation → risk buckets → risk_adjusted_value
+  //    Source: workbench_ceiling (has comparable_valuation + risk_adjusted_value)
+  //    Falls back to verdict_ceiling (no risk reduction applied), then legacy ceiling.
+  const _wfWb = sj.workbench_ceiling || null;
+  const _wfVc = sj.verdict_ceiling   || null;
+  const _wfVerdictSrc = _wfWb || _wfVc || sj.ceiling || null;
+  window.renderVerdictMiniWF(_wfVerdictSrc);
+
+  // ── Task 4: HPI label validation on Deal Report ─────────────────────────
+  // area_json.housing.metrics.hpi_adjusted_count and hpi_missing_count.
+  // Covers pre-D-HPI-1 stored results (field absent → 0 → unadjusted warning shown).
+  (function _drHpiLabel(){
+    const _hm  = ((area.housing||{}).metrics)||{};
+    const _adj = Number(_hm.hpi_adjusted_count||0);
+    const _mis = Number(_hm.hpi_missing_count||0);
+    const _lbl = document.getElementById('drCompLabel');
+    const _cav = document.getElementById('drHpiCaveat');
+    if(!_lbl && !_cav) return;
+    if(_adj===0){
+      if(_lbl) _lbl.textContent='VALUE REDUCTION (UNADJUSTED)';
+      if(_cav){_cav.textContent='No time adjustment — nominal sale prices used.';_cav.style.display='';}
+    } else if(_mis>0){
+      if(_lbl) _lbl.textContent='VALUE REDUCTION';
+      if(_cav){_cav.textContent='Some comps not time-adjusted.';_cav.style.display='';}
+    } else {
+      if(_lbl) _lbl.textContent='VALUE REDUCTION';
+      if(_cav) _cav.style.display='none';
+    }
+  })();
+
+  // Capital stack — ceiling: risk_adjusted_value primary, midpoint fallback
+  const _fsC=(_wfWb&&_wfWb.risk_adjusted_value!=null?Number(_wfWb.risk_adjusted_value):0)||(_wfVc&&_wfVc.risk_adjusted_value!=null?Number(_wfVc.risk_adjusted_value):0)||((_wfWb&&_wfWb.valuation_range)?Number(_wfWb.valuation_range.midpoint)||0:0);
+  window.renderFinStack(fj,_fsC);
+
+  // DOC FOOTER
+  const docFa=document.getElementById('docFooterAddr');
+  if(docFa)docFa.textContent=addr;
+
+  // CHASE LIST (synced with workbench via localStorage)
+  window.renderChaseList();
+
+  // AREA CONTEXT — same data paths as verdict page
+  const aj=area;
+  const inf=(aj&&aj.inference)||{};
+  const bm=inf.benchmarks||{};
+  const sj_prop=sj.property||{};
+
+  // Postcode
+  const pc=sj_prop.postcode||aj.postcode||deal.postcode||'';
+  const pcEl=document.getElementById('areaPostcode');if(pcEl)pcEl.textContent=pc||'—';
+
+  // Area score — raw -8..+8, scale to 0..100
+  let compScore=NaN;
+  if(inf.score!=null&&inf.score!==undefined){
+    const raw=Number(inf.score);
+    if(isFinite(raw))compScore=Math.max(0,Math.min(100,Math.round(((raw+8)/16)*100)));
+  }
+  const aArc=document.getElementById('areaArc'),aScTxt=document.getElementById('areaScoreTxt');
+  if(aArc&&isFinite(compScore)){
+    const circ=2*Math.PI*21;
+    aArc.setAttribute('stroke-dasharray',`${circ*(compScore/100)} ${circ}`);
+    const col=compScore>=70?'var(--grn)':compScore>=45?'var(--acc)':'var(--red)';
+    aArc.setAttribute('stroke',col);
+    if(aScTxt){aScTxt.textContent=compScore;aScTxt.setAttribute('fill',col);}
+  }
+  // Score bars
+  const growth=String(inf.signals&&inf.signals.growth||'').toLowerCase();
+  let regScore=NaN,natScore=NaN;
+  if(isFinite(compScore)){
+    regScore=Math.max(0,Math.min(100,compScore-(growth==='emerging'?10:growth==='declining'?-8:5)));
+    natScore=Math.max(0,Math.min(100,compScore-(growth==='emerging'?18:growth==='declining'?-3:12)));
+  }
+  const setBar=(valId,barId,n)=>{
+    const v=document.getElementById(valId),b=document.getElementById(barId);
+    if(v)v.textContent=isFinite(n)?Math.round(n):'—';
+    if(b)b.style.width=(isFinite(n)?n:0)+'%';
+  };
+  setBar('aScoreLocal','aScoreLocalBar',compScore);
+  setBar('aScoreReg','aScoreRegBar',regScore);
+  setBar('aScoreNat','aScoreNatBar',natScore);
+  const pillEl=document.getElementById('areaScorePill');
+  if(pillEl){
+    if(isFinite(compScore)&&isFinite(regScore)){
+      const txt=compScore>regScore?'↑ ABOVE REGIONAL':compScore<regScore?'↓ BELOW REGIONAL':'= AT REGIONAL';
+      const col=compScore>regScore?'var(--grn)':compScore<regScore?'var(--red)':'var(--ts)';
+      pillEl.textContent=txt;pillEl.style.color=col;
+    }
+  }
+
+  // Crime
+  const crimeB=bm.crime||{};
+  const localCrime=Number(crimeB.crime_rate_per_1000||crimeB.local_rate_per_1000||0);
+  const natCrime=Number(crimeB.national_rate_per_1000||0);
+  const clEl=document.getElementById('aCrimeLocal');if(clEl)clEl.textContent=localCrime>0?localCrime.toFixed(1):'—';
+  const cnEl=document.getElementById('aCrimeNat');if(cnEl)cnEl.textContent=natCrime>0?natCrime.toFixed(1):'—';
+  if(localCrime>0){
+    const crimeEl=document.getElementById('aCrimeLocal');
+    if(crimeEl)crimeEl.className='ac-stat-val '+(localCrime<natCrime?'grn':localCrime>natCrime*1.2?'red':'amb');
+  }
+
+  // Transport
+  const transport=aj.transport||{};
+  const tval=Array.isArray(transport.value)?transport.value:[];
+  let rail=0,bus=0;
+  tval.forEach(s=>{
+    const st=String(s);
+    const m1=st.match(/Rail[^:]*:\s*(\d+)/i),m2=st.match(/Bus[^:]*:\s*(\d+)/i);
+    if(m1)rail=parseInt(m1[1]);if(m2)bus=parseInt(m2[1]);
+  });
+  const tRating=(rail>=2&&bus>=40)?'STRONG':(rail>=1||bus>=20)?'MODERATE':'LIMITED';
+  const trEl=document.getElementById('aTransportRating');
+  if(trEl){trEl.textContent=tRating;trEl.className='ac-stat-val '+(tRating==='STRONG'?'grn':tRating==='MODERATE'?'amb':'red');}
+  const tsEl=document.getElementById('aTransportStats');
+  if(tsEl)tsEl.textContent=`${rail} rail · ${bus} bus routes`;
+
+  // Flood risk
+  const floodRaw=bm.flood_risk||aj.flood_risk||inf.flood_zone||null;
+  const flEl=document.getElementById('aFloodRisk');
+  if(flEl){
+    const ft=floodRaw?String(floodRaw):'—';
+    flEl.textContent=ft;
+    flEl.className='ac-stat-val '+(ft.toLowerCase().includes('minimal')||ft==='1'?'grn':ft.toLowerCase().includes('high')||ft==='3'||ft==='4'?'red':'amb');
+  }
+
+  // Rental growth
+  const rental=bm.rental||{};
+  const rg=rental.rental_growth_pct||aj.rental_growth_pct||null;
+  const rgEl=document.getElementById('aRentalGrowth');
+  if(rgEl)rgEl.textContent=rg!=null?parseFloat(rg).toFixed(1)+'%':'—';
+
+  // Market activity
+  const liq=bm.liquidity||{};
+  const tx=Number(liq.annual_transactions||0);
+  const txEl=document.getElementById('aMarketTx');if(txEl)txEl.textContent=tx>0?tx.toLocaleString('en-GB'):'—';
+  const yoyPrice=bm.price&&bm.price.local_yoy;
+  const yoyEl=document.getElementById('aMarketYoY');
+  if(yoyEl&&yoyPrice!=null&&isFinite(yoyPrice)){
+    const sign=yoyPrice>=0?'+':'';yoyEl.textContent=sign+parseFloat(yoyPrice).toFixed(1)+'% YoY';
+    yoyEl.style.color=yoyPrice>=0?'var(--grn)':'var(--red)';
+  }
+  const dtEl=document.getElementById('aDemandTrend');
+  if(dtEl){
+    const dt=growth||'—';dtEl.textContent=dt.charAt(0).toUpperCase()+dt.slice(1);
+    dtEl.style.color=dt==='emerging'||dt==='strong'?'var(--grn)':dt==='declining'?'var(--red)':'var(--ts)';
+  }
+
+  // Area summary
+  const sumEl=document.getElementById('aAreaSummary');
+  if(sumEl)sumEl.textContent=inf.summary||'';
+
+  // IFRAME
+  const frame=document.getElementById('reportFrame');
+  if(frame){
+    frame.onload=function(){window.onFrameLoad();};
+    frame.onerror=function(){window.onFrameError();};
+    frame.src=`legalsmegal-report.html?deal_id=${encodeURIComponent(dealId)}&embedded=1`;
+  }
+
+  window.loadNote();
+  wireLinks();
+}
+load();
+</script>
+</body>
+</html>
