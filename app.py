@@ -7954,15 +7954,39 @@ def ceiling_endpoint():
             # Use the persisted verdict ONLY when it is non-legacy (computed from
             # sold comps). If _legacy_source=True, attempt a live recompute from
             # area_json.housing.soldComps before falling back to the legacy base.
-            _pv_mid      = (_persisted_verdict and
-                            (_persisted_verdict.get("valuation_range") or {}).get("midpoint") or 0)
+            #
+            # _pv_mid: the operative base value from the persisted verdict.
+            # Read order matches calculate_workbench_ceiling priority exactly:
+            #   1. comparable_valuation  — explicit locked comp evidence (primary)
+            #   2. valuation_range.midpoint — backward-compat alias (same value when set)
+            #   3. base_valuation        — legacy field on pre-v2 objects
+            #   4. base.value            — nested base object (legacy path writes)
+            # Previously read only valuation_range.midpoint, which caused the guard
+            # to fall through to "insufficient_evidence" even when Verdict was already
+            # showing a valid comparable_valuation — because midpoint can be None on
+            # objects where only comparable_valuation was written.
+            _pv_cv  = (_persisted_verdict or {}).get("comparable_valuation") or 0
+            _pv_mid = (
+                _pv_cv
+                or ((_persisted_verdict or {}).get("valuation_range") or {}).get("midpoint")
+                or (_persisted_verdict or {}).get("base_valuation")
+                or ((_persisted_verdict or {}).get("base") or {}).get("value")
+                or 0
+            )
+            try:
+                _pv_mid = float(_pv_mid) if _pv_mid else 0.0
+            except (TypeError, ValueError):
+                _pv_mid = 0.0
             _pv_is_legacy = bool(_persisted_verdict and _persisted_verdict.get("_legacy_source"))
 
             if _persisted_verdict and _pv_mid > 0 and not _pv_is_legacy:
-                # Non-legacy persisted verdict — use directly.
+                # Non-legacy persisted verdict with a real comparable_valuation — use directly.
+                # calculate_workbench_ceiling will read comparable_valuation as its base
+                # and apply active_legal_flags risk product to produce risk_adjusted_value.
                 verdict_result = _persisted_verdict
                 app.logger.info(
-                    f"[ceiling] deal={deal_id} using persisted non-legacy verdict mid={_pv_mid}"
+                    f"[ceiling] deal={deal_id} using persisted non-legacy verdict "
+                    f"comparable_valuation={_pv_cv} mid={_pv_mid}"
                 )
 
             else:
