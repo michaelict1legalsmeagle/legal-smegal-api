@@ -136,6 +136,7 @@ GOOGLE_MAPS_API_KEY = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
 ENVIRONMENT = (os.getenv("ENVIRONMENT") or "development").strip().lower()
 DEV_BYPASS_LIMITS = ENVIRONMENT != "production"  # Set ENVIRONMENT=production in Render to enforce limits
+BUILD_DATE = "20250613-r1"  # Updated on each deploy — verified via /api/diag/runtime-health
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 SUPABASE_KEY_FALLBACK = (os.getenv("SUPABASE_KEY") or "").strip()
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
@@ -6059,6 +6060,28 @@ def create_deal():
             "deal_type":    (data.get("deal_type") or "").strip() or None,
             "auction_date": data.get("auction_date") or None,
             "status":       "active",
+            # Fix 13 — Seed empty financials_json on deal creation.
+            # The Financials page reads deal.financials_json and falls back to
+            # the GET /financials endpoint which returns a seeded defaults object.
+            # Without this seed, DB has null and any ceiling recompute that reads
+            # financials_json.inputs for comps_avg_value gets an empty dict.
+            # Seeding a known-empty _seeded object makes the null→empty transition
+            # explicit and allows the financials GET to return defaults immediately.
+            "financials_json": {
+                "_seeded": True,
+                "_seeded_at": now_iso(),
+                "inputs": {
+                    "guide_price":        data.get("guide_price"),
+                    "target_yield":       6.0,
+                    "ltv_pct":            75.0,
+                    "finance_rate_pct":   5.14,
+                    "management_pct":     12.0,
+                    "maintenance_pct":    1.0,
+                    "legal_fees":         1500.0,
+                    "void_weeks":         2.0,
+                    "hold_years":         10.0,
+                }
+            },
         }).execute()
 
         deal_id = result.data[0]["id"]
@@ -6242,6 +6265,82 @@ def delete_deal(deal_id: str):
             return jsonify({"ok": True, "archived": True, "deal_id": deal_id}), 200
     except Exception as e:
         app.logger.exception("delete_deal failed")
+        return jsonify({"error": str(e)}), 500
+
+
+
+# Fix 12 — Persist resolved flag state to DB.
+# Flag resolved state was previously stored in localStorage only.
+# Clean browser / incognito / different device reset all resolved flags,
+# causing /api/ceiling to receive all flags as active, producing a lower
+# risk_adjusted_value than the user had set — appearing as a regression.
+# This endpoint writes only the _resolved_flags key inside summary_json,
+# using an optimistic lock to avoid overwriting ceiling objects.
+
+@app.route("/api/deals/<deal_id>/flags-resolved", methods=["POST", "OPTIONS"])
+@require_auth
+def save_flags_resolved(deal_id: str):
+    """Persist resolved flag state to summary_json._resolved_flags.
+    Body: { resolved: { "0": true, "3": true, ... } }  — index → boolean map.
+    Uses optimistic lock to avoid overwriting ceiling objects."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        body = request.get_json(silent=True) or {}
+        resolved = body.get("resolved")
+        if not isinstance(resolved, dict):
+            return jsonify({"error": "resolved must be an object"}), 400
+
+        # Read current state for optimistic lock
+        row = supabase.table("deals").select("summary_json, updated_at") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not row.data:
+            return jsonify({"error": "Deal not found"}), 404
+
+        sj = dict(row.data.get("summary_json") or {})
+        sj["_resolved_flags"] = resolved
+
+        result = supabase.table("deals").update({
+            "summary_json": sj,
+            "updated_at":   now_iso(),
+        }).eq("id", deal_id).eq("user_id", request.user_id) \
+          .eq("updated_at", row.data.get("updated_at")).execute()
+
+        if not result.data:
+            # Stale — retry once with fresh read
+            import time as _t2; _t2.sleep(0.3)
+            row2 = supabase.table("deals").select("summary_json, updated_at") \
+                .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+            if row2.data:
+                sj2 = dict(row2.data.get("summary_json") or {})
+                sj2["_resolved_flags"] = resolved
+                supabase.table("deals").update({
+                    "summary_json": sj2, "updated_at": now_iso(),
+                }).eq("id", deal_id).eq("user_id", request.user_id) \
+                  .eq("updated_at", row2.data.get("updated_at")).execute()
+
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        app.logger.exception("save_flags_resolved failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/deals/<deal_id>/flags-resolved", methods=["GET"])
+@require_auth
+def get_flags_resolved(deal_id: str):
+    """Return persisted resolved flag state for a deal."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        row = supabase.table("deals").select("summary_json") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not row.data:
+            return jsonify({"error": "Deal not found"}), 404
+        sj = row.data.get("summary_json") or {}
+        return jsonify({"ok": True, "resolved": sj.get("_resolved_flags") or {}}), 200
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
@@ -6585,7 +6684,7 @@ Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (fl
   "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
   "deal_score": 0,
   "viability_statement": "2-3 sentences: investor verdict",
-  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot", "type": "BTL/HMO/Commercial/etc", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
+  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot", "type": "BTL/HMO/Commercial/etc", "physical_type": "Flat/Detached/Semi-Detached/Terraced/Other", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
   "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": "working", "buyers_premium_pct": null, "vacant_possession": null},
   "special_conditions": {
     "buyers_premium_pct": null,
@@ -6638,7 +6737,11 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
 7. addendum_date: date of addendum if present
 8. unusual_clauses: list any clauses that are non-standard or investor-unfavourable
 9. special_conditions_missing: true if no Special Conditions of Sale document is present in pack
-10. true_cost_additions_notes: plain English summary of all costs above hammer price"""
+10. true_cost_additions_notes: plain English summary of all costs above hammer price
+
+PROPERTY TYPE EXTRACTION — populate the property object correctly:
+- type: the INVESTMENT STRATEGY (BTL/HMO/Flip/BRRR/SA/Commercial/Other) — what the buyer intends to do.
+- physical_type: the PHYSICAL STRUCTURE of the building. Must be exactly one of: Flat, Detached, Semi-Detached, Terraced, Other. Extract from the title register, particulars, or description. If a flat/apartment/maisonette → Flat. If a house → Detached/Semi-Detached/Terraced as appropriate. If unclear → Other. NEVER put an investment strategy (BTL, HMO) in physical_type."""
 
 
         # Run LLM in background thread — return immediately, frontend polls for result
@@ -6741,7 +6844,7 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                     # Build subject dict for relational comparable engine
                     _prop = result.get("property") or {}
                     _subject = {
-                        "property_type": _prop.get("type") or _deal_data.get("deal_type"),
+                        "property_type": _prop.get("physical_type") or _prop.get("type") or _deal_data.get("deal_type"),
                         "tenure":        _prop.get("tenure") or _fins_inputs.get("tenure"),
                         "lease_length":  _prop.get("lease_length") or _fins_inputs.get("lease_length"),
                         "internal_area": _prop.get("internal_area") or _fins_inputs.get("internal_area"),
@@ -6777,18 +6880,55 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                             strategy=_strategy,
                         )
 
-                    # Owned objects used by the pages. Legacy alias points to Workbench.
-                    result["verdict_ceiling"]   = _verdict_ceil
-                    result["workbench_ceiling"] = _workbench_ceil
-                    result["ceiling"]           = _workbench_ceil
-                    app.logger.info(
-                        f"[ceiling] deal={_deal_id} strategy={_strategy} "
-                        f"verdict={(_verdict_ceil.get('valuation_range') or _verdict_ceil.get('ceiling_range') or {}).get('midpoint') or _verdict_ceil.get('base_valuation')} "
-                        f"workbench={(_workbench_ceil.get('valuation_range') or _workbench_ceil.get('ceiling_range') or {}).get('midpoint') or _workbench_ceil.get('base_valuation')}"
+                    # Fix 3 — Fresh-upload canonical state gate.
+                    # Only persist ceiling objects that carry a real comparable_valuation.
+                    # On fresh upload area_json is always null, so the engine returns
+                    # insufficient_evidence with all null value fields.  Writing those
+                    # null objects as permanent state causes every downstream page to
+                    # show "— not set" and — crucially — gives _recompute_deal_ceiling's
+                    # optimistic-lock write a stale updated_at to fight against.
+                    # When insufficient, omit the keys entirely so _ensure_ceiling_objects
+                    # (called at GET time) can produce an in-memory ceiling from comps
+                    # as soon as area_json is available, without needing a DB write to
+                    # unlock them first.
+                    _vc_mid = (
+                        (_verdict_ceil.get("valuation_range") or {}).get("midpoint")
+                        or (_verdict_ceil.get("ceiling_range") or {}).get("low")
+                        or _verdict_ceil.get("comparable_valuation")
+                        or _verdict_ceil.get("base_valuation")
+                        or 0
                     )
+                    _wc_mid = (
+                        (_workbench_ceil.get("valuation_range") or {}).get("midpoint")
+                        or (_workbench_ceil.get("ceiling_range") or {}).get("low")
+                        or _workbench_ceil.get("risk_adjusted_value")
+                        or 0
+                    )
+                    _ceiling_has_value = bool(
+                        (float(_vc_mid) if _vc_mid else 0) > 5000
+                        or (float(_wc_mid) if _wc_mid else 0) > 5000
+                    )
+                    if _ceiling_has_value:
+                        # Real comp evidence exists — persist all three owned objects.
+                        result["verdict_ceiling"]   = _verdict_ceil
+                        result["workbench_ceiling"] = _workbench_ceil
+                        result["ceiling"]           = _verdict_ceil  # legacy alias = verdict (canonical base)
+                        app.logger.info(
+                            f"[ceiling] deal={_deal_id} strategy={_strategy} "
+                            f"verdict_mid={_vc_mid} workbench_mid={_wc_mid} PERSISTED"
+                        )
+                    else:
+                        # No comp evidence yet (area_json null on fresh upload).
+                        # Do NOT write insufficient objects — leave keys absent so
+                        # _ensure_ceiling_objects can hydrate them at read time once
+                        # area_json arrives, without a stale-write race.
+                        # _recompute_deal_ceiling will write them properly after area POST.
+                        app.logger.info(
+                            f"[ceiling] deal={_deal_id} strategy={_strategy} "
+                            f"insufficient_evidence — ceiling keys OMITTED from summary_json (awaiting area_json)"
+                        )
                  except Exception as _ce:
                     app.logger.warning(f"[ceiling] Ceiling calculation failed for {_deal_id}: {_ce}")
-                    result["ceiling"] = None
                 # ─────────────────────────────────────────────────────────────────────
 
                 app.logger.info(
@@ -6841,6 +6981,29 @@ SPECIAL CONDITIONS EXTRACTION — populate the special_conditions object:
                 }
                 if _raw_gp:
                     update_payload["guide_price"] = _raw_gp
+
+                # Fix 9 — Preserve ceiling fields on re-analysis.
+                # If this is a re-run on an existing deal (e.g. re-analyse forced),
+                # the result dict may lack ceiling objects that D1 previously wrote.
+                # Fix 3 already gates fresh-upload nulls, but a re-run on a deal that
+                # has good ceiling state must not erase it.  Carry forward any
+                # existing ceiling keys that are not already in `result`.
+                for _ck in ("verdict_ceiling", "workbench_ceiling", "ceiling",
+                            "financial_current_standing"):
+                    if _ck not in result or result[_ck] is None:
+                        _prev_sj = (
+                            supabase.table("deals")
+                            .select("summary_json")
+                            .eq("id", _deal_id)
+                            .single()
+                            .execute()
+                            .data or {}
+                        ).get("summary_json") or {}
+                        _prev_val = _prev_sj.get(_ck)
+                        if _prev_val and isinstance(_prev_val, dict):
+                            result[_ck] = _prev_val
+                        # Only read DB once for all four keys
+                        break
 
                 supabase.table("deals").update(update_payload).eq("id", _deal_id).execute()
                 # Increment usage counter
@@ -7703,7 +7866,7 @@ def ceiling_endpoint():
                     _sj = d.get("summary_json") or {}
                     _wb_prop = (_sj.get("property") or {})
                     _wb_subject = {
-                        "property_type": _wb_prop.get("type") or d.get("deal_type"),
+                        "property_type": _wb_prop.get("physical_type") or _wb_prop.get("type") or d.get("deal_type"),
                         "tenure":        _wb_prop.get("tenure") or merged.get("tenure"),
                         "lease_length":  _wb_prop.get("lease_length") or merged.get("lease_length"),
                         "internal_area": _wb_prop.get("internal_area") or merged.get("internal_area"),
@@ -7971,10 +8134,26 @@ def ceiling_endpoint():
 
         _fs = _calc_financial_standing(result, current_bid=None) if _calc_financial_standing else None
 
-        # Persist the current owned ceiling objects so Financials and Deal Report
-        # read the same state that Workbench just calculated. This prevents
-        # Financials showing "not set" while Workbench has a live range.
-        if deal_id and result and supabase:
+        # Fix 6 — Null-result persist guard.
+        # Only persist ceiling objects to DB when the workbench ceiling has a real
+        # comparable_valuation (risk_adjusted_value > 5000). An insufficient_evidence
+        # result (all null values) must never overwrite a valid D1-recomputed ceiling
+        # or a prior good persist-back. Without this guard, every Workbench page load
+        # on a fresh deal fires an unconditional write that:
+        #   (a) resets valid ceiling state back to null, and
+        #   (b) updates updated_at, which causes _recompute_deal_ceiling's optimistic
+        #       lock to fail, permanently preventing D1 from writing good values.
+        #
+        # Fix 8 — summary_json.ceiling alias consistency.
+        # All three write paths (summarise, _recompute_deal_ceiling, /api/ceiling)
+        # now set ceiling = verdict_result (comparable base, no risk deduction).
+        # This matches the /api/ceiling endpoint intent and its existing comment.
+        _persist_rav = float(result.get("risk_adjusted_value") or 0)
+        _persist_mid = float((result.get("valuation_range") or result.get("ceiling_range") or {}).get("midpoint") or 0)
+        _persist_cv  = float(result.get("comparable_valuation") or 0)
+        _ceiling_is_real = (_persist_rav > 5000 or _persist_mid > 5000 or _persist_cv > 5000)
+
+        if deal_id and result and supabase and _ceiling_is_real:
             try:
                 _cr = result.get("valuation_range") or result.get("ceiling_range") or {}
                 _low  = _cr.get("low")
@@ -7985,15 +8164,12 @@ def ceiling_endpoint():
                 _sj2 = (_row2.data or {}).get("summary_json") or {}
                 if not isinstance(_sj2, dict):
                     _sj2 = {}
-                _sj2["verdict_ceiling"] = verdict_result
+                _sj2["verdict_ceiling"]   = verdict_result
                 _sj2["workbench_ceiling"] = result
-                # summary_json.ceiling is the legacy alias/fallback.
-                # It MUST point to verdict_result (comparable base), NOT the
-                # risk-reduced workbench. If it points to workbench, the
-                # /api/ceiling legacy fallback reads workbench.ceiling_range
-                # (risk-reduced low/hi) and builds a corrupt verdict_ceiling
-                # with correct midpoint but wrong low/high. That corrupt object
-                # is stored as verdict_ceiling and used directly on the next call.
+                # Fix 8: ceiling alias = verdict_result (comparable base, no risk deduction).
+                # Consistent with _recompute_deal_ceiling which also sets ceiling = verdict.
+                # Pages using the legacy ceiling fallback see the comparable base, not the
+                # risk-reduced workbench — which is the safer display value for that context.
                 _sj2["ceiling"] = verdict_result
                 if _fs is not None:
                     _sj2["financial_current_standing"] = _fs
@@ -8006,6 +8182,8 @@ def ceiling_endpoint():
                     print(f"[ceiling] Stored workbench ceiling £{int(round(_mid)):,} for {deal_id}")
             except Exception as _se:
                 print(f"[ceiling] Store to DB failed: {_se}")
+        elif deal_id and not _ceiling_is_real:
+            print(f"[ceiling] deal={deal_id} insufficient_evidence — persist-back SKIPPED (no real value to write)")
 
         return jsonify({
             "ok": True,
@@ -8239,7 +8417,7 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
         # Build subject dict for relational comparable engine
         _prop_rc = (_summary.get("property") or {})
         _subject_rc = {
-            "property_type": _prop_rc.get("type") or _d.get("deal_type"),
+            "property_type": _prop_rc.get("physical_type") or _prop_rc.get("type") or _d.get("deal_type"),
             "tenure":        _prop_rc.get("tenure") or _fins_inputs.get("tenure"),
             "lease_length":  _prop_rc.get("lease_length") or _fins_inputs.get("lease_length"),
             "internal_area": _prop_rc.get("internal_area") or _fins_inputs.get("internal_area"),
@@ -8283,21 +8461,67 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
             _apply_audit_confidence_cap(_verdict,   area_data)
             _apply_audit_confidence_cap(_workbench, area_data)
 
-        # Merge: replace verdict_ceiling, workbench_ceiling, legacy ceiling key.
+        # Fix 8 — summary_json.ceiling alias consistency.
+        # All three write paths (summarise, /api/ceiling persist-back, this function)
+        # now set ceiling = _verdict (comparable base, no risk deduction).
+        # Merge: replace verdict_ceiling, workbench_ceiling, and legacy ceiling key.
         _new_summary = dict(_summary)
         _new_summary["verdict_ceiling"]   = _verdict
         _new_summary["workbench_ceiling"] = _workbench
-        _new_summary["ceiling"]           = _workbench   # legacy alias
+        _new_summary["ceiling"]           = _verdict   # Fix 8: legacy alias = verdict (comparable base)
 
-        # Optimistic-lock write — reject if the row changed since our read.
+        # Fix 7 — Optimistic-lock write with one retry on stale rejection.
+        # Race condition: /api/ceiling persist-back (no lock) may update updated_at
+        # between D1's initial read and this write, causing STALE_WRITE_REJECTED.
+        # One retry with a fresh DB read recovers from transient concurrent writes
+        # (e.g. Workbench opening simultaneously with Verdict area fetch).
+        # The retry re-reads the row and only proceeds if the ceiling in the current
+        # row is still null/insufficient — it never overwrites a good existing ceiling.
         _res = supabase.table("deals").update({
             "summary_json": _new_summary,
             "updated_at":   now_iso(),
         }).eq("id", deal_id).eq("updated_at", _d.get("updated_at")).execute()
 
         if not _res.data:
-            print(f"[ceiling-recompute STALE_WRITE_REJECTED] {deal_id} — newer update existed")
-            return None
+            print(f"[ceiling-recompute STALE_WRITE_REJECTED] {deal_id} — retrying once")
+            import time as _time
+            _time.sleep(0.6)
+            # Fresh read for retry
+            try:
+                _retry_row = supabase.table("deals").select(
+                    "summary_json, updated_at"
+                ).eq("id", deal_id).single().execute()
+                _retry_d   = _retry_row.data or {}
+                _retry_sj  = _retry_d.get("summary_json") or {}
+                # Only retry if ceiling is still missing/insufficient in current state
+                _retry_vc  = _retry_sj.get("verdict_ceiling") or {}
+                _retry_mid = float(
+                    (_retry_vc.get("comparable_valuation") or 0)
+                    or ((_retry_vc.get("valuation_range") or {}).get("midpoint") or 0)
+                )
+                if _retry_mid > 5000:
+                    print(f"[ceiling-recompute RETRY_SKIPPED] {deal_id} — row already has valid ceiling ({_retry_mid})")
+                    return _workbench  # another writer succeeded; not an error
+                _retry_new_summary = dict(_retry_sj)
+                _retry_new_summary["verdict_ceiling"]   = _verdict
+                _retry_new_summary["workbench_ceiling"] = _workbench
+                _retry_new_summary["ceiling"]           = _verdict
+                _retry_res = supabase.table("deals").update({
+                    "summary_json": _retry_new_summary,
+                    "updated_at":   now_iso(),
+                }).eq("id", deal_id).eq("updated_at", _retry_d.get("updated_at")).execute()
+                if _retry_res.data:
+                    print(f"[ceiling-recompute RETRY_OK] {deal_id} "
+                          f"verdict={_verdict.get('valuation_range', {}).get('midpoint')} "
+                          f"workbench={_workbench.get('valuation_range', {}).get('midpoint')}")
+                    return _workbench
+                else:
+                    print(f"[ceiling-recompute RETRY_ALSO_REJECTED] {deal_id} — giving up")
+                    return None
+            except Exception as _re:
+                print(f"[ceiling-recompute RETRY_ERROR] {deal_id}: {_re}")
+                return None
+
         print(f"[ceiling-recompute OK] {deal_id} "
               f"verdict={_verdict.get('valuation_range', {}).get('midpoint')} "
               f"workbench={_workbench.get('valuation_range', {}).get('midpoint')}")
@@ -8343,13 +8567,32 @@ def save_area(deal_id: str):
             # D1 — heal a stale/missing summary_json.ceiling when the cached
             # area_json already carries comps. Backgrounded so this cache
             # response still returns immediately.
+            # Fix 4 — Make area/comps recompute mandatory once area data exists.
+            # Stale check now covers:
+            #   (a) ceiling key absent entirely (Fix 3 omits it on insufficient evidence)
+            #   (b) ceiling has an error marker
+            #   (c) ceiling_range.low is None (old v1 insufficient objects)
+            #   (d) valuation_range.midpoint is None or <= 0 (v2 insufficient objects)
+            #   (e) verdict_ceiling or workbench_ceiling keys absent (new canonical objects)
+            # Any of these conditions triggers D1 recompute if comps are now available.
             _sj_cached   = deal.data.get("summary_json") or {}
             _ceil_cached = _sj_cached.get("ceiling")
+            _vc_cached   = _sj_cached.get("verdict_ceiling")
+            _wc_cached   = _sj_cached.get("workbench_ceiling")
             _ceil_stale  = (
+                # Legacy ceiling missing or broken
                 not _ceil_cached
                 or not isinstance(_ceil_cached, dict)
                 or _ceil_cached.get("error") == "no_base_valuation"
                 or (_ceil_cached.get("ceiling_range") or {}).get("low") is None
+                # v2 valuation_range null (insufficient_evidence state)
+                or (float((_ceil_cached.get("valuation_range") or {}).get("midpoint") or 0) <= 0)
+                # New canonical objects absent (Fix 3 omits them on fresh upload)
+                or not isinstance(_vc_cached, dict)
+                or not isinstance(_wc_cached, dict)
+                # Canonical objects present but have no real value
+                or (float((_vc_cached or {}).get("comparable_valuation") or 0) <= 0
+                    and float(((_vc_cached or {}).get("valuation_range") or {}).get("midpoint") or 0) <= 0)
             )
             _housing_cached = (cached or {}).get("housing") or {}
             _has_comps_cached = bool(
@@ -8420,10 +8663,14 @@ def save_area(deal_id: str):
     # Capture for background thread — Flask request context does not survive threads
     _deal_id  = deal_id
     _postcode = postcode
-    # Extract property type from summary_json for matched comps filtering
+    # Extract property type from summary_json for matched comps filtering.
+    # Fix 5: prefer physical_type (new field added to LLM schema) which holds
+    # the structural type (Flat/Detached/Semi-Detached/Terraced/Other).
+    # Falls back to type for legacy deals that pre-date the physical_type field,
+    # but investment strategy labels (BTL/HMO) map to None via the pt_map miss.
     _summary     = deal.data.get("summary_json") or {}
     _prop        = _summary.get("property") or {}
-    _prop_type   = str(_prop.get("type") or "").strip().upper()
+    _prop_type   = str(_prop.get("physical_type") or _prop.get("type") or "").strip().upper()
     # Map common labels to Land Registry codes
     _pt_map = {
         "DETACHED": "D", "SEMI-DETACHED": "S", "SEMI DETACHED": "S",
@@ -8989,7 +9236,7 @@ Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (fl
   "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
   "deal_score": 0,
   "viability_statement": "2-3 sentences: investor verdict",
-  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot", "type": "BTL/HMO/Commercial/etc", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
+  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot", "type": "BTL/HMO/Commercial/etc", "physical_type": "Flat/Detached/Semi-Detached/Terraced/Other", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
   "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": "working", "buyers_premium_pct": null, "vacant_possession": null},
   "pack_completeness": {"completeness_pct": 0, "present_count": 0, "total": 13},
   "documents_processed": 0
@@ -9002,7 +9249,11 @@ FLAG EXTRACTION RULES — YOU MUST FOLLOW ALL OF THEM:
 4. Minimum flags: generate at least 1 flag per document that contains a clause. Aim for 10-20 flags total.
 5. Scoring: Start at 100. Deduct critical=-12, high=-6, missing=-4, note=-1.
 6. Keep evidence quotes SHORT (max 30 words) — critical for fitting all flags within token budget.
-7. The flags array MUST be complete before flag_counts. Do not close the JSON until all flags are written."""
+7. The flags array MUST be complete before flag_counts. Do not close the JSON until all flags are written.
+
+PROPERTY TYPE EXTRACTION — populate the property object correctly:
+- type: the INVESTMENT STRATEGY (BTL/HMO/Flip/BRRR/SA/Commercial/Other) — what the buyer intends to do.
+- physical_type: the PHYSICAL STRUCTURE of the building. Must be exactly one of: Flat, Detached, Semi-Detached, Terraced, Other. Extract from the title register, particulars, or description. If a flat/apartment/maisonette → Flat. If a house → Detached/Semi-Detached/Terraced as appropriate. If unclear → Other. NEVER put an investment strategy (BTL, HMO) in physical_type."""
 
 
                 _res = {}
@@ -9084,6 +9335,24 @@ FLAG EXTRACTION RULES — YOU MUST FOLLOW ALL OF THEM:
             # ── Persist ──
             prop = summary.get("property") or {}
             try:
+                # Fix 9 — Preserve ceiling fields on every summary_json write.
+                # The streaming route produces a summary without ceiling objects.
+                # If a valid ceiling already exists (written by D1 recompute or
+                # /api/ceiling persist-back), we must carry those keys forward
+                # rather than erasing them with an overwrite.
+                try:
+                    _existing_row = supabase.table("deals").select(
+                        "summary_json"
+                    ).eq("id", deal_id).single().execute()
+                    _existing_sj = (_existing_row.data or {}).get("summary_json") or {}
+                    for _ck in ("verdict_ceiling", "workbench_ceiling", "ceiling",
+                                "financial_current_standing"):
+                        _ev = _existing_sj.get(_ck)
+                        if _ev and isinstance(_ev, dict) and _ck not in summary:
+                            summary[_ck] = _ev
+                except Exception as _merge_e:
+                    app.logger.warning(f"[stream-persist] ceiling merge read failed: {_merge_e}")
+
                 supabase.table("deals").update({
                     "summary_json": summary,
                     "deal_score":   summary.get("deal_score"),
@@ -9712,6 +9981,7 @@ def diag_runtime_health():
     out["runtime"]["supabase_client_initialised"]  = supabase is not None
     out["runtime"]["housing_provider"]             = HOUSING_PROVIDER
     out["runtime"]["housing_rpc_name"]             = HOUSING_RPC_NAME
+    out["runtime"]["build_date"]                   = BUILD_DATE
 
     # ── HETZNER CONNECTIVITY ───────────────────────────────────────────────
     _t0 = time.time()
