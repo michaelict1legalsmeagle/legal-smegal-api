@@ -188,9 +188,270 @@ def _is_acquisition_cost_only(flag: dict) -> bool:
     return any(t in text for t in acq_terms)
 
 def _value_risk_adjustment(flag: dict) -> float:
-    """Map flag severity to property-value risk adjustment."""
+    """
+    DEPRECATED — kept for backward compat with calculate_ceiling() (used by
+    calculate_verdict_ceiling which passes no flags, so this is never called
+    with real flags in the Verdict path).
+    For the Workbench path use _flag_to_segments() instead.
+    """
     sev = (flag.get("severity") or "note").lower().strip()
     return VALUE_RISK_SEVERITY_ADJ.get(sev, 0.00)
+
+
+# =============================================================================
+# MARKET-CONSEQUENCE SEGMENT ROUTING
+# =============================================================================
+# Five segments — each flag is routed to one or more segments.
+# Segment amounts are cash amounts derived from comparable_valuation × factor.
+# Fractions below are the adjustment proportions applied to comparable_valuation.
+#
+# Signal keywords used to route a flag (order-sensitive; first match wins for
+# the dominant segment; non-dominant segments may also fire).
+#
+# KEY DESIGN RULE:
+#   severity is kept as a DESCRIPTIVE LABEL only — it informs confidence, not pricing.
+#   Pricing comes from the nature of the defect (cure / delay / insurance / lender / resale).
+
+# Routing table: list of (signal_keywords, segment_fractions_dict)
+# signal_keywords: substring match against flag text (title + summation + implication + category)
+# segment_fractions_dict: {segment_name: fraction_of_comparable_valuation}
+#   fractions must total ≤ MAX_TOTAL_VALUE_RISK_ADJ across ALL active flags (enforced in aggregate)
+
+_SEGMENT_RULES: list[tuple[list[str], dict]] = [
+    # ── Document retrieval only — low cure cost, minimal residual ────────────
+    (["hmlr", "land registry", "office copy", "title copy", "title register copy",
+      "title plan copy", "filed copy"],
+     {"direct_cure_cost": 0.005, "delay_finance_drag": 0.005}),
+
+    # ── Missing searches — cure cost + timing/delay ──────────────────────────
+    (["local authority search", "local search", "drainage search", "environmental search",
+      "water search", "chancel search", "coal search", "mining search",
+      "missing search", "no search"],
+     {"direct_cure_cost": 0.008, "delay_finance_drag": 0.012}),
+
+    # ── Management pack / service charge info missing ────────────────────────
+    (["management pack", "service charge", "managing agent", "maintenance charge",
+      "ground rent information", "missing management"],
+     {"direct_cure_cost": 0.006, "delay_finance_drag": 0.010, "lender_certifiability_risk": 0.008}),
+
+    # ── Short or escalating ground rent — lender + resale ───────────────────
+    (["ground rent", "escalating ground rent", "doubling ground rent", "onerous ground rent"],
+     {"lender_certifiability_risk": 0.040, "residual_marketability_risk": 0.030}),
+
+    # ── Short lease ──────────────────────────────────────────────────────────
+    (["short lease", "lease extension", "lease below", "unexpired lease",
+      "fewer than 80 years", "less than 80 years"],
+     {"lender_certifiability_risk": 0.060, "residual_marketability_risk": 0.040}),
+
+    # ── Forfeiture / breach of covenant ─────────────────────────────────────
+    (["forfeiture", "breach of covenant", "breach of lease"],
+     {"indemnity_insurance_cost": 0.010, "lender_certifiability_risk": 0.025,
+      "residual_marketability_risk": 0.015}),
+
+    # ── Defective / missing original lease ──────────────────────────────────
+    (["defective lease", "missing lease", "missing original lease", "no lease", "lease not available",
+      "lease missing"],
+     {"lender_certifiability_risk": 0.050, "residual_marketability_risk": 0.035}),
+
+    # ── Defective / missing title — unregistered / possessory ───────────────
+    (["defective title", "missing title", "unregistered title", "possessory title",
+      "title defect", "title not registered", "good root of title"],
+     {"lender_certifiability_risk": 0.055, "residual_marketability_risk": 0.045}),
+
+    # ── Indemnity available — reduces but does not eliminate resale risk ──────
+    (["indemnity insurance", "indemnity policy", "title indemnity", "insurance policy available",
+      "indemnity available"],
+     {"indemnity_insurance_cost": 0.012, "residual_marketability_risk": 0.008}),
+
+    # ── Restrictive covenant ─────────────────────────────────────────────────
+    (["restrictive covenant", "restrictive covenants"],
+     {"indemnity_insurance_cost": 0.010, "lender_certifiability_risk": 0.020,
+      "residual_marketability_risk": 0.020}),
+
+    # ── Rights of way / easement defects ─────────────────────────────────────
+    (["right of way", "rights of way", "easement", "right to light", "access rights",
+      "ransom strip"],
+     {"lender_certifiability_risk": 0.020, "residual_marketability_risk": 0.025}),
+
+    # ── Planning / building control ───────────────────────────────────────────
+    (["planning", "building regulations", "building control", "planning permission",
+      "listed building", "conservation area", "enforcement notice"],
+     {"indemnity_insurance_cost": 0.012, "lender_certifiability_risk": 0.018,
+      "residual_marketability_risk": 0.020}),
+
+    # ── Section 20 / major works notice ──────────────────────────────────────
+    (["section 20", "s20", "major works", "major work notice"],
+     {"delay_finance_drag": 0.015, "residual_marketability_risk": 0.020}),
+
+    # ── Arrears / rent / service charge debt ─────────────────────────────────
+    (["arrears", "rent arrears", "service charge arrears", "maintenance arrears",
+      "outstanding service charge"],
+     {"direct_cure_cost": 0.015, "delay_finance_drag": 0.010}),
+
+    # ── Flying freehold ───────────────────────────────────────────────────────
+    (["flying freehold"],
+     {"lender_certifiability_risk": 0.030, "residual_marketability_risk": 0.025}),
+
+    # ── Contamination / environmental ────────────────────────────────────────
+    (["contamination", "environmental risk", "flood risk", "subsidence"],
+     {"lender_certifiability_risk": 0.025, "residual_marketability_risk": 0.035}),
+]
+
+# Severity zero-gate: "note" flags carry no market consequence.
+# Severity does NOT scale matched route fractions — route type is the pricing truth.
+_SEVERITY_NOTE_ONLY = {"note"}
+
+# Unmatched-fallback amounts: used only when no _SEGMENT_RULES entry matches.
+# These are the ONLY place severity influences a cash amount.
+_FALLBACK_RESIDUAL_FRACTION: dict[str, float] = {
+    "critical": 0.025,
+    "high":     0.015,
+    "medium":   0.008,
+    "low":      0.004,
+    "missing":  0.010,
+}
+
+def _flag_to_segments(flag: dict) -> dict[str, float]:
+    """
+    Route a single flag to one or more market-consequence segments.
+    Returns {segment_name: fraction_of_comparable_valuation} for that flag.
+
+    Pricing rules:
+      - Route type is the primary pricing input (matched from _SEGMENT_RULES).
+      - Severity is NOT a multiplier on matched route fractions.
+      - Severity gates "note" flags to zero (notes have no market consequence).
+      - Severity sets the fallback fraction ONLY when no route matches
+        (there is no route-specific calibration to use in that case).
+
+    Logic:
+      1. Gate: note severity → {} (no adjustment).
+      2. Build search text; find first matching rule in _SEGMENT_RULES.
+      3. If matched: return rule fractions unchanged. Severity is not applied.
+      4. If unmatched: return conservative residual_marketability_risk
+         from _FALLBACK_RESIDUAL_FRACTION[severity].
+    """
+    sev = (flag.get("severity") or "note").lower().strip()
+
+    # Gate: notes carry no market-consequence adjustment
+    if sev in _SEVERITY_NOTE_ONLY:
+        return {}
+
+    text = " ".join(filter(None, [
+        flag.get("title", ""),
+        flag.get("summation", ""),
+        flag.get("implication", ""),
+        flag.get("category", ""),
+    ])).lower()
+
+    # Match first applicable rule — route type is truth, severity not applied
+    for keywords, fractions in _SEGMENT_RULES:
+        if any(kw in text for kw in keywords):
+            # Return rule fractions as-is. Do not multiply by severity.
+            return {seg: round(frac, 6) for seg, frac in fractions.items()}
+
+    # No route matched — severity-calibrated fallback (only allowed use of severity in pricing)
+    fallback_frac = _FALLBACK_RESIDUAL_FRACTION.get(sev, 0.010)
+    return {"residual_marketability_risk": round(fallback_frac, 6)}
+
+
+def _build_market_consequence_adjustments(
+    risks: list[dict],
+    comparable_valuation: float,
+    total_adjustment: Optional[float] = None,
+) -> dict:
+    """
+    Aggregate per-flag segment fractions into cash amounts.
+    Returns market_consequence_adjustments dict with five segments.
+
+    total_adjustment is the canonical figure (comparable_valuation - risk_adjusted_value)
+    from the product formula.  Segment amounts are scaled so they sum exactly to
+    total_adjustment; the last non-zero segment absorbs any integer rounding residual.
+
+    If total_adjustment is None or zero (all flags resolved), all amounts are zero.
+
+    Each segment entry:
+      {amount: int, items: [{flag_title, segment, fraction, amount, confidence}]}
+    """
+    SEGMENTS = [
+        "direct_cure_cost",
+        "delay_finance_drag",
+        "indemnity_insurance_cost",
+        "lender_certifiability_risk",
+        "residual_marketability_risk",
+    ]
+
+    # Build raw proportional amounts from segment fractions × comparable_valuation
+    raw_buckets: dict[str, list[dict]] = {s: [] for s in SEGMENTS}
+
+    for r in risks:
+        segs = r.get("segments", {})
+        for seg, frac in segs.items():
+            if seg not in raw_buckets:
+                continue
+            raw_amt = comparable_valuation * frac
+            raw_buckets[seg].append({
+                "flag_title":  r.get("title", ""),
+                "segment":     seg,
+                "fraction":    round(frac, 6),
+                "_raw_amount": raw_amt,
+                "confidence":  r.get("confidence"),
+                "reason":      r.get("reason", ""),
+            })
+
+    # Sum raw amounts per segment
+    seg_raw_totals: dict[str, float] = {
+        seg: sum(i["_raw_amount"] for i in raw_buckets[seg])
+        for seg in SEGMENTS
+    }
+    grand_raw = sum(seg_raw_totals.values())
+
+    # Scale so segments sum exactly to total_adjustment
+    canonical_total = round(total_adjustment or 0.0)
+    active_segs = [s for s in SEGMENTS if seg_raw_totals[s] > 0]
+
+    scaled_amounts: dict[str, int] = {}
+    if canonical_total > 0 and grand_raw > 0:
+        allocated = 0
+        for idx, seg in enumerate(active_segs):
+            if idx == len(active_segs) - 1:
+                # Last active segment absorbs rounding residual
+                scaled_amounts[seg] = canonical_total - allocated
+            else:
+                amt = round(canonical_total * seg_raw_totals[seg] / grand_raw)
+                scaled_amounts[seg] = amt
+                allocated += amt
+    else:
+        for seg in active_segs:
+            scaled_amounts[seg] = 0
+
+    # Build final result — scale individual item amounts proportionally within each segment
+    result: dict[str, dict] = {}
+    for seg in SEGMENTS:
+        seg_total_scaled = scaled_amounts.get(seg, 0)
+        items_raw = raw_buckets[seg]
+        seg_raw = seg_raw_totals[seg]
+        items_out = []
+        for item in items_raw:
+            item_scaled = (
+                round(seg_total_scaled * item["_raw_amount"] / seg_raw)
+                if seg_raw > 0 else 0
+            )
+            items_out.append({
+                "flag_title":  item["flag_title"],
+                "segment":     seg,
+                "fraction":    item["fraction"],
+                "amount":      item_scaled,
+                "confidence":  item["confidence"],
+                "reason":      item["reason"],
+            })
+        result[seg] = {"amount": seg_total_scaled, "items": items_out}
+
+    # Inactive segments (raw == 0) → amount: 0, items: []
+    for seg in SEGMENTS:
+        if seg not in scaled_amounts:
+            result[seg] = {"amount": 0, "items": []}
+
+    return result
 
 # =============================================================================
 # CONFIDENCE CALIBRATION (deterministic)
@@ -726,25 +987,32 @@ def _process_legal_risks(legal_flags: list[dict]) -> list[dict]:
     """
     Filter and map legal flags to property-value risks only.
     Excludes acquisition costs.
+
+    Each risk now carries a segments dict of {segment_name: fraction} from
+    _flag_to_segments(). The legacy value_adjustment field is retained as the
+    SUM of all segment fractions for backward compatibility with
+    _legal_pack_adjustment_factor() and the workbench risk_factor product formula.
     """
     risks = []
     for i, flag in enumerate(legal_flags):
         if _is_acquisition_cost_only(flag):
             continue
-        sev = (flag.get("severity") or "note").lower().strip()
-        adj = _value_risk_adjustment(flag)
-        if adj == 0.0 and sev == "note":
-            # notes with no value impact: include for completeness but mark adj=0
-            pass
+        sev  = (flag.get("severity") or "note").lower().strip()
+        segs = _flag_to_segments(flag)
+        total_adj = round(sum(segs.values()), 6)
         risks.append({
             "risk_id":         f"r{i:03d}",
             "title":           flag.get("title", ""),
             "source_evidence": flag.get("summation", "") or flag.get("implication", ""),
             "category":        flag.get("risk_category") or flag.get("category") or "general",
             "severity":        sev,
-            "value_adjustment":round(adj, 4),
-            "included":        True,
-            "reason":          f"severity={sev}; value_adjustment={adj}",
+            "value_adjustment": total_adj,
+            "segments":         segs,
+            "included":         True,
+            "reason": (
+                f"severity={sev}; market_consequence_segments={list(segs.keys())}; "
+                f"total_value_adjustment={total_adj}"
+            ),
         })
     return risks
 
@@ -867,6 +1135,19 @@ def calculate_workbench_ceiling(
 
     # wb_mid = risk_adjusted_value for this workbench state.
     wb_risk_adjusted_value = wb_mid
+
+    # Compute total_adjustment and adjustment_pct from the engine (not from app.py).
+    _total_adj = round(verdict_comparable_valuation - wb_risk_adjusted_value, 2)
+    _adj_pct   = round(_total_adj / verdict_comparable_valuation * 100, 1) if verdict_comparable_valuation else 0.0
+
+    # Build market-consequence adjustments from active risks.
+    # Segment amounts are scaled so they sum exactly to total_adjustment.
+    _mca = _build_market_consequence_adjustments(
+        risks=active_risks,
+        comparable_valuation=verdict_comparable_valuation,
+        total_adjustment=_total_adj,
+    )
+
     return {
         "_ceiling_type": "workbench",
         "status": "all_flags_resolved" if all_resolved else verdict_ceiling.get("status", "ok"),
@@ -891,6 +1172,11 @@ def calculate_workbench_ceiling(
             "risks":             active_risks,
         },
         "risk_discount_pct":   risk_discount_pct,
+        # Market-consequence segment breakdown — canonical from engine, used by Verdict waterfall.
+        "comparable_valuation_for_adjustment": verdict_comparable_valuation,
+        "total_adjustment":              _total_adj,
+        "adjustment_pct":               _adj_pct,
+        "market_consequence_adjustments": _mca,
         "active_flag_count":   len(active_legal_flags),
         "all_flags_resolved":  all_resolved,
         "verdict_midpoint":    verdict_mid,      # backward compat
