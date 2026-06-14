@@ -1930,11 +1930,21 @@ def ensure_ceiling_owned_objects(
         if _wb_rav is not None
         else ((_existing_wb or {}).get("valuation_range") or {}).get("midpoint")
     ) or 0
+    # A workbench_ceiling is valid only if:
+    #   (a) it is a dict with a valid valuation_range,
+    #   (b) its risk_adjusted_value is <= verdict comparable_valuation + £1 tolerance,
+    #   (c) it carries market_consequence_adjustments — absent means it was persisted
+    #       before the r6 segment engine and must be recomputed to show correct waterfall.
+    _wb_has_segments = (
+        isinstance(_existing_wb, dict)
+        and isinstance(_existing_wb.get("market_consequence_adjustments"), dict)
+    )
     _wb_valid = (
         isinstance(_existing_wb, dict)
         and isinstance(_existing_wb.get("valuation_range"), dict)
         and _wb_check_val <= _v_comparable + 1  # clamp tolerance £1
         and _wb_check_val > 0
+        and _wb_has_segments  # stale pre-r6 objects must be recomputed
     )
 
     if _wb_valid:
