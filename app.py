@@ -6216,6 +6216,41 @@ def update_deal(deal_id: str):
     if not updates:
         return jsonify({"error": "No valid fields to update"}), 400
     updates["updated_at"] = now_iso()
+
+    # ── When auction_date is being set, also propagate into summary_json ──────
+    # This keeps summary_json.auction_date and summary_json.property.auction_date
+    # consistent with deals.auction_date so that any path reading summary_json
+    # directly (e.g. Verdict, Deal Report) also sees the correct date.
+    # We only do this when auction_date is explicitly in the payload AND
+    # summary_json is NOT also in the payload (avoid double-merge).
+    new_auction_date = data.get("auction_date") if "auction_date" in data else _SENTINEL
+    _SENTINEL_V = object()  # local sentinel — can't use module-level here
+    if "auction_date" in data and "summary_json" not in data and supabase:
+        try:
+            _deal_fetch = supabase.table("deals") \
+                .select("summary_json") \
+                .eq("id", deal_id) \
+                .eq("user_id", request.user_id) \
+                .maybe_single() \
+                .execute()
+            if _deal_fetch and _deal_fetch.data:
+                _sj = dict(_deal_fetch.data.get("summary_json") or {})
+                # Propagate into summary_json top-level and property sub-object
+                _sj["auction_date"] = data["auction_date"]
+                _prop = dict(_sj.get("property") or _sj.get("prop") or {})
+                _prop["auction_date"] = data["auction_date"]
+                # Write back under whichever key already exists
+                if "property" in _sj:
+                    _sj["property"] = _prop
+                elif "prop" in _sj:
+                    _sj["prop"] = _prop
+                else:
+                    _sj["property"] = _prop
+                updates["summary_json"] = _sj
+        except Exception as _sj_e:
+            # Non-fatal: deals.auction_date still gets set; summary_json stays stale
+            app.logger.warning("[update_deal] summary_json auction_date merge failed: %s", _sj_e)
+
     try:
         result = supabase.table("deals") \
             .update(updates) \
@@ -11115,6 +11150,37 @@ def auction_listing_convert(listing_id: str):
             return jsonify({"error": "Deal creation failed"}), 500
 
         deal_id = deal_res.data[0]["id"]
+
+        # ── Propagate auction_date into summary_json ──────────────────────
+        # deals.auction_date is already set via deal_row above.
+        # Also write into summary_json so Verdict/DealReport/summary paths
+        # reading summary_json directly see the correct date.
+        _listing_ad = listing.get("auction_date")
+        if _listing_ad:
+            try:
+                _seed_sj = {
+                    "auction_date": _listing_ad,
+                    "property": {
+                        "auction_date": _listing_ad,
+                        "address":      listing.get("address"),
+                        "postcode":     listing.get("postcode"),
+                    },
+                    "_source": "auction_listing_convert",
+                }
+                supabase.table("deals") \
+                    .update({"summary_json": _seed_sj, "updated_at": now_iso()}) \
+                    .eq("id", deal_id) \
+                    .execute()
+                app.logger.info(
+                    "[auction/convert] Wrote auction_date %s to summary_json for deal %s",
+                    _listing_ad, deal_id
+                )
+            except Exception as _ad_e:
+                # Non-fatal: deals.auction_date is already set
+                app.logger.warning(
+                    "[auction/convert] summary_json auction_date write failed for deal %s: %s",
+                    deal_id, _ad_e
+                )
 
         # ── Mark listing as converted ─────────────────────────────────────
         try:
