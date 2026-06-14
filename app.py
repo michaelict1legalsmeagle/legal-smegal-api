@@ -144,11 +144,6 @@ SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY_FALLBACK
 _CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL_SECONDS = int(os.getenv("MARKET_INSIGHTS_CACHE_TTL_SECONDS", "21600"))
 
-# ── EIG future-auction events cache ───────────────────────────────
-# Separate from _CACHE so TTL is independent of market-insight TTL.
-_EIG_EVENTS_CACHE: Dict[str, Any] = {}      # keys: "events", "_cached_at"
-EIG_EVENTS_CACHE_TTL = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h default
-
 APP_CACHE_BUSTER = (os.getenv("APP_CACHE_BUSTER", "") or "").strip()
 
 MARKET_CONTRACT_MODE = (os.getenv("MARKET_CONTRACT_MODE", "0").strip().lower() in {"1", "true", "yes", "on"})
@@ -6217,39 +6212,31 @@ def update_deal(deal_id: str):
         return jsonify({"error": "No valid fields to update"}), 400
     updates["updated_at"] = now_iso()
 
-    # ── When auction_date is being set, also propagate into summary_json ──────
-    # This keeps summary_json.auction_date and summary_json.property.auction_date
-    # consistent with deals.auction_date so that any path reading summary_json
-    # directly (e.g. Verdict, Deal Report) also sees the correct date.
-    # We only do this when auction_date is explicitly in the payload AND
-    # summary_json is NOT also in the payload (avoid double-merge).
-    new_auction_date = data.get("auction_date") if "auction_date" in data else _SENTINEL
-    _SENTINEL_V = object()  # local sentinel — can't use module-level here
+    # ── When auction_date is patched alone, also propagate into summary_json ─
+    # Keeps summary_json.auction_date and summary_json.property.auction_date
+    # consistent with deals.auction_date so every page reading summary_json
+    # directly (Verdict, Deal Report, etc.) also sees the correct date.
+    # Only runs when summary_json is NOT already in the payload (avoid clobbering
+    # a concurrent full summary_json write).
     if "auction_date" in data and "summary_json" not in data and supabase:
         try:
-            _deal_fetch = supabase.table("deals") \
+            _existing = supabase.table("deals") \
                 .select("summary_json") \
                 .eq("id", deal_id) \
                 .eq("user_id", request.user_id) \
                 .maybe_single() \
                 .execute()
-            if _deal_fetch and _deal_fetch.data:
-                _sj = dict(_deal_fetch.data.get("summary_json") or {})
-                # Propagate into summary_json top-level and property sub-object
+            if _existing and _existing.data:
+                _sj = dict(_existing.data.get("summary_json") or {})
                 _sj["auction_date"] = data["auction_date"]
-                _prop = dict(_sj.get("property") or _sj.get("prop") or {})
-                _prop["auction_date"] = data["auction_date"]
-                # Write back under whichever key already exists
-                if "property" in _sj:
-                    _sj["property"] = _prop
-                elif "prop" in _sj:
-                    _sj["prop"] = _prop
-                else:
-                    _sj["property"] = _prop
+                _prop_key = "property" if "property" in _sj else ("prop" if "prop" in _sj else "property")
+                _sj[_prop_key] = dict(_sj.get(_prop_key) or {})
+                _sj[_prop_key]["auction_date"] = data["auction_date"]
                 updates["summary_json"] = _sj
-        except Exception as _sj_e:
-            # Non-fatal: deals.auction_date still gets set; summary_json stays stale
-            app.logger.warning("[update_deal] summary_json auction_date merge failed: %s", _sj_e)
+                app.logger.info("[update_deal] propagated auction_date %s into summary_json for %s", data["auction_date"], deal_id)
+        except Exception as _sj_err:
+            # Non-fatal — deals.auction_date still gets written
+            app.logger.warning("[update_deal] summary_json auction_date merge failed for %s: %s", deal_id, _sj_err)
 
     try:
         result = supabase.table("deals") \
@@ -7707,13 +7694,6 @@ def get_dashboard():
             "flag_counts":     (d.get("summary_json") or {}).get("flag_counts") or {},
         })
 
-    # ── Include cached EIG auction events so dashboard can show them ──────────
-    # These are enrichment-only — they do NOT affect deal analysis or valuation.
-    eig_events = _eig_cache_get() or []
-    today_s2   = datetime.utcnow().date().isoformat()
-    cutoff2    = (datetime.utcnow().date() + timedelta(days=90)).isoformat()
-    upcoming_eig = [e for e in eig_events if today_s2 <= e.get("date", "") <= cutoff2]
-
     return jsonify({
         "ok": True,
         "summary": {
@@ -7732,7 +7712,6 @@ def get_dashboard():
         },
         "recent_deals":  recent_deals,
         "upcoming":      upcoming,
-        "auction_events": upcoming_eig,   # EIG enrichment layer — separate from deal data
         "retrieved_at":  now_iso(),
     }), 200
 
@@ -10486,329 +10465,6 @@ def diag_deal_trace(deal_id: str):
 AUCTION_SCAN_SECRET = os.environ.get("AUCTION_SCAN_SECRET", "").strip()
 
 
-
-# ═══════════════════════════════════════════════════════════════════
-# EIG FUTURE-AUCTION EVENTS — enrichment layer (not legal-pack data)
-# Source: https://www.eigpropertyauctions.co.uk/search/future-auctions
-# ═══════════════════════════════════════════════════════════════════
-
-EIG_FUTURE_URL = "https://www.eigpropertyauctions.co.uk/search/future-auctions"
-EIG_SCAN_SECRET = os.environ.get("AUCTION_SCAN_SECRET", "").strip()
-
-
-def _fetch_eig_future_auctions() -> list:
-    """
-    Scrape EIG future auctions page and return a list of auction_event dicts.
-    Each dict: { date, auctioneer, venue_or_type, time, source, source_url }.
-    Returns [] on any error — callers treat empty list as transient failure.
-
-    Parsing strategy:
-      EIG renders each event as a card/row; we look for <time> elements or
-      date-containing text blocks.  We extract what we can and leave the rest
-      null rather than inventing values.
-    """
-    try:
-        resp = requests.get(
-            EIG_FUTURE_URL,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; LegalSmegal/1.0; +https://legalsmegal.com)",
-                "Accept": "text/html,application/xhtml+xml",
-            },
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            app.logger.warning("[eig_events] HTTP %s from EIG", resp.status_code)
-            return []
-    except Exception as e:
-        app.logger.warning("[eig_events] request failed: %s", e)
-        return []
-
-    html = resp.text
-
-    # ── Parse with stdlib html.parser — no bs4 dependency ──────────────
-    from html.parser import HTMLParser
-
-    class _EIGParser(HTMLParser):
-        """
-        Walk the EIG future-auctions HTML and extract event cards.
-
-        EIG page structure (observed June 2026):
-          <div class="auction-event"> or similar container per event
-          Within each: auctioneer name, date string, venue/type text, time.
-
-        We collect text runs between tags and apply date-detection heuristics.
-        """
-
-        MONTH_MAP = {
-            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-        }
-        DATE_RE = re.compile(
-            r"(\d{1,2})(?:st|nd|rd|th)?\s+"
-            r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-            r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-            r"(?:\s+(\d{4}))?",
-            re.IGNORECASE,
-        )
-        ISO_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
-        TIME_RE = re.compile(r"\b(\d{1,2}[.:](\d{2})\s*(?:am|pm)?)\b", re.IGNORECASE)
-
-        def __init__(self):
-            super().__init__()
-            self.events: list = []
-            self._depth = 0
-            self._in_card = False
-            self._card_depth = 0
-            self._card_texts: list = []
-            self._current_tag = ""
-            # Track simple class-based containers
-            self._card_classes = {
-                "auction-event", "auction-item", "auction-card",
-                "event-item", "event-row", "auction-row",
-                "search-result", "result-item",
-            }
-
-        def handle_starttag(self, tag, attrs):
-            self._depth += 1
-            self._current_tag = tag
-            attrs_d = dict(attrs)
-            cls = attrs_d.get("class", "") or ""
-            cls_set = set(cls.lower().split())
-
-            # Detect card containers (class-based OR <article>/<li>/<tr> heuristics)
-            is_card_open = bool(cls_set & self._card_classes)
-            if tag in ("article", "li") and not self._in_card:
-                is_card_open = True
-            if tag == "section" and "auction" in cls.lower():
-                is_card_open = True
-
-            if is_card_open and not self._in_card:
-                self._in_card = True
-                self._card_depth = self._depth
-                self._card_texts = []
-
-            # Capture datetime attribute on <time> tags
-            if tag == "time" and self._in_card:
-                dt = attrs_d.get("datetime", "")
-                if dt:
-                    self._card_texts.append(f"__DATETIME__{dt}")
-
-        def handle_endtag(self, tag):
-            if self._in_card and self._depth == self._card_depth:
-                self._flush_card()
-                self._in_card = False
-            self._depth -= 1
-
-        def handle_data(self, data):
-            if self._in_card:
-                stripped = data.strip()
-                if stripped:
-                    self._card_texts.append(stripped)
-
-        def _flush_card(self):
-            texts = self._card_texts[:]
-            if not texts:
-                return
-
-            full = " ".join(texts)
-
-            # Try __DATETIME__ attribute first
-            date_iso = None
-            for t in texts:
-                if t.startswith("__DATETIME__"):
-                    candidate = t[len("__DATETIME__"):]
-                    m = self.ISO_RE.match(candidate[:10])
-                    if m:
-                        date_iso = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-                        break
-
-            # Fall back to natural-language date in text
-            if not date_iso:
-                m = self.DATE_RE.search(full)
-                if m:
-                    day   = int(m.group(1))
-                    month = self.MONTH_MAP.get(m.group(2)[:3].lower())
-                    year  = int(m.group(3)) if m.group(3) else datetime.utcnow().year
-                    if month:
-                        # Roll year forward if date looks past
-                        candidate = datetime(year, month, day)
-                        if candidate.date() < datetime.utcnow().date():
-                            candidate = datetime(year + 1, month, day)
-                        date_iso = candidate.strftime("%Y-%m-%d")
-
-            if not date_iso:
-                return  # Cannot determine date; skip
-
-            # Extract time
-            tm = self.TIME_RE.search(full)
-            time_str = tm.group(1) if tm else None
-
-            # Build event (best-effort field extraction from text tokens)
-            non_date_tokens = [
-                t for t in texts
-                if not t.startswith("__DATETIME__")
-                and not self.DATE_RE.search(t)
-                and not self.ISO_RE.search(t)
-                and not self.TIME_RE.search(t)
-                and len(t) > 2
-            ]
-            auctioneer  = non_date_tokens[0].strip()[:120] if non_date_tokens else None
-            venue_parts = non_date_tokens[1:3]
-            venue       = ", ".join(v.strip() for v in venue_parts)[:120] or None
-
-            self.events.append({
-                "date":         date_iso,
-                "auctioneer":   auctioneer,
-                "venue_or_type": venue,
-                "time":         time_str,
-                "source":       "eig_future_auctions",
-                "source_url":   EIG_FUTURE_URL,
-            })
-
-    parser = _EIGParser()
-    try:
-        parser.feed(html)
-    except Exception as pe:
-        app.logger.warning("[eig_events] parse error: %s", pe)
-        return []
-
-    events = parser.events
-    app.logger.info("[eig_events] parsed %d events from EIG", len(events))
-
-    # Deduplicate by (date, auctioneer) — parser may double-count nested elements
-    seen: set = set()
-    deduped: list = []
-    for ev in events:
-        key = (ev["date"], (ev["auctioneer"] or "").lower()[:40])
-        if key not in seen:
-            seen.add(key)
-            deduped.append(ev)
-
-    return sorted(deduped, key=lambda e: e["date"])
-
-
-def _eig_cache_get() -> Optional[list]:
-    """Return cached EIG events list, or None if missing/stale."""
-    if not _EIG_EVENTS_CACHE.get("events"):
-        return None
-    age = time.time() - _EIG_EVENTS_CACHE.get("_cached_at", 0)
-    if age > EIG_EVENTS_CACHE_TTL:
-        return None
-    return _EIG_EVENTS_CACHE["events"]
-
-
-def _eig_cache_set(events: list) -> None:
-    _EIG_EVENTS_CACHE["events"] = events
-    _EIG_EVENTS_CACHE["_cached_at"] = time.time()
-
-
-@app.route("/api/auction/events", methods=["GET", "OPTIONS"])
-@require_auth
-def auction_events_list():
-    """
-    GET /api/auction/events
-
-    Returns upcoming auction events fetched from EIG future auctions.
-    Results are cached server-side (default 6 h, configurable via
-    EIG_EVENTS_CACHE_TTL_SECONDS env var).
-
-    Query params:
-      force=true   — bypass cache and re-fetch from EIG immediately
-      days=N       — only return events within the next N days (default 90)
-
-    Response:
-      { ok, events: [...], cached, cached_at, count }
-
-    Each event:
-      { date, auctioneer, venue_or_type, time, source, source_url }
-
-    This is an enrichment-only endpoint — it does NOT touch legal-pack data,
-    valuation engine, risk engine, or deal analysis.
-    """
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-
-    force = request.args.get("force", "").lower() in ("1", "true", "yes")
-    try:
-        days = max(1, min(365, int(request.args.get("days", 90))))
-    except (ValueError, TypeError):
-        days = 90
-
-    cached = _eig_cache_get()
-
-    if cached is not None and not force:
-        events = cached
-        from_cache = True
-    else:
-        events = _fetch_eig_future_auctions()
-        if events:
-            _eig_cache_set(events)
-        elif cached is not None:
-            # Fetch failed but we have stale data — return stale rather than empty
-            app.logger.warning("[eig_events] fetch returned 0 results; serving stale cache")
-            events = cached
-        from_cache = False
-
-    # Filter to upcoming N days
-    today = datetime.utcnow().date()
-    cutoff = (today + timedelta(days=days)).isoformat()
-    today_s = today.isoformat()
-    filtered = [e for e in events if today_s <= e.get("date", "") <= cutoff]
-
-    return jsonify({
-        "ok":        True,
-        "events":    filtered,
-        "count":     len(filtered),
-        "cached":    from_cache,
-        "cached_at": datetime.utcfromtimestamp(
-            _EIG_EVENTS_CACHE.get("_cached_at", 0)
-        ).isoformat() if _EIG_EVENTS_CACHE.get("_cached_at") else None,
-        "source":    "eig_future_auctions",
-        "source_url": EIG_FUTURE_URL,
-    }), 200
-
-
-@app.route("/api/auction/events/refresh", methods=["POST", "OPTIONS"])
-@require_auth
-def auction_events_refresh():
-    """
-    POST /api/auction/events/refresh
-
-    Admin-gated forced refresh of the EIG events cache.
-    Requires X-Scan-Secret header matching AUCTION_SCAN_SECRET env var
-    (reuses the existing auction scan secret).
-
-    Does NOT modify any deal data.  Safe to call at any time.
-    """
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-
-    if not EIG_SCAN_SECRET:
-        return jsonify({"error": "Refresh not configured — set AUCTION_SCAN_SECRET env var"}), 503
-
-    provided = request.headers.get("X-Scan-Secret", "").strip()
-    if provided != EIG_SCAN_SECRET:
-        return jsonify({"error": "Forbidden"}), 403
-
-    events = _fetch_eig_future_auctions()
-    if events:
-        _eig_cache_set(events)
-    else:
-        return jsonify({
-            "ok":    False,
-            "error": "EIG fetch returned 0 events — cache not updated",
-            "count": 0,
-        }), 502
-
-    return jsonify({
-        "ok":        True,
-        "count":     len(events),
-        "cached_at": datetime.utcfromtimestamp(
-            _EIG_EVENTS_CACHE["_cached_at"]
-        ).isoformat(),
-    }), 200
-
-
 @app.route("/api/auction/sources", methods=["GET", "OPTIONS"])
 @require_auth
 def auction_sources_list():
@@ -11150,37 +10806,6 @@ def auction_listing_convert(listing_id: str):
             return jsonify({"error": "Deal creation failed"}), 500
 
         deal_id = deal_res.data[0]["id"]
-
-        # ── Propagate auction_date into summary_json ──────────────────────
-        # deals.auction_date is already set via deal_row above.
-        # Also write into summary_json so Verdict/DealReport/summary paths
-        # reading summary_json directly see the correct date.
-        _listing_ad = listing.get("auction_date")
-        if _listing_ad:
-            try:
-                _seed_sj = {
-                    "auction_date": _listing_ad,
-                    "property": {
-                        "auction_date": _listing_ad,
-                        "address":      listing.get("address"),
-                        "postcode":     listing.get("postcode"),
-                    },
-                    "_source": "auction_listing_convert",
-                }
-                supabase.table("deals") \
-                    .update({"summary_json": _seed_sj, "updated_at": now_iso()}) \
-                    .eq("id", deal_id) \
-                    .execute()
-                app.logger.info(
-                    "[auction/convert] Wrote auction_date %s to summary_json for deal %s",
-                    _listing_ad, deal_id
-                )
-            except Exception as _ad_e:
-                # Non-fatal: deals.auction_date is already set
-                app.logger.warning(
-                    "[auction/convert] summary_json auction_date write failed for deal %s: %s",
-                    deal_id, _ad_e
-                )
 
         # ── Mark listing as converted ─────────────────────────────────────
         try:
