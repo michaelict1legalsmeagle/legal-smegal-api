@@ -6211,33 +6211,6 @@ def update_deal(deal_id: str):
     if not updates:
         return jsonify({"error": "No valid fields to update"}), 400
     updates["updated_at"] = now_iso()
-
-    # ── When auction_date is patched alone, also propagate into summary_json ─
-    # Keeps summary_json.auction_date and summary_json.property.auction_date
-    # consistent with deals.auction_date so every page reading summary_json
-    # directly (Verdict, Deal Report, etc.) also sees the correct date.
-    # Only runs when summary_json is NOT already in the payload (avoid clobbering
-    # a concurrent full summary_json write).
-    if "auction_date" in data and "summary_json" not in data and supabase:
-        try:
-            _existing = supabase.table("deals") \
-                .select("summary_json") \
-                .eq("id", deal_id) \
-                .eq("user_id", request.user_id) \
-                .maybe_single() \
-                .execute()
-            if _existing and _existing.data:
-                _sj = dict(_existing.data.get("summary_json") or {})
-                _sj["auction_date"] = data["auction_date"]
-                _prop_key = "property" if "property" in _sj else ("prop" if "prop" in _sj else "property")
-                _sj[_prop_key] = dict(_sj.get(_prop_key) or {})
-                _sj[_prop_key]["auction_date"] = data["auction_date"]
-                updates["summary_json"] = _sj
-                app.logger.info("[update_deal] propagated auction_date %s into summary_json for %s", data["auction_date"], deal_id)
-        except Exception as _sj_err:
-            # Non-fatal — deals.auction_date still gets written
-            app.logger.warning("[update_deal] summary_json auction_date merge failed for %s: %s", deal_id, _sj_err)
-
     try:
         result = supabase.table("deals") \
             .update(updates) \
@@ -10461,6 +10434,134 @@ def diag_deal_trace(deal_id: str):
 #   POST /api/auction/listings/<id>/convert — convert listing to deal
 #   POST /api/auction/scan                 — admin-only manual scan trigger
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AUCTION EVENTS — in-process cache + /api/auction/events endpoint
+#
+# Stores upcoming auction event dates (from whatever enrichment
+# pipeline populates them) and exposes them to the dashboard.
+# Separate from legal-pack data, valuation engine, and risk engine.
+# ═══════════════════════════════════════════════════════════════════
+
+_EIG_EVENTS_CACHE: Dict[str, Any] = {}      # keys: "events", "_cached_at"
+EIG_EVENTS_CACHE_TTL = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h
+
+
+def _eig_cache_get() -> Optional[list]:
+    """Return cached auction events list, or None if missing/stale."""
+    if not _EIG_EVENTS_CACHE.get("events"):
+        return None
+    age = time.time() - _EIG_EVENTS_CACHE.get("_cached_at", 0)
+    if age > EIG_EVENTS_CACHE_TTL:
+        return None
+    return _EIG_EVENTS_CACHE["events"]
+
+
+def _eig_cache_set(events: list) -> None:
+    _EIG_EVENTS_CACHE["events"] = events
+    _EIG_EVENTS_CACHE["_cached_at"] = time.time()
+
+
+@app.route("/api/auction/events", methods=["GET", "OPTIONS"])
+@require_auth
+def auction_events_list():
+    """
+    GET /api/auction/events
+
+    Returns the cached list of upcoming auction events.
+    Events are stored via POST /api/auction/events/refresh (admin-gated)
+    or via any other pipeline that calls _eig_cache_set().
+
+    Query params:
+      days=N    — only return events within the next N days (default 90, max 365)
+      force=1   — bypass in-process cache (still reads from whatever is stored)
+
+    Response:
+      { ok, events: [...], count, cached, cached_at, source }
+
+    Each event shape (all fields optional except date):
+      { date, auctioneer, venue_or_type, time, source, source_url }
+
+    This endpoint is CORS-enabled via the global flask-cors config.
+    It touches no legal-pack data, valuation engine, or risk engine.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    try:
+        days = max(1, min(365, int(request.args.get("days", 90))))
+    except (ValueError, TypeError):
+        days = 90
+
+    cached = _eig_cache_get()
+    events = cached or []
+
+    # Filter to upcoming N days
+    today_s  = datetime.utcnow().date().isoformat()
+    cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
+    filtered = [e for e in events if today_s <= str(e.get("date", "")) <= cutoff_s]
+
+    return jsonify({
+        "ok":        True,
+        "events":    filtered,
+        "count":     len(filtered),
+        "cached":    cached is not None,
+        "cached_at": datetime.utcfromtimestamp(
+            _EIG_EVENTS_CACHE.get("_cached_at", 0)
+        ).isoformat() if _EIG_EVENTS_CACHE.get("_cached_at") else None,
+        "source":    "auction_events_cache",
+    }), 200
+
+
+@app.route("/api/auction/events/refresh", methods=["POST", "OPTIONS"])
+@require_auth
+def auction_events_refresh():
+    """
+    POST /api/auction/events/refresh
+
+    Admin-gated endpoint to load or replace the auction events cache.
+    Requires X-Scan-Secret header matching AUCTION_SCAN_SECRET env var.
+
+    Body: { "events": [ { date, auctioneer, venue_or_type, time, source, source_url }, ... ] }
+
+    Validates that each event has at minimum a non-empty "date" field (YYYY-MM-DD).
+    Returns { ok, count, cached_at }.
+
+    This does NOT scrape anything — caller supplies the events list.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    if not AUCTION_SCAN_SECRET:
+        return jsonify({"error": "Refresh not configured — set AUCTION_SCAN_SECRET env var"}), 503
+
+    provided = request.headers.get("X-Scan-Secret", "").strip()
+    if provided != AUCTION_SCAN_SECRET:
+        app.logger.warning("[auction/events/refresh] Unauthorised attempt by user %s", request.user_id)
+        return jsonify({"error": "Forbidden"}), 403
+
+    data   = request.get_json(silent=True) or {}
+    events = data.get("events")
+    if not isinstance(events, list):
+        return jsonify({"error": "Body must be { events: [...] }"}), 400
+
+    # Validate: each entry must have a date string
+    valid = [e for e in events if isinstance(e, dict) and e.get("date")]
+    if not valid:
+        return jsonify({"error": "No valid events provided (each must have a date field)"}), 400
+
+    _eig_cache_set(valid)
+    app.logger.info("[auction/events/refresh] Cache updated: %d events", len(valid))
+
+    return jsonify({
+        "ok":        True,
+        "count":     len(valid),
+        "cached_at": datetime.utcfromtimestamp(
+            _EIG_EVENTS_CACHE["_cached_at"]
+        ).isoformat(),
+    }), 200
+
 
 AUCTION_SCAN_SECRET = os.environ.get("AUCTION_SCAN_SECRET", "").strip()
 
