@@ -10749,11 +10749,12 @@ def auction_events_list():
 
 
 @app.route("/api/auction/events/refresh", methods=["POST", "OPTIONS"])
-@require_auth
 def auction_events_refresh():
     """
     POST /api/auction/events/refresh
 
+    Auth: X-Scan-Secret header only (matches AUCTION_SCAN_SECRET env var).
+    No JWT required — called by cron job which has no user session.
     Scrapes both EIG pages and writes results to Supabase auction_events table.
     Also updates in-process cache as secondary storage.
 
