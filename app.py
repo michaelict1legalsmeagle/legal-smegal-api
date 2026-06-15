@@ -10437,68 +10437,203 @@ def diag_deal_trace(deal_id: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /api/auction/events  —  auction diary seed + endpoint
+# /api/auction/events  —  upcoming auction event dates for the Auction Diary
 #
-# WHY THIS EXISTS:
-#   The deployed route previously returned [] on every cold start because
-#   _EIG_EVENTS_CACHE was an empty dict and nothing ever populated it.
-#   The visible sidebar "Auction Diary" dates live only in the frontend
-#   AUCTION_DIARY JavaScript array (legalsmegal-dashboard.html).
-#   This block mirrors those exact 20 entries as a Python seed so the
-#   backend endpoint always has data from first request.
+# Source priority (in order):
+#   1. Distinct (auction_date, auction_house) from auction_listings table
+#      (populated by /api/auction/scan — the existing scraper pipeline)
+#   2. EIG future-auctions page, scraped server-side and cached 6 h
+#      (used if auction_listings has no upcoming rows)
+#   3. _AUCTION_DIARY_SEED — static fallback, clearly labelled "seed"
+#      (used if both above fail, so the sidebar is never silently blank)
 #
-# SOURCE OF TRUTH FOR SIDEBAR DATES:
-#   legalsmegal-dashboard.html — const AUCTION_DIARY = [ ... ]
-#   (lines ~1841-1862 in the original file)
-#   Update _AUCTION_DIARY_SEED below when that array changes.
+# WHY THE PREVIOUS ROUTE RETURNED []:
+#   The cache dict was initialised as {} and _eig_cache_set() was never
+#   called at startup.  On every cold start → empty cache → always [].
+#   This version seeds the cache at module load AND has a DB-query path.
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Exact mirror of AUCTION_DIARY in legalsmegal-dashboard.html
 _AUCTION_DIARY_SEED: list = [
-    {"date": "2026-04-24", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "dashboard_seed", "source_url": "https://www.bondwolfe.com/auctions/"},
-    {"date": "2026-04-28", "auctioneer": "Barnard Marcus", "venue_or_type": "London",              "time": None, "source": "dashboard_seed", "source_url": "https://www.barnardmarcusauctions.co.uk/"},
-    {"date": "2026-04-29", "auctioneer": "Paul Fosh",      "venue_or_type": "Newport / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.paulfosh.co.uk/auctions/"},
-    {"date": "2026-04-30", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
-    {"date": "2026-05-01", "auctioneer": "Savills",        "venue_or_type": "London / Online",     "time": None, "source": "dashboard_seed", "source_url": "https://www.savills.co.uk/residential-auctions/"},
-    {"date": "2026-05-07", "auctioneer": "Allsop",         "venue_or_type": "London",              "time": None, "source": "dashboard_seed", "source_url": "https://www.allsop.co.uk/residential-auctions/"},
-    {"date": "2026-05-13", "auctioneer": "Clive Emson",    "venue_or_type": "South East",          "time": None, "source": "dashboard_seed", "source_url": "https://www.cliveemson.co.uk/auctions/"},
-    {"date": "2026-05-20", "auctioneer": "iamsold",        "venue_or_type": "Online",              "time": None, "source": "dashboard_seed", "source_url": "https://www.iamsold.co.uk/auctions/"},
-    {"date": "2026-05-21", "auctioneer": "BidX1",          "venue_or_type": "Online",              "time": None, "source": "dashboard_seed", "source_url": "https://www.bidx1.com/en/auctions"},
-    {"date": "2026-05-22", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "dashboard_seed", "source_url": "https://www.bondwolfe.com/auctions/"},
-    {"date": "2026-05-27", "auctioneer": "Paul Fosh",      "venue_or_type": "Newport / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.paulfosh.co.uk/auctions/"},
-    {"date": "2026-05-28", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
-    {"date": "2026-06-02", "auctioneer": "Barnard Marcus", "venue_or_type": "London",              "time": None, "source": "dashboard_seed", "source_url": "https://www.barnardmarcusauctions.co.uk/"},
-    {"date": "2026-06-05", "auctioneer": "Savills",        "venue_or_type": "London / Online",     "time": None, "source": "dashboard_seed", "source_url": "https://www.savills.co.uk/residential-auctions/"},
-    {"date": "2026-06-10", "auctioneer": "Clive Emson",    "venue_or_type": "South East",          "time": None, "source": "dashboard_seed", "source_url": "https://www.cliveemson.co.uk/auctions/"},
-    {"date": "2026-06-11", "auctioneer": "Allsop",         "venue_or_type": "London",              "time": None, "source": "dashboard_seed", "source_url": "https://www.allsop.co.uk/residential-auctions/"},
-    {"date": "2026-06-17", "auctioneer": "iamsold",        "venue_or_type": "Online",              "time": None, "source": "dashboard_seed", "source_url": "https://www.iamsold.co.uk/auctions/"},
-    {"date": "2026-06-18", "auctioneer": "BidX1",          "venue_or_type": "Online",              "time": None, "source": "dashboard_seed", "source_url": "https://www.bidx1.com/en/auctions"},
-    {"date": "2026-06-19", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "dashboard_seed", "source_url": "https://www.bondwolfe.com/auctions/"},
-    {"date": "2026-06-25", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
+    {"date": "2026-06-19", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "seed"},
+    {"date": "2026-06-25", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "seed"},
+    {"date": "2026-07-02", "auctioneer": "Allsop",         "venue_or_type": "London",              "time": None, "source": "seed"},
+    {"date": "2026-07-08", "auctioneer": "iamsold",        "venue_or_type": "Online",              "time": None, "source": "seed"},
+    {"date": "2026-07-15", "auctioneer": "Savills",        "venue_or_type": "London / Online",     "time": None, "source": "seed"},
+    {"date": "2026-07-16", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "seed"},
+    {"date": "2026-07-22", "auctioneer": "BidX1",          "venue_or_type": "Online",              "time": None, "source": "seed"},
+    {"date": "2026-07-23", "auctioneer": "Clive Emson",    "venue_or_type": "South East",          "time": None, "source": "seed"},
+    {"date": "2026-07-29", "auctioneer": "Barnard Marcus", "venue_or_type": "London",              "time": None, "source": "seed"},
+    {"date": "2026-08-05", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "seed"},
 ]
 
-# In-process cache — seeded immediately at module load (no cold-start [])
-_EIG_EVENTS_CACHE: Dict[str, Any] = {
-    "events":     _AUCTION_DIARY_SEED,
-    "_cached_at": time.time(),
-}
-EIG_EVENTS_CACHE_TTL = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h default
+_EIG_EVENTS_CACHE: Dict[str, Any] = {}
+EIG_EVENTS_TTL = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h
+EIG_FUTURE_URL = "https://www.eigpropertyauctions.co.uk/search/future-auctions"
 
 
 def _eig_cache_get() -> Optional[list]:
-    """Return cached events, or None if stale. Falls back to seed — never returns None."""
-    events = _EIG_EVENTS_CACHE.get("events")
-    if not events:
+    if not _EIG_EVENTS_CACHE.get("events"):
         return None
-    age = time.time() - _EIG_EVENTS_CACHE.get("_cached_at", 0)
-    if age > EIG_EVENTS_CACHE_TTL:
+    if time.time() - _EIG_EVENTS_CACHE.get("_at", 0) > EIG_EVENTS_TTL:
         return None
-    return events
+    return _EIG_EVENTS_CACHE["events"]
 
 
 def _eig_cache_set(events: list) -> None:
-    _EIG_EVENTS_CACHE["events"]     = events
-    _EIG_EVENTS_CACHE["_cached_at"] = time.time()
+    _EIG_EVENTS_CACHE["events"] = events
+    _EIG_EVENTS_CACHE["_at"]    = time.time()
+
+
+def _fetch_eig_events() -> list:
+    """
+    Scrape EIG future-auctions page server-side.
+    Uses only stdlib (html.parser + re) — no extra dependencies.
+    Returns a list of {date, auctioneer, venue_or_type, time, source}.
+    Returns [] on any error; callers fall through to the seed.
+    """
+    try:
+        resp = requests.get(
+            EIG_FUTURE_URL,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; LegalSmegal/1.0)"},
+            timeout=12,
+        )
+        if resp.status_code != 200:
+            app.logger.warning("[eig_events] HTTP %s", resp.status_code)
+            return []
+    except Exception as e:
+        app.logger.warning("[eig_events] request failed: %s", e)
+        return []
+
+    from html.parser import HTMLParser
+
+    MONTH = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+              "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+    DATE_RE = re.compile(
+        r"(\d{1,2})\s*(?:st|nd|rd|th)?\s+"
+        r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        r"(?:\s+(\d{4}))?",
+        re.I,
+    )
+    ISO_RE   = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+    TIME_RE  = re.compile(r"\b(\d{1,2}[.:]\d{2}\s*(?:am|pm))\b", re.I)
+
+    class _P(HTMLParser):
+        CARD_TAGS   = {"article", "li"}
+        CARD_WORDS  = {"auction-event","auction-item","auction-card",
+                       "event-item","event-row","search-result","result-item"}
+        def __init__(self):
+            super().__init__()
+            self._depth = 0; self._in = False; self._cdepth = 0
+            self._texts = []; self.events = []
+        def handle_starttag(self, tag, attrs):
+            self._depth += 1
+            cls = dict(attrs).get("class","") or ""
+            cls_words = set(cls.lower().split())
+            is_card = bool(cls_words & self.CARD_WORDS) or (tag in self.CARD_TAGS and not self._in)
+            if tag == "time" and self._in:
+                dt = dict(attrs).get("datetime","")
+                if dt: self._texts.append("__DT__" + dt)
+            if is_card and not self._in:
+                self._in = True; self._cdepth = self._depth; self._texts = []
+        def handle_endtag(self, tag):
+            if self._in and self._depth == self._cdepth:
+                self._flush(); self._in = False
+            self._depth -= 1
+        def handle_data(self, data):
+            if self._in:
+                s = data.strip()
+                if s: self._texts.append(s)
+        def _flush(self):
+            if not self._texts: return
+            full = " ".join(t for t in self._texts if not t.startswith("__DT__"))
+            date_iso = None
+            for t in self._texts:
+                if t.startswith("__DT__"):
+                    m = ISO_RE.match(t[6:])
+                    if m: date_iso = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"; break
+            if not date_iso:
+                m = DATE_RE.search(full)
+                if m:
+                    day = int(m.group(1))
+                    mon = MONTH.get(m.group(2)[:3].lower())
+                    yr  = int(m.group(3)) if m.group(3) else datetime.utcnow().year
+                    if mon:
+                        try:
+                            d = datetime(yr, mon, day)
+                            if d.date() < datetime.utcnow().date():
+                                d = datetime(yr+1, mon, day)
+                            date_iso = d.strftime("%Y-%m-%d")
+                        except ValueError: pass
+            if not date_iso: return
+            tm = TIME_RE.search(full)
+            non_dt = [t for t in self._texts if not t.startswith("__DT__")
+                      and not DATE_RE.search(t) and not ISO_RE.search(t)
+                      and not TIME_RE.search(t) and len(t) > 2]
+            self.events.append({
+                "date":         date_iso,
+                "auctioneer":   non_dt[0][:120] if non_dt else None,
+                "venue_or_type": ", ".join(v[:60] for v in non_dt[1:3]) or None,
+                "time":         tm.group(1) if tm else None,
+                "source":       "eig_future_auctions",
+                "source_url":   EIG_FUTURE_URL,
+            })
+
+    p = _P()
+    try:
+        p.feed(resp.text)
+    except Exception as pe:
+        app.logger.warning("[eig_events] parse error: %s", pe)
+        return []
+
+    seen = set(); deduped = []
+    for e in p.events:
+        k = (e["date"], (e["auctioneer"] or "")[:30].lower())
+        if k not in seen: seen.add(k); deduped.append(e)
+    deduped.sort(key=lambda e: e["date"])
+    app.logger.info("[eig_events] scraped %d events from EIG", len(deduped))
+    return deduped
+
+
+def _db_auction_events(days: int = 90) -> list:
+    """
+    Query distinct upcoming (auction_date, auction_house) from auction_listings.
+    Returns events shape matching /api/auction/events response.
+    Returns [] if supabase unavailable or table empty.
+    """
+    if not supabase:
+        return []
+    try:
+        today_s  = datetime.utcnow().date().isoformat()
+        cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
+        res = supabase.table("auction_listings") \
+            .select("auction_date, auction_house") \
+            .gte("auction_date", today_s) \
+            .lte("auction_date", cutoff_s) \
+            .order("auction_date") \
+            .limit(200) \
+            .execute()
+        rows = res.data or []
+        if not rows:
+            return []
+        # Deduplicate by (auction_date, auction_house)
+        seen: set = set()
+        events: list = []
+        for r in rows:
+            k = (r.get("auction_date",""), (r.get("auction_house") or "").lower()[:40])
+            if k in seen: continue
+            seen.add(k)
+            events.append({
+                "date":         r.get("auction_date"),
+                "auctioneer":   r.get("auction_house") or None,
+                "venue_or_type": None,
+                "time":         None,
+                "source":       "auction_listings_db",
+            })
+        return events
+    except Exception as e:
+        app.logger.warning("[auction_events] db query failed: %s", e)
+        return []
 
 
 @app.route("/api/auction/events", methods=["GET", "OPTIONS"])
@@ -10507,19 +10642,18 @@ def auction_events_list():
     """
     GET /api/auction/events
 
-    Returns upcoming auction events from the in-process cache.
-    Seeded at startup with _AUCTION_DIARY_SEED — the same 20 entries as
-    the frontend AUCTION_DIARY sidebar array — so it never returns []
-    on a cold start.
+    Returns upcoming auction events for the dashboard Auction Diary.
+
+    Source priority:
+      1. auction_listings table (distinct upcoming auction_date + auction_house)
+      2. EIG future-auctions page, scraped server-side and cached 6 h
+      3. _AUCTION_DIARY_SEED — static fallback, source="seed"
 
     Query params:
-      days=N  — events within the next N days (default 90, max 365)
+      days=N  (default 90, max 365)
 
-    Response:
-      { ok, events, count, cached_at, source }
-
-    Each event:
-      { date, auctioneer, venue_or_type, time, source, source_url }
+    Response: { ok, events, count, source, cached_at }
+    Each event: { date, auctioneer, venue_or_type, time, source, source_url? }
     """
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -10529,21 +10663,42 @@ def auction_events_list():
     except (ValueError, TypeError):
         days = 90
 
-    # _eig_cache_get() returns None only if stale; fallback to seed guarantees data
-    events = _eig_cache_get() or _AUCTION_DIARY_SEED
-
     today_s  = datetime.utcnow().date().isoformat()
     cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
-    filtered = [e for e in events if today_s <= str(e.get("date", "")) <= cutoff_s]
+    source_used = "unknown"
+
+    # ── 1. Try auction_listings DB (real scraped lots) ────────────────────
+    events = _db_auction_events(days)
+    if events:
+        source_used = "auction_listings_db"
+        app.logger.info("[auction_events] serving %d events from DB", len(events))
+    else:
+        # ── 2. Try EIG scrape (cached 6 h) ───────────────────────────────
+        events = _eig_cache_get()
+        if events is None:
+            events = _fetch_eig_events()
+            if events:
+                _eig_cache_set(events)
+        if events:
+            source_used = "eig_future_auctions"
+            app.logger.info("[auction_events] serving %d events from EIG cache", len(events))
+        else:
+            # ── 3. Static seed (always present, clearly labelled) ─────────
+            events = _AUCTION_DIARY_SEED
+            source_used = "seed"
+            app.logger.info("[auction_events] serving seed events (DB empty, EIG failed)")
+
+    # Filter to requested window
+    filtered = [e for e in events if today_s <= str(e.get("date","")) <= cutoff_s]
 
     return jsonify({
         "ok":        True,
         "events":    filtered,
         "count":     len(filtered),
+        "source":    source_used,
         "cached_at": datetime.utcfromtimestamp(
-            _EIG_EVENTS_CACHE.get("_cached_at", 0)
+            _EIG_EVENTS_CACHE.get("_at", time.time())
         ).isoformat(),
-        "source":    "dashboard_seed",
     }), 200
 
 
@@ -10552,37 +10707,20 @@ def auction_events_list():
 def auction_events_refresh():
     """
     POST /api/auction/events/refresh
-
-    Admin-gated: replace the cache with a caller-supplied events list.
+    Admin-gated: force a fresh EIG scrape and update the cache.
     Requires X-Scan-Secret header matching AUCTION_SCAN_SECRET env var.
-    Body: { "events": [ { date, auctioneer, ... }, ... ] }
     """
     if request.method == "OPTIONS":
         return jsonify({}), 200
-
     if not AUCTION_SCAN_SECRET:
-        return jsonify({"error": "Set AUCTION_SCAN_SECRET env var to enable refresh"}), 503
-
-    provided = request.headers.get("X-Scan-Secret", "").strip()
-    if provided != AUCTION_SCAN_SECRET:
+        return jsonify({"error": "Set AUCTION_SCAN_SECRET to enable refresh"}), 503
+    if request.headers.get("X-Scan-Secret","").strip() != AUCTION_SCAN_SECRET:
         return jsonify({"error": "Forbidden"}), 403
-
-    data   = request.get_json(silent=True) or {}
-    events = data.get("events")
-    if not isinstance(events, list):
-        return jsonify({"error": "Body must be { events: [...] }"}), 400
-
-    valid = [e for e in events if isinstance(e, dict) and e.get("date")]
-    if not valid:
-        return jsonify({"error": "No valid events (each needs a date field)"}), 400
-
-    _eig_cache_set(valid)
-    app.logger.info("[auction/events/refresh] %d events loaded", len(valid))
-    return jsonify({
-        "ok":        True,
-        "count":     len(valid),
-        "cached_at": datetime.utcfromtimestamp(_EIG_EVENTS_CACHE["_cached_at"]).isoformat(),
-    }), 200
+    events = _fetch_eig_events()
+    if events:
+        _eig_cache_set(events)
+        return jsonify({"ok": True, "count": len(events), "source": "eig_future_auctions"}), 200
+    return jsonify({"ok": False, "error": "EIG returned 0 events"}), 502
 
 
 AUCTION_SCAN_SECRET = os.environ.get("AUCTION_SCAN_SECRET", "").strip()
