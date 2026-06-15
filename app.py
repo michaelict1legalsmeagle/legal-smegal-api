@@ -10437,14 +10437,40 @@ def diag_deal_trace(deal_id: str):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# AUCTION EVENTS — in-process cache + /api/auction/events endpoint
+# AUCTION EVENTS — static seed + in-process cache
 #
-# Stores upcoming auction event dates (from whatever enrichment
-# pipeline populates them) and exposes them to the dashboard.
-# Separate from legal-pack data, valuation engine, and risk engine.
+# /api/auction/events serves the same upcoming auction event dates
+# shown in the dashboard Auction Diary sidebar.
+# Seeded at module load from the canonical list below — no scraping.
+# Can be refreshed at runtime via POST /api/auction/events/refresh
+# (requires X-Scan-Secret header matching AUCTION_SCAN_SECRET).
+#
+# IMPORTANT: the cache starts EMPTY on every cold start unless seeded
+# here.  The previous route returned [] because it relied solely on
+# the in-process dict and nothing ever called /refresh.  Fix: seed at
+# import time with the same static dates as the frontend AUCTION_DIARY.
 # ═══════════════════════════════════════════════════════════════════
 
-_EIG_EVENTS_CACHE: Dict[str, Any] = {}      # keys: "events", "_cached_at"
+# Canonical auction event list — mirrors AUCTION_DIARY in the frontend.
+# Update both places when adding new events.
+_AUCTION_DIARY_SEED = [
+    {"date": "2026-06-19", "auctioneer": "Bond Wolfe",    "venue_or_type": "Birmingham / Online",  "time": None, "source": "existing_auction_diary", "source_url": "https://www.bondwolfe.com/auctions/"},
+    {"date": "2026-06-25", "auctioneer": "SDL Auctions",  "venue_or_type": "UK-wide / Online",     "time": None, "source": "existing_auction_diary", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
+    {"date": "2026-07-03", "auctioneer": "Allsop",        "venue_or_type": "London",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.allsop.co.uk/residential-auctions/"},
+    {"date": "2026-07-08", "auctioneer": "Clive Emson",   "venue_or_type": "South East",           "time": None, "source": "existing_auction_diary", "source_url": "https://www.cliveemson.co.uk/auctions/"},
+    {"date": "2026-07-15", "auctioneer": "Savills",       "venue_or_type": "London / Online",      "time": None, "source": "existing_auction_diary", "source_url": "https://www.savills.co.uk/residential-auctions/"},
+    {"date": "2026-07-16", "auctioneer": "Bond Wolfe",    "venue_or_type": "Birmingham / Online",  "time": None, "source": "existing_auction_diary", "source_url": "https://www.bondwolfe.com/auctions/"},
+    {"date": "2026-07-21", "auctioneer": "iamsold",       "venue_or_type": "Online",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.iamsold.co.uk/auctions/"},
+    {"date": "2026-07-22", "auctioneer": "BidX1",         "venue_or_type": "Online",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.bidx1.com/en/auctions"},
+    {"date": "2026-07-23", "auctioneer": "SDL Auctions",  "venue_or_type": "UK-wide / Online",     "time": None, "source": "existing_auction_diary", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
+    {"date": "2026-07-29", "auctioneer": "Barnard Marcus","venue_or_type": "London",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.barnardmarcusauctions.co.uk/"},
+    {"date": "2026-08-05", "auctioneer": "Paul Fosh",     "venue_or_type": "Newport / Online",     "time": None, "source": "existing_auction_diary", "source_url": "https://www.paulfosh.co.uk/auctions/"},
+    {"date": "2026-08-12", "auctioneer": "Allsop",        "venue_or_type": "London",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.allsop.co.uk/residential-auctions/"},
+    {"date": "2026-08-19", "auctioneer": "Bond Wolfe",    "venue_or_type": "Birmingham / Online",  "time": None, "source": "existing_auction_diary", "source_url": "https://www.bondwolfe.com/auctions/"},
+    {"date": "2026-08-26", "auctioneer": "SDL Auctions",  "venue_or_type": "UK-wide / Online",     "time": None, "source": "existing_auction_diary", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
+]
+
+_EIG_EVENTS_CACHE: Dict[str, Any] = {}
 EIG_EVENTS_CACHE_TTL = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h
 
 
@@ -10463,28 +10489,30 @@ def _eig_cache_set(events: list) -> None:
     _EIG_EVENTS_CACHE["_cached_at"] = time.time()
 
 
+# Seed cache immediately at module load so the endpoint never returns []
+# on a fresh cold start.  POST /api/auction/events/refresh can override.
+_eig_cache_set(_AUCTION_DIARY_SEED)
+
+
 @app.route("/api/auction/events", methods=["GET", "OPTIONS"])
 @require_auth
 def auction_events_list():
     """
     GET /api/auction/events
 
-    Returns the cached list of upcoming auction events.
-    Events are stored via POST /api/auction/events/refresh (admin-gated)
-    or via any other pipeline that calls _eig_cache_set().
+    Returns upcoming auction events from the in-process cache.
+    Seeded at startup with the canonical _AUCTION_DIARY_SEED list
+    (same dates as the frontend AUCTION_DIARY sidebar).
+    Can be refreshed at runtime via POST /api/auction/events/refresh.
 
     Query params:
-      days=N    — only return events within the next N days (default 90, max 365)
-      force=1   — bypass in-process cache (still reads from whatever is stored)
+      days=N  — only events within the next N days (default 90, max 365)
 
-    Response:
-      { ok, events: [...], count, cached, cached_at, source }
+    Response shape:
+      { ok, events: [...], count, cached_at }
 
-    Each event shape (all fields optional except date):
+    Each event:
       { date, auctioneer, venue_or_type, time, source, source_url }
-
-    This endpoint is CORS-enabled via the global flask-cors config.
-    It touches no legal-pack data, valuation engine, or risk engine.
     """
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -10494,10 +10522,8 @@ def auction_events_list():
     except (ValueError, TypeError):
         days = 90
 
-    cached = _eig_cache_get()
-    events = cached or []
+    events = _eig_cache_get() or _AUCTION_DIARY_SEED  # fallback to seed if cache somehow cleared
 
-    # Filter to upcoming N days
     today_s  = datetime.utcnow().date().isoformat()
     cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
     filtered = [e for e in events if today_s <= str(e.get("date", "")) <= cutoff_s]
@@ -10506,11 +10532,10 @@ def auction_events_list():
         "ok":        True,
         "events":    filtered,
         "count":     len(filtered),
-        "cached":    cached is not None,
         "cached_at": datetime.utcfromtimestamp(
             _EIG_EVENTS_CACHE.get("_cached_at", 0)
         ).isoformat() if _EIG_EVENTS_CACHE.get("_cached_at") else None,
-        "source":    "auction_events_cache",
+        "source":    "existing_auction_diary",
     }), 200
 
 
@@ -10520,15 +10545,9 @@ def auction_events_refresh():
     """
     POST /api/auction/events/refresh
 
-    Admin-gated endpoint to load or replace the auction events cache.
+    Admin-gated endpoint to replace the auction events cache.
     Requires X-Scan-Secret header matching AUCTION_SCAN_SECRET env var.
-
     Body: { "events": [ { date, auctioneer, venue_or_type, time, source, source_url }, ... ] }
-
-    Validates that each event has at minimum a non-empty "date" field (YYYY-MM-DD).
-    Returns { ok, count, cached_at }.
-
-    This does NOT scrape anything — caller supplies the events list.
     """
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -10538,7 +10557,6 @@ def auction_events_refresh():
 
     provided = request.headers.get("X-Scan-Secret", "").strip()
     if provided != AUCTION_SCAN_SECRET:
-        app.logger.warning("[auction/events/refresh] Unauthorised attempt by user %s", request.user_id)
         return jsonify({"error": "Forbidden"}), 403
 
     data   = request.get_json(silent=True) or {}
@@ -10546,20 +10564,16 @@ def auction_events_refresh():
     if not isinstance(events, list):
         return jsonify({"error": "Body must be { events: [...] }"}), 400
 
-    # Validate: each entry must have a date string
     valid = [e for e in events if isinstance(e, dict) and e.get("date")]
     if not valid:
-        return jsonify({"error": "No valid events provided (each must have a date field)"}), 400
+        return jsonify({"error": "No valid events (each must have a date field)"}), 400
 
     _eig_cache_set(valid)
     app.logger.info("[auction/events/refresh] Cache updated: %d events", len(valid))
-
     return jsonify({
         "ok":        True,
         "count":     len(valid),
-        "cached_at": datetime.utcfromtimestamp(
-            _EIG_EVENTS_CACHE["_cached_at"]
-        ).isoformat(),
+        "cached_at": datetime.utcfromtimestamp(_EIG_EVENTS_CACHE["_cached_at"]).isoformat(),
     }), 200
 
 
