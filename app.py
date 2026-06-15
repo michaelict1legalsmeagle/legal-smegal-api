@@ -10569,8 +10569,10 @@ def _fetch_eig_events() -> list:
                 if re.match(r"\d{2}:\d{2}", time_part):
                     time_str = time_part
 
-            # Source URL
-            source_url = item.get("url") or EIG_FUTURE_URL
+            # Always link to EIG future-auctions search page.
+            # The JSON-LD url field contains internal GUID paths (/02a4aabd-...)
+            # that 404 when clicked — not usable as public links.
+            source_url = EIG_FUTURE_URL
 
             events.append({
                 "date":         date_str,
