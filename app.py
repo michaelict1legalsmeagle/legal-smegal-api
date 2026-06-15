@@ -10459,15 +10459,15 @@ EIG_LIVESTREAM_URL = "https://www.eigpropertyauctions.co.uk/search/live-stream"
 # Used as the link target in the dashboard diary so users go to the
 # auction house directly rather than a broken EIG internal GUID URL.
 _AUCTIONEER_URLS: Dict[str, str] = {
-    "allsop":           "https://www.allsop.co.uk/residential-auctions/",
+    "allsop":           "https://www.allsop.co.uk/auctions/future-auction-dates/",
     "barnard marcus":   "https://www.barnardmarcusauctions.co.uk/",
     "barns estate":     "https://www.barnestateagents.com/auctions/",
     "barnard":          "https://www.barnardmarcusauctions.co.uk/",
     "bidx1":            "https://www.bidx1.com/en/auctions",
-    "bond wolfe":       "https://www.bondwolfe.com/auctions/",
+    "bond wolfe":       "https://www.bondwolfe.com/property-auctions-west-midlands/upcoming-property-auctions/",
     "clive emson":      "https://www.cliveemson.co.uk/auctions/",
     "clarke":           "https://www.clarkeandsimpson.co.uk/auctions",
-    "auction house":    "https://www.auctionhouse.co.uk/results/auction-dates/",
+    "auction house":    "https://www.auctionhouse.co.uk/auction/future-auction-dates",
     "hollis morgan":    "https://www.hollismorgan.co.uk/auction-dates/",
     "iamsold":          "https://www.iamsold.co.uk/auctions/",
     "landwood":         "https://www.landwood.co.uk/property-auctions/",
@@ -10487,13 +10487,15 @@ _EIG_MEM_TTL = 21600  # 6 h
 
 
 def _auctioneer_url(name: Optional[str]) -> str:
-    """Return the auction house own-site URL, or EIG future-auctions as fallback."""
+    """Return the auction house own-site URL, or EIG future-auctions as fallback.
+    Only returns auctioneer-specific URLs for houses we've verified work."""
     if not name:
         return EIG_FUTURE_URL
     n = name.lower()
     for key, url in _AUCTIONEER_URLS.items():
         if key in n:
             return url
+    # Default to EIG search page — safer than guessing an auctioneer URL
     return EIG_FUTURE_URL
 
 
