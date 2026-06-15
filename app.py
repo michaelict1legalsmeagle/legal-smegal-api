@@ -9913,6 +9913,68 @@ def guest_get_report():
 # ════════════════════════════════════════════════════════════════════════════
 
 
+
+# ── FEEDBACK — service rating ────────────────────────────────────────────────
+@app.route("/api/feedback/service", methods=["POST", "OPTIONS"])
+@require_auth
+def feedback_service():
+    """POST { rating, category_label, text } — store service feedback from sidebar widget."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    try:
+        supabase.table("feedback").insert({
+            "user_id":        request.user_id,
+            "rating":         int(data.get("rating") or 0) or None,
+            "category_label": (data.get("category_label") or "").strip() or None,
+            "summary":        (data.get("text") or "").strip() or None,
+            "details":        (data.get("text") or "").strip() or None,
+            "page_url":       request.referrer or None,
+            "user_agent":     request.headers.get("User-Agent", "")[:255] or None,
+        }).execute()
+        return jsonify({"ok": True}), 201
+    except Exception as exc:
+        app.logger.error("feedback_service insert failed: %s", exc)
+        return jsonify({"error": "Failed to save feedback"}), 500
+
+
+# ── FEEDBACK — deal debrief ───────────────────────────────────────────────────
+@app.route("/api/feedback/debrief", methods=["POST", "OPTIONS"])
+@require_auth
+def feedback_debrief():
+    """POST { deal_id, stage_broke, decision_made, engine_needs } — store deal debrief signal."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    stage    = (data.get("stage_broke")   or "").strip() or None
+    decision = (data.get("decision_made") or "").strip() or None
+    needs    = (data.get("engine_needs")  or "").strip() or None
+    deal_id  = (data.get("deal_id")       or "").strip() or None
+    summary  = stage or "Deal debrief"
+    details_parts = []
+    if decision: details_parts.append(f"Decision: {decision}")
+    if needs:    details_parts.append(f"Engine needs: {needs}")
+    if deal_id:  details_parts.append(f"Deal ID: {deal_id}")
+    try:
+        supabase.table("feedback").insert({
+            "user_id":        request.user_id,
+            "rating":         None,
+            "category_label": "Deal Debrief",
+            "summary":        summary,
+            "details":        "\n".join(details_parts) or None,
+            "page_url":       deal_id,
+            "user_agent":     request.headers.get("User-Agent", "")[:255] or None,
+        }).execute()
+        return jsonify({"ok": True}), 201
+    except Exception as exc:
+        app.logger.error("feedback_debrief insert failed: %s", exc)
+        return jsonify({"error": "Failed to save debrief"}), 500
+
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
