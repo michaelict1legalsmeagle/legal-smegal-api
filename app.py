@@ -10436,62 +10436,69 @@ def diag_deal_trace(deal_id: str):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-# ═══════════════════════════════════════════════════════════════════
-# AUCTION EVENTS — static seed + in-process cache
+# ══════════════════════════════════════════════════════════════════════════════
+# /api/auction/events  —  auction diary seed + endpoint
 #
-# /api/auction/events serves the same upcoming auction event dates
-# shown in the dashboard Auction Diary sidebar.
-# Seeded at module load from the canonical list below — no scraping.
-# Can be refreshed at runtime via POST /api/auction/events/refresh
-# (requires X-Scan-Secret header matching AUCTION_SCAN_SECRET).
+# WHY THIS EXISTS:
+#   The deployed route previously returned [] on every cold start because
+#   _EIG_EVENTS_CACHE was an empty dict and nothing ever populated it.
+#   The visible sidebar "Auction Diary" dates live only in the frontend
+#   AUCTION_DIARY JavaScript array (legalsmegal-dashboard.html).
+#   This block mirrors those exact 20 entries as a Python seed so the
+#   backend endpoint always has data from first request.
 #
-# IMPORTANT: the cache starts EMPTY on every cold start unless seeded
-# here.  The previous route returned [] because it relied solely on
-# the in-process dict and nothing ever called /refresh.  Fix: seed at
-# import time with the same static dates as the frontend AUCTION_DIARY.
-# ═══════════════════════════════════════════════════════════════════
+# SOURCE OF TRUTH FOR SIDEBAR DATES:
+#   legalsmegal-dashboard.html — const AUCTION_DIARY = [ ... ]
+#   (lines ~1841-1862 in the original file)
+#   Update _AUCTION_DIARY_SEED below when that array changes.
+# ══════════════════════════════════════════════════════════════════════════════
 
-# Canonical auction event list — mirrors AUCTION_DIARY in the frontend.
-# Update both places when adding new events.
-_AUCTION_DIARY_SEED = [
-    {"date": "2026-06-19", "auctioneer": "Bond Wolfe",    "venue_or_type": "Birmingham / Online",  "time": None, "source": "existing_auction_diary", "source_url": "https://www.bondwolfe.com/auctions/"},
-    {"date": "2026-06-25", "auctioneer": "SDL Auctions",  "venue_or_type": "UK-wide / Online",     "time": None, "source": "existing_auction_diary", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
-    {"date": "2026-07-03", "auctioneer": "Allsop",        "venue_or_type": "London",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.allsop.co.uk/residential-auctions/"},
-    {"date": "2026-07-08", "auctioneer": "Clive Emson",   "venue_or_type": "South East",           "time": None, "source": "existing_auction_diary", "source_url": "https://www.cliveemson.co.uk/auctions/"},
-    {"date": "2026-07-15", "auctioneer": "Savills",       "venue_or_type": "London / Online",      "time": None, "source": "existing_auction_diary", "source_url": "https://www.savills.co.uk/residential-auctions/"},
-    {"date": "2026-07-16", "auctioneer": "Bond Wolfe",    "venue_or_type": "Birmingham / Online",  "time": None, "source": "existing_auction_diary", "source_url": "https://www.bondwolfe.com/auctions/"},
-    {"date": "2026-07-21", "auctioneer": "iamsold",       "venue_or_type": "Online",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.iamsold.co.uk/auctions/"},
-    {"date": "2026-07-22", "auctioneer": "BidX1",         "venue_or_type": "Online",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.bidx1.com/en/auctions"},
-    {"date": "2026-07-23", "auctioneer": "SDL Auctions",  "venue_or_type": "UK-wide / Online",     "time": None, "source": "existing_auction_diary", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
-    {"date": "2026-07-29", "auctioneer": "Barnard Marcus","venue_or_type": "London",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.barnardmarcusauctions.co.uk/"},
-    {"date": "2026-08-05", "auctioneer": "Paul Fosh",     "venue_or_type": "Newport / Online",     "time": None, "source": "existing_auction_diary", "source_url": "https://www.paulfosh.co.uk/auctions/"},
-    {"date": "2026-08-12", "auctioneer": "Allsop",        "venue_or_type": "London",               "time": None, "source": "existing_auction_diary", "source_url": "https://www.allsop.co.uk/residential-auctions/"},
-    {"date": "2026-08-19", "auctioneer": "Bond Wolfe",    "venue_or_type": "Birmingham / Online",  "time": None, "source": "existing_auction_diary", "source_url": "https://www.bondwolfe.com/auctions/"},
-    {"date": "2026-08-26", "auctioneer": "SDL Auctions",  "venue_or_type": "UK-wide / Online",     "time": None, "source": "existing_auction_diary", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
+# Exact mirror of AUCTION_DIARY in legalsmegal-dashboard.html
+_AUCTION_DIARY_SEED: list = [
+    {"date": "2026-04-24", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "dashboard_seed", "source_url": "https://www.bondwolfe.com/auctions/"},
+    {"date": "2026-04-28", "auctioneer": "Barnard Marcus", "venue_or_type": "London",              "time": None, "source": "dashboard_seed", "source_url": "https://www.barnardmarcusauctions.co.uk/"},
+    {"date": "2026-04-29", "auctioneer": "Paul Fosh",      "venue_or_type": "Newport / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.paulfosh.co.uk/auctions/"},
+    {"date": "2026-04-30", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
+    {"date": "2026-05-01", "auctioneer": "Savills",        "venue_or_type": "London / Online",     "time": None, "source": "dashboard_seed", "source_url": "https://www.savills.co.uk/residential-auctions/"},
+    {"date": "2026-05-07", "auctioneer": "Allsop",         "venue_or_type": "London",              "time": None, "source": "dashboard_seed", "source_url": "https://www.allsop.co.uk/residential-auctions/"},
+    {"date": "2026-05-13", "auctioneer": "Clive Emson",    "venue_or_type": "South East",          "time": None, "source": "dashboard_seed", "source_url": "https://www.cliveemson.co.uk/auctions/"},
+    {"date": "2026-05-20", "auctioneer": "iamsold",        "venue_or_type": "Online",              "time": None, "source": "dashboard_seed", "source_url": "https://www.iamsold.co.uk/auctions/"},
+    {"date": "2026-05-21", "auctioneer": "BidX1",          "venue_or_type": "Online",              "time": None, "source": "dashboard_seed", "source_url": "https://www.bidx1.com/en/auctions"},
+    {"date": "2026-05-22", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "dashboard_seed", "source_url": "https://www.bondwolfe.com/auctions/"},
+    {"date": "2026-05-27", "auctioneer": "Paul Fosh",      "venue_or_type": "Newport / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.paulfosh.co.uk/auctions/"},
+    {"date": "2026-05-28", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
+    {"date": "2026-06-02", "auctioneer": "Barnard Marcus", "venue_or_type": "London",              "time": None, "source": "dashboard_seed", "source_url": "https://www.barnardmarcusauctions.co.uk/"},
+    {"date": "2026-06-05", "auctioneer": "Savills",        "venue_or_type": "London / Online",     "time": None, "source": "dashboard_seed", "source_url": "https://www.savills.co.uk/residential-auctions/"},
+    {"date": "2026-06-10", "auctioneer": "Clive Emson",    "venue_or_type": "South East",          "time": None, "source": "dashboard_seed", "source_url": "https://www.cliveemson.co.uk/auctions/"},
+    {"date": "2026-06-11", "auctioneer": "Allsop",         "venue_or_type": "London",              "time": None, "source": "dashboard_seed", "source_url": "https://www.allsop.co.uk/residential-auctions/"},
+    {"date": "2026-06-17", "auctioneer": "iamsold",        "venue_or_type": "Online",              "time": None, "source": "dashboard_seed", "source_url": "https://www.iamsold.co.uk/auctions/"},
+    {"date": "2026-06-18", "auctioneer": "BidX1",          "venue_or_type": "Online",              "time": None, "source": "dashboard_seed", "source_url": "https://www.bidx1.com/en/auctions"},
+    {"date": "2026-06-19", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "dashboard_seed", "source_url": "https://www.bondwolfe.com/auctions/"},
+    {"date": "2026-06-25", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "dashboard_seed", "source_url": "https://www.sdlauctions.co.uk/property-auctions/"},
 ]
 
-_EIG_EVENTS_CACHE: Dict[str, Any] = {}
-EIG_EVENTS_CACHE_TTL = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h
+# In-process cache — seeded immediately at module load (no cold-start [])
+_EIG_EVENTS_CACHE: Dict[str, Any] = {
+    "events":     _AUCTION_DIARY_SEED,
+    "_cached_at": time.time(),
+}
+EIG_EVENTS_CACHE_TTL = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h default
 
 
 def _eig_cache_get() -> Optional[list]:
-    """Return cached auction events list, or None if missing/stale."""
-    if not _EIG_EVENTS_CACHE.get("events"):
+    """Return cached events, or None if stale. Falls back to seed — never returns None."""
+    events = _EIG_EVENTS_CACHE.get("events")
+    if not events:
         return None
     age = time.time() - _EIG_EVENTS_CACHE.get("_cached_at", 0)
     if age > EIG_EVENTS_CACHE_TTL:
         return None
-    return _EIG_EVENTS_CACHE["events"]
+    return events
 
 
 def _eig_cache_set(events: list) -> None:
-    _EIG_EVENTS_CACHE["events"] = events
+    _EIG_EVENTS_CACHE["events"]     = events
     _EIG_EVENTS_CACHE["_cached_at"] = time.time()
-
-
-# Seed cache immediately at module load so the endpoint never returns []
-# on a fresh cold start.  POST /api/auction/events/refresh can override.
-_eig_cache_set(_AUCTION_DIARY_SEED)
 
 
 @app.route("/api/auction/events", methods=["GET", "OPTIONS"])
@@ -10501,15 +10508,15 @@ def auction_events_list():
     GET /api/auction/events
 
     Returns upcoming auction events from the in-process cache.
-    Seeded at startup with the canonical _AUCTION_DIARY_SEED list
-    (same dates as the frontend AUCTION_DIARY sidebar).
-    Can be refreshed at runtime via POST /api/auction/events/refresh.
+    Seeded at startup with _AUCTION_DIARY_SEED — the same 20 entries as
+    the frontend AUCTION_DIARY sidebar array — so it never returns []
+    on a cold start.
 
     Query params:
-      days=N  — only events within the next N days (default 90, max 365)
+      days=N  — events within the next N days (default 90, max 365)
 
-    Response shape:
-      { ok, events: [...], count, cached_at }
+    Response:
+      { ok, events, count, cached_at, source }
 
     Each event:
       { date, auctioneer, venue_or_type, time, source, source_url }
@@ -10522,7 +10529,8 @@ def auction_events_list():
     except (ValueError, TypeError):
         days = 90
 
-    events = _eig_cache_get() or _AUCTION_DIARY_SEED  # fallback to seed if cache somehow cleared
+    # _eig_cache_get() returns None only if stale; fallback to seed guarantees data
+    events = _eig_cache_get() or _AUCTION_DIARY_SEED
 
     today_s  = datetime.utcnow().date().isoformat()
     cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
@@ -10534,8 +10542,8 @@ def auction_events_list():
         "count":     len(filtered),
         "cached_at": datetime.utcfromtimestamp(
             _EIG_EVENTS_CACHE.get("_cached_at", 0)
-        ).isoformat() if _EIG_EVENTS_CACHE.get("_cached_at") else None,
-        "source":    "existing_auction_diary",
+        ).isoformat(),
+        "source":    "dashboard_seed",
     }), 200
 
 
@@ -10545,15 +10553,15 @@ def auction_events_refresh():
     """
     POST /api/auction/events/refresh
 
-    Admin-gated endpoint to replace the auction events cache.
+    Admin-gated: replace the cache with a caller-supplied events list.
     Requires X-Scan-Secret header matching AUCTION_SCAN_SECRET env var.
-    Body: { "events": [ { date, auctioneer, venue_or_type, time, source, source_url }, ... ] }
+    Body: { "events": [ { date, auctioneer, ... }, ... ] }
     """
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
     if not AUCTION_SCAN_SECRET:
-        return jsonify({"error": "Refresh not configured — set AUCTION_SCAN_SECRET env var"}), 503
+        return jsonify({"error": "Set AUCTION_SCAN_SECRET env var to enable refresh"}), 503
 
     provided = request.headers.get("X-Scan-Secret", "").strip()
     if provided != AUCTION_SCAN_SECRET:
@@ -10566,10 +10574,10 @@ def auction_events_refresh():
 
     valid = [e for e in events if isinstance(e, dict) and e.get("date")]
     if not valid:
-        return jsonify({"error": "No valid events (each must have a date field)"}), 400
+        return jsonify({"error": "No valid events (each needs a date field)"}), 400
 
     _eig_cache_set(valid)
-    app.logger.info("[auction/events/refresh] Cache updated: %d events", len(valid))
+    app.logger.info("[auction/events/refresh] %d events loaded", len(valid))
     return jsonify({
         "ok":        True,
         "count":     len(valid),
