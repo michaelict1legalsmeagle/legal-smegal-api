@@ -10505,7 +10505,7 @@ def _fetch_eig_events() -> list:
     # EIG embeds one or more application/ld+json blocks, each containing either
     # a single SaleEvent or an array of them.
     script_re = re.compile(
-        r'<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>',
+        r'<script[^>]+application/ld[+]json[^>]*>(.*?)</script>',
         re.DOTALL | re.IGNORECASE,
     )
     for script_match in script_re.finditer(html):
