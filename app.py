@@ -10437,203 +10437,206 @@ def diag_deal_trace(deal_id: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /api/auction/events  —  upcoming auction event dates for the Auction Diary
+# GET /api/auction/events  —  upcoming auction dates for dashboard Auction Diary
 #
-# Source priority (in order):
-#   1. Distinct (auction_date, auction_house) from auction_listings table
-#      (populated by /api/auction/scan — the existing scraper pipeline)
-#   2. EIG future-auctions page, scraped server-side and cached 6 h
-#      (used if auction_listings has no upcoming rows)
-#   3. _AUCTION_DIARY_SEED — static fallback, clearly labelled "seed"
-#      (used if both above fail, so the sidebar is never silently blank)
-#
-# WHY THE PREVIOUS ROUTE RETURNED []:
-#   The cache dict was initialised as {} and _eig_cache_set() was never
-#   called at startup.  On every cold start → empty cache → always [].
-#   This version seeds the cache at module load AND has a DB-query path.
+# Source: EIG future-auctions page, fetched server-side and cached 6 h.
+# No seed data. No fake dates. If EIG returns nothing, the endpoint returns [].
 # ══════════════════════════════════════════════════════════════════════════════
 
-_AUCTION_DIARY_SEED: list = [
-    {"date": "2026-06-19", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "seed"},
-    {"date": "2026-06-25", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "seed"},
-    {"date": "2026-07-02", "auctioneer": "Allsop",         "venue_or_type": "London",              "time": None, "source": "seed"},
-    {"date": "2026-07-08", "auctioneer": "iamsold",        "venue_or_type": "Online",              "time": None, "source": "seed"},
-    {"date": "2026-07-15", "auctioneer": "Savills",        "venue_or_type": "London / Online",     "time": None, "source": "seed"},
-    {"date": "2026-07-16", "auctioneer": "Bond Wolfe",     "venue_or_type": "Birmingham / Online", "time": None, "source": "seed"},
-    {"date": "2026-07-22", "auctioneer": "BidX1",          "venue_or_type": "Online",              "time": None, "source": "seed"},
-    {"date": "2026-07-23", "auctioneer": "Clive Emson",    "venue_or_type": "South East",          "time": None, "source": "seed"},
-    {"date": "2026-07-29", "auctioneer": "Barnard Marcus", "venue_or_type": "London",              "time": None, "source": "seed"},
-    {"date": "2026-08-05", "auctioneer": "SDL Auctions",   "venue_or_type": "UK-wide / Online",    "time": None, "source": "seed"},
-]
-
-_EIG_EVENTS_CACHE: Dict[str, Any] = {}
-EIG_EVENTS_TTL = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h
-EIG_FUTURE_URL = "https://www.eigpropertyauctions.co.uk/search/future-auctions"
+EIG_FUTURE_URL   = "https://www.eigpropertyauctions.co.uk/search/future-auctions"
+_EIG_CACHE: Dict[str, Any] = {}                                     # {"events":[], "_at": float}
+EIG_CACHE_TTL    = int(os.getenv("EIG_EVENTS_CACHE_TTL_SECONDS", "21600"))  # 6 h default
 
 
 def _eig_cache_get() -> Optional[list]:
-    if not _EIG_EVENTS_CACHE.get("events"):
+    if not _EIG_CACHE.get("events") and _EIG_CACHE.get("events") != []:
         return None
-    if time.time() - _EIG_EVENTS_CACHE.get("_at", 0) > EIG_EVENTS_TTL:
+    if time.time() - _EIG_CACHE.get("_at", 0) > EIG_CACHE_TTL:
         return None
-    return _EIG_EVENTS_CACHE["events"]
+    return _EIG_CACHE["events"]
 
 
 def _eig_cache_set(events: list) -> None:
-    _EIG_EVENTS_CACHE["events"] = events
-    _EIG_EVENTS_CACHE["_at"]    = time.time()
+    _EIG_CACHE["events"] = events
+    _EIG_CACHE["_at"]    = time.time()
 
 
 def _fetch_eig_events() -> list:
     """
-    Scrape EIG future-auctions page server-side.
-    Uses only stdlib (html.parser + re) — no extra dependencies.
-    Returns a list of {date, auctioneer, venue_or_type, time, source}.
-    Returns [] on any error; callers fall through to the seed.
+    Fetch and parse the EIG future-auctions page server-side.
+    Returns a list of event dicts. Returns [] on any failure.
+    Uses only stdlib — requests (already imported) + html.parser.
+    Caches result for EIG_CACHE_TTL seconds.
     """
     try:
         resp = requests.get(
             EIG_FUTURE_URL,
             headers={"User-Agent": "Mozilla/5.0 (compatible; LegalSmegal/1.0)"},
-            timeout=12,
+            timeout=15,
         )
         if resp.status_code != 200:
-            app.logger.warning("[eig_events] HTTP %s", resp.status_code)
+            app.logger.warning("[eig_events] HTTP %s fetching EIG", resp.status_code)
             return []
-    except Exception as e:
-        app.logger.warning("[eig_events] request failed: %s", e)
+    except Exception as req_err:
+        app.logger.warning("[eig_events] request error: %s", req_err)
         return []
 
     from html.parser import HTMLParser
 
-    MONTH = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
-              "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+    MONTH_MAP = {
+        "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+        "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
+    }
+    # Match "19 June 2026", "19th Jun", "19 Jun 2026", etc.
     DATE_RE = re.compile(
-        r"(\d{1,2})\s*(?:st|nd|rd|th)?\s+"
-        r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        r"\b(\d{1,2})(?:st|nd|rd|th)?\s+"
+        r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+        r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
         r"(?:\s+(\d{4}))?",
-        re.I,
+        re.IGNORECASE,
     )
-    ISO_RE   = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
-    TIME_RE  = re.compile(r"\b(\d{1,2}[.:]\d{2}\s*(?:am|pm))\b", re.I)
+    ISO_RE   = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+    TIME_RE  = re.compile(r"\b(\d{1,2}[:.]\d{2}\s*(?:am|pm)?)\b", re.IGNORECASE)
 
-    class _P(HTMLParser):
-        CARD_TAGS   = {"article", "li"}
-        CARD_WORDS  = {"auction-event","auction-item","auction-card",
-                       "event-item","event-row","search-result","result-item"}
+    class _EIGParser(HTMLParser):
+        """
+        Walk EIG future-auctions HTML and extract per-event cards.
+        EIG renders each auction as a block element (article, div, li) with
+        class names containing "auction", "event", or "result". Within each
+        block we collect all text runs, then extract date/auctioneer/venue.
+        """
+        CARD_CLASSES = {
+            "auction-event","auction-item","auction-card","event-item",
+            "event-row","search-result","result-item","auction-result",
+        }
+        CARD_TAGS = {"article", "li"}
+
         def __init__(self):
             super().__init__()
-            self._depth = 0; self._in = False; self._cdepth = 0
-            self._texts = []; self.events = []
+            self._depth   = 0
+            self._in      = False
+            self._cdepth  = 0
+            self._texts   = []
+            self.events   = []
+
         def handle_starttag(self, tag, attrs):
             self._depth += 1
-            cls = dict(attrs).get("class","") or ""
-            cls_words = set(cls.lower().split())
-            is_card = bool(cls_words & self.CARD_WORDS) or (tag in self.CARD_TAGS and not self._in)
-            if tag == "time" and self._in:
-                dt = dict(attrs).get("datetime","")
-                if dt: self._texts.append("__DT__" + dt)
+            cls = (dict(attrs).get("class") or "").lower()
+            cls_words = set(cls.split())
+            # Detect card boundary
+            is_card = bool(cls_words & self.CARD_CLASSES)
+            if tag in self.CARD_TAGS and "auction" in cls and not self._in:
+                is_card = True
             if is_card and not self._in:
-                self._in = True; self._cdepth = self._depth; self._texts = []
+                self._in     = True
+                self._cdepth = self._depth
+                self._texts  = []
+            # Capture <time datetime="..."> attribute
+            if tag == "time" and self._in:
+                dt = dict(attrs).get("datetime", "")
+                if dt:
+                    self._texts.append("__DT__" + dt)
+
         def handle_endtag(self, tag):
             if self._in and self._depth == self._cdepth:
-                self._flush(); self._in = False
+                self._flush()
+                self._in = False
             self._depth -= 1
+
         def handle_data(self, data):
             if self._in:
                 s = data.strip()
-                if s: self._texts.append(s)
+                if s:
+                    self._texts.append(s)
+
         def _flush(self):
-            if not self._texts: return
-            full = " ".join(t for t in self._texts if not t.startswith("__DT__"))
+            if not self._texts:
+                return
             date_iso = None
+
+            # 1. <time datetime="..."> ISO attribute
             for t in self._texts:
                 if t.startswith("__DT__"):
-                    m = ISO_RE.match(t[6:])
-                    if m: date_iso = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"; break
+                    m = ISO_RE.search(t[6:])
+                    if m:
+                        date_iso = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+                        break
+
+            # 2. ISO date in plain text
             if not date_iso:
+                for t in self._texts:
+                    if t.startswith("__DT__"):
+                        continue
+                    m = ISO_RE.search(t)
+                    if m:
+                        date_iso = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+                        break
+
+            # 3. Natural-language date in concatenated text
+            if not date_iso:
+                full = " ".join(t for t in self._texts if not t.startswith("__DT__"))
                 m = DATE_RE.search(full)
                 if m:
                     day = int(m.group(1))
-                    mon = MONTH.get(m.group(2)[:3].lower())
+                    mon = MONTH_MAP.get(m.group(2)[:3].lower())
                     yr  = int(m.group(3)) if m.group(3) else datetime.utcnow().year
                     if mon:
                         try:
-                            d = datetime(yr, mon, day)
-                            if d.date() < datetime.utcnow().date():
-                                d = datetime(yr+1, mon, day)
-                            date_iso = d.strftime("%Y-%m-%d")
-                        except ValueError: pass
-            if not date_iso: return
-            tm = TIME_RE.search(full)
-            non_dt = [t for t in self._texts if not t.startswith("__DT__")
-                      and not DATE_RE.search(t) and not ISO_RE.search(t)
-                      and not TIME_RE.search(t) and len(t) > 2]
+                            cand = datetime(yr, mon, day)
+                            # Roll forward a year if date is already past
+                            if cand.date() < datetime.utcnow().date():
+                                cand = datetime(yr + 1, mon, day)
+                            date_iso = cand.strftime("%Y-%m-%d")
+                        except ValueError:
+                            pass
+
+            if not date_iso:
+                return  # Can't determine date; skip this card
+
+            full = " ".join(t for t in self._texts if not t.startswith("__DT__"))
+            tm_m = TIME_RE.search(full)
+
+            # Best-effort auctioneer / venue from non-date text tokens
+            plain = [
+                t for t in self._texts
+                if not t.startswith("__DT__")
+                and not DATE_RE.search(t)
+                and not ISO_RE.search(t)
+                and not TIME_RE.search(t)
+                and len(t.strip()) > 2
+            ]
+            auctioneer  = plain[0].strip()[:120] if plain else None
+            venue_parts = [p.strip()[:80] for p in plain[1:3] if p.strip()]
+            venue       = ", ".join(venue_parts) or None
+
             self.events.append({
                 "date":         date_iso,
-                "auctioneer":   non_dt[0][:120] if non_dt else None,
-                "venue_or_type": ", ".join(v[:60] for v in non_dt[1:3]) or None,
-                "time":         tm.group(1) if tm else None,
+                "auctioneer":   auctioneer,
+                "venue_or_type": venue,
+                "time":         tm_m.group(1) if tm_m else None,
                 "source":       "eig_future_auctions",
                 "source_url":   EIG_FUTURE_URL,
             })
 
-    p = _P()
+    parser = _EIGParser()
     try:
-        p.feed(resp.text)
-    except Exception as pe:
-        app.logger.warning("[eig_events] parse error: %s", pe)
+        parser.feed(resp.text)
+    except Exception as parse_err:
+        app.logger.warning("[eig_events] parse error: %s", parse_err)
         return []
 
-    seen = set(); deduped = []
-    for e in p.events:
+    # Deduplicate by (date, auctioneer[:30])
+    seen: set = set()
+    deduped: list = []
+    for e in parser.events:
         k = (e["date"], (e["auctioneer"] or "")[:30].lower())
-        if k not in seen: seen.add(k); deduped.append(e)
-    deduped.sort(key=lambda e: e["date"])
-    app.logger.info("[eig_events] scraped %d events from EIG", len(deduped))
-    return deduped
-
-
-def _db_auction_events(days: int = 90) -> list:
-    """
-    Query distinct upcoming (auction_date, auction_house) from auction_listings.
-    Returns events shape matching /api/auction/events response.
-    Returns [] if supabase unavailable or table empty.
-    """
-    if not supabase:
-        return []
-    try:
-        today_s  = datetime.utcnow().date().isoformat()
-        cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
-        res = supabase.table("auction_listings") \
-            .select("auction_date, auction_house") \
-            .gte("auction_date", today_s) \
-            .lte("auction_date", cutoff_s) \
-            .order("auction_date") \
-            .limit(200) \
-            .execute()
-        rows = res.data or []
-        if not rows:
-            return []
-        # Deduplicate by (auction_date, auction_house)
-        seen: set = set()
-        events: list = []
-        for r in rows:
-            k = (r.get("auction_date",""), (r.get("auction_house") or "").lower()[:40])
-            if k in seen: continue
+        if k not in seen:
             seen.add(k)
-            events.append({
-                "date":         r.get("auction_date"),
-                "auctioneer":   r.get("auction_house") or None,
-                "venue_or_type": None,
-                "time":         None,
-                "source":       "auction_listings_db",
-            })
-        return events
-    except Exception as e:
-        app.logger.warning("[auction_events] db query failed: %s", e)
-        return []
+            deduped.append(e)
+
+    deduped.sort(key=lambda e: e["date"])
+    app.logger.info("[eig_events] parsed %d events from EIG", len(deduped))
+    return deduped
 
 
 @app.route("/api/auction/events", methods=["GET", "OPTIONS"])
@@ -10642,18 +10645,15 @@ def auction_events_list():
     """
     GET /api/auction/events
 
-    Returns upcoming auction events for the dashboard Auction Diary.
-
-    Source priority:
-      1. auction_listings table (distinct upcoming auction_date + auction_house)
-      2. EIG future-auctions page, scraped server-side and cached 6 h
-      3. _AUCTION_DIARY_SEED — static fallback, source="seed"
+    Returns upcoming auction events from EIG future-auctions, cached 6 h.
+    No fake dates. No seed data. Returns [] if EIG is unreachable.
 
     Query params:
-      days=N  (default 90, max 365)
+      days=N   — window in days (default 90, max 365)
+      force=1  — bypass cache, re-fetch from EIG immediately
 
     Response: { ok, events, count, source, cached_at }
-    Each event: { date, auctioneer, venue_or_type, time, source, source_url? }
+    Each event: { date, auctioneer, venue_or_type, time, source, source_url }
     """
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -10663,42 +10663,30 @@ def auction_events_list():
     except (ValueError, TypeError):
         days = 90
 
+    force  = request.args.get("force", "").lower() in ("1", "true", "yes")
+    cached = _eig_cache_get()
+
+    if cached is not None and not force:
+        events     = cached
+        from_cache = True
+    else:
+        events = _fetch_eig_events()
+        _eig_cache_set(events)   # cache even if empty — avoids hammer on EIG
+        from_cache = False
+
     today_s  = datetime.utcnow().date().isoformat()
     cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
-    source_used = "unknown"
-
-    # ── 1. Try auction_listings DB (real scraped lots) ────────────────────
-    events = _db_auction_events(days)
-    if events:
-        source_used = "auction_listings_db"
-        app.logger.info("[auction_events] serving %d events from DB", len(events))
-    else:
-        # ── 2. Try EIG scrape (cached 6 h) ───────────────────────────────
-        events = _eig_cache_get()
-        if events is None:
-            events = _fetch_eig_events()
-            if events:
-                _eig_cache_set(events)
-        if events:
-            source_used = "eig_future_auctions"
-            app.logger.info("[auction_events] serving %d events from EIG cache", len(events))
-        else:
-            # ── 3. Static seed (always present, clearly labelled) ─────────
-            events = _AUCTION_DIARY_SEED
-            source_used = "seed"
-            app.logger.info("[auction_events] serving seed events (DB empty, EIG failed)")
-
-    # Filter to requested window
-    filtered = [e for e in events if today_s <= str(e.get("date","")) <= cutoff_s]
+    filtered = [e for e in events if today_s <= str(e.get("date", "")) <= cutoff_s]
 
     return jsonify({
         "ok":        True,
         "events":    filtered,
         "count":     len(filtered),
-        "source":    source_used,
+        "source":    "eig_future_auctions",
+        "cached":    from_cache,
         "cached_at": datetime.utcfromtimestamp(
-            _EIG_EVENTS_CACHE.get("_at", time.time())
-        ).isoformat(),
+            _EIG_CACHE.get("_at", 0)
+        ).isoformat() if _EIG_CACHE.get("_at") else None,
     }), 200
 
 
@@ -10707,20 +10695,22 @@ def auction_events_list():
 def auction_events_refresh():
     """
     POST /api/auction/events/refresh
-    Admin-gated: force a fresh EIG scrape and update the cache.
+    Admin-gated forced re-fetch from EIG.
     Requires X-Scan-Secret header matching AUCTION_SCAN_SECRET env var.
     """
     if request.method == "OPTIONS":
         return jsonify({}), 200
     if not AUCTION_SCAN_SECRET:
         return jsonify({"error": "Set AUCTION_SCAN_SECRET to enable refresh"}), 503
-    if request.headers.get("X-Scan-Secret","").strip() != AUCTION_SCAN_SECRET:
+    if request.headers.get("X-Scan-Secret", "").strip() != AUCTION_SCAN_SECRET:
         return jsonify({"error": "Forbidden"}), 403
     events = _fetch_eig_events()
-    if events:
-        _eig_cache_set(events)
-        return jsonify({"ok": True, "count": len(events), "source": "eig_future_auctions"}), 200
-    return jsonify({"ok": False, "error": "EIG returned 0 events"}), 502
+    _eig_cache_set(events)
+    return jsonify({
+        "ok":    True,
+        "count": len(events),
+        "source": "eig_future_auctions",
+    }), 200
 
 
 AUCTION_SCAN_SECRET = os.environ.get("AUCTION_SCAN_SECRET", "").strip()
