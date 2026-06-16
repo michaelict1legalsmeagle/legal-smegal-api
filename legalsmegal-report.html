@@ -1,0 +1,1406 @@
+<!DOCTYPE html>
+<!-- build: 20250614-r2 -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Legal Pack Intelligence Report — LegalSmegal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+
+/* ═══ SCREEN CHROME ═══════════════════════════════════════════════ */
+:root {
+  --bg:         #080c10;
+  --surface:    #0d1219;
+  --border:     #1c2530;
+  --text-pri:   #e8edf2;
+  --text-sec:   #7a8fa3;
+  --text-ter:   #3d5068;
+  --accent:     #c8a84b;
+  --green:      #3ecf8e;
+  --red:        #e05c5c;
+  --amber:      #e8943a;
+  --blue:       #4a9eff;
+  --font-mono:  'IBM Plex Mono', monospace;
+  --font-sans:  'IBM Plex Sans', sans-serif;
+}
+
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  font-family: var(--font-sans); font-size: 13px;
+  background: #d4d4d4; color: #1a1a1a;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── SCREEN TOOLBAR ── */
+.screen-toolbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 200;
+  height: 48px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 28px;
+}
+.tb-logo {
+  font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+  letter-spacing: 0.02em; color: var(--text-pri); text-decoration: none;
+}
+.tb-logo span { color: var(--accent); }
+.tb-right { display: flex; align-items: center; gap: 8px; }
+.tb-btn {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 5px 12px; border-radius: 4px; cursor: pointer;
+  text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+  transition: all 0.15s; white-space: nowrap;
+  background: none; border: 1px solid var(--border); color: var(--text-sec);
+}
+.tb-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+.tb-btn:hover { border-color: var(--accent); color: var(--accent); }
+.tb-print {
+  background: var(--accent); border-color: var(--accent);
+  color: #080c10; font-weight: 600;
+}
+.tb-print:hover { background: #d4b050; border-color: #d4b050; color: #080c10; }
+
+/* ── LOADING STATE ── */
+.loading-wrap {
+  min-height: 100vh; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 48px 24px; gap: 0;
+}
+.loading-text { font-family: var(--font-mono); font-size: 12px; color: var(--text-sec); }
+.loading-error { font-family: var(--font-sans); font-size: 13px; color: var(--red); text-align: center; max-width: 400px; line-height: 1.6; }
+
+/* ── GUEST2 ANALYSIS SCREEN ── */
+.g2-screen { display:flex; flex-direction:column; align-items:center; gap:0; width:100%; max-width:520px; }
+.g2-logo { font-family:var(--font-mono); font-size:13px; font-weight:600; color:var(--text-pri); margin-bottom:32px; letter-spacing:.02em; }
+.g2-logo span { color:var(--accent); }
+.g2-ring-wrap { position:relative; width:80px; height:80px; margin-bottom:28px; }
+.g2-ring { width:80px; height:80px; border-radius:50%; border:2px solid var(--border-1);
+  border-top-color:var(--accent); animation:g2spin 1.2s linear infinite; }
+.g2-pct { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  font-family:var(--font-mono); font-size:13px; font-weight:600; color:var(--text-pri); }
+@keyframes g2spin { to { transform:rotate(360deg); } }
+.g2-stage { font-family:var(--font-mono); font-size:11px; font-weight:600; color:var(--text-pri);
+  letter-spacing:.06em; text-transform:uppercase; margin-bottom:6px; text-align:center; }
+.g2-sub { font-family:var(--font-mono); font-size:10px; color:var(--text-ter);
+  margin-bottom:28px; text-align:center; min-height:16px; }
+.g2-feed { width:100%; display:flex; flex-direction:column; gap:4px; max-height:180px; overflow:hidden; }
+.g2-feed-item { display:flex; align-items:flex-start; gap:8px; padding:5px 0;
+  border-bottom:1px solid var(--border-1); animation:g2fadein .4s ease; }
+@keyframes g2fadein { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+.g2-dot { width:6px; height:6px; border-radius:50%; margin-top:4px; flex-shrink:0; }
+.g2-dot-amber { background:var(--accent); }
+.g2-dot-green { background:#3ecf8e; }
+.g2-dot-red   { background:var(--red); }
+.g2-feed-text { font-family:var(--font-mono); font-size:10px; color:var(--text-sec); line-height:1.5; }
+.g2-notice { margin-top:24px; font-family:var(--font-mono); font-size:9px; color:var(--text-ter);
+  text-align:center; line-height:1.7; }
+
+/* ═══ REPORT PAPER ══════════════════════════════════════════════════ */
+.report-canvas {
+  padding: 64px 24px 48px;
+  display: flex; flex-direction: column; align-items: center; gap: 0;
+}
+
+/* A4 page */
+.rpage {
+  width: 794px; min-height: 1123px;
+  background: #fff; box-shadow: 0 4px 24px rgba(0,0,0,0.14);
+  position: relative; margin-bottom: 16px;
+  padding: 44px 48px 64px;
+  page-break-after: always;
+  font-family: 'IBM Plex Sans', sans-serif;
+  color: #1a1a1a;
+}
+.rpage:last-child { margin-bottom: 0; }
+
+/* Top stripe */
+.r-stripe {
+  position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: #1a1a1a;
+}
+.r-stripe-accent {
+  position: absolute; top: 0; left: 0; height: 3px;
+  background: #c8a84b;
+}
+
+/* ── REPORT HEADER ── */
+.r-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 24px; margin-bottom: 28px; padding-bottom: 20px;
+  border-bottom: 1px solid #e0e0e0;
+}
+.r-brand { display: flex; flex-direction: column; gap: 3px; }
+.r-logo {
+  font-family: 'IBM Plex Mono', monospace; font-size: 18px; font-weight: 600;
+  letter-spacing: 0.01em; color: #1a1a1a; line-height: 1;
+}
+.r-logo span { color: #c8a84b; }
+.r-tagline {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 500;
+  letter-spacing: 0.1em; text-transform: uppercase; color: #888; margin-top: 2px;
+}
+.r-meta { text-align: right; }
+.r-meta-label { font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #aaa; margin-bottom: 2px; }
+.r-meta-value { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #555; }
+
+/* ── SECTION HEADING ── */
+.r-section {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.12em; text-transform: uppercase; color: #1a1a1a;
+  margin-bottom: 10px; padding-bottom: 7px;
+  border-bottom: 1px solid #ddd;
+  display: flex; align-items: center; gap: 8px;
+}
+.r-section::before {
+  content: ''; width: 3px; height: 12px; border-radius: 2px;
+  background: #c8a84b; flex-shrink: 0;
+}
+
+/* ── SNAPSHOT TABLE ── */
+.snap-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 11px; }
+.snap-table td { padding: 6px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+.snap-table td:first-child {
+  font-weight: 600; color: #888; width: 38%;
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.snap-table td:last-child { color: #1a1a1a; }
+.snap-table tr:last-child td { border-bottom: none; }
+
+/* ── PACK STATUS ── */
+.pack-status {
+  padding: 12px 16px; border-radius: 5px; margin-bottom: 20px;
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+  border: 1px solid #ddd; background: #f9f9f9;
+  line-height: 1.7; color: #333;
+}
+.pack-status-label {
+  font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: #1a1a1a; display: block; margin-bottom: 4px; font-size: 9px;
+}
+
+/* ── DISCLOSURE FLAG CARDS ── */
+.flag-cards { display: flex; gap: 8px; margin-bottom: 20px; }
+.flag-card {
+  flex: 1; border-radius: 5px; padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.flag-card-critical { background: #fff4f4; border: 1px solid #f0b8b8; }
+.flag-card-clarify  { background: #fffbf0; border: 1px solid #f5e0a0; }
+.flag-card-missing  { background: #fff8f0; border: 1px solid #f0d090; }
+.flag-card-note     { background: #f5f5f5; border: 1px solid #ddd; }
+.fc-label {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.flag-card-critical .fc-label { color: #c82828; }
+.flag-card-clarify  .fc-label { color: #b06000; }
+.flag-card-missing  .fc-label { color: #a05800; }
+.flag-card-note     .fc-label { color: #666; }
+.fc-count {
+  font-family: 'IBM Plex Mono', monospace; font-size: 24px; font-weight: 600;
+  line-height: 1; letter-spacing: -0.03em;
+}
+.flag-card-critical .fc-count { color: #c82828; }
+.flag-card-clarify  .fc-count { color: #b06000; }
+.flag-card-missing  .fc-count { color: #a05800; }
+.flag-card-note     .fc-count { color: #888; }
+.fc-desc { font-size: 10px; color: #888; margin-top: 2px; }
+
+/* ── DISCLOSURE SUMMARY ── */
+.disclosure-summary {
+  background: #f8f8f8; border: 1px solid #e0e0e0; border-left: 3px solid #c8a84b;
+  border-radius: 4px; padding: 12px 16px; margin-bottom: 24px;
+}
+.disclosure-summary-label {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase; color: #c8a84b; margin-bottom: 6px;
+}
+.disclosure-summary-text { font-size: 11px; color: #333; line-height: 1.7; }
+
+/* ── PACK SCORE ── */
+.pack-score-wrap {
+  display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px;
+}
+.pack-score-pill {
+  background: #1a1a1a; border-radius: 8px; padding: 14px 18px;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0;
+  min-width: 88px;
+}
+.pack-score-num {
+  font-family: 'IBM Plex Mono', monospace; font-size: 32px; font-weight: 600;
+  color: #c8a84b; line-height: 1; letter-spacing: -0.03em;
+}
+.pack-score-denom {
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: rgba(255,255,255,0.28);
+}
+.pack-score-lbl {
+  font-family: 'IBM Plex Mono', monospace; font-size: 8px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase; color: rgba(255,255,255,0.32);
+  margin-top: 5px; text-align: center;
+}
+.pack-score-copy {
+  flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 5px;
+}
+.pack-score-headline {
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 600;
+  color: #1a1a1a; letter-spacing: 0.02em; line-height: 1.4;
+}
+.pack-score-desc {
+  font-size: 10px; color: #666; line-height: 1.6;
+}
+.pack-score-caveat {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: #aaa;
+  border-top: 1px solid #ebebeb; padding-top: 5px; margin-top: 2px; line-height: 1.5;
+}
+
+/* ── DISCLOSURE FLAGS (detail) ── */
+.flag-row {
+  display: flex; border-radius: 5px; overflow: hidden;
+  border: 1px solid #e0e0e0; margin-bottom: 6px;
+}
+.flag-bar { width: 3px; flex-shrink: 0; }
+.flag-bar.critical { background: #c82828; }
+.flag-bar.high     { background: #c87800; }
+.flag-bar.missing  { background: #d07020; }
+.flag-bar.note     { background: #888; }
+.flag-body { padding: 9px 12px; flex: 1; }
+.flag-top { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; flex-wrap: wrap; }
+.flag-badge {
+  font-family: 'IBM Plex Mono', monospace; font-size: 8px; font-weight: 700;
+  letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 6px; border-radius: 2px; flex-shrink: 0;
+}
+.badge-critical { background: #fde8e8; color: #c82828; }
+.badge-high     { background: #fef5e0; color: #c87800; }
+.badge-missing  { background: #fff0e0; color: #d07020; }
+.badge-note     { background: #f0f0f0; color: #666; }
+.flag-title { font-size: 11px; font-weight: 600; color: #1a1a1a; flex: 1; line-height: 1.3; }
+.flag-text  { font-size: 10px; color: #555; line-height: 1.6; }
+.flag-src   { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: #2a6abf; margin-top: 4px; }
+.flag-implication { font-size: 10px; color: #333; margin-top: 3px; font-style: italic; }
+
+/* ── COST TABLE ── */
+.cost-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 11px; }
+.cost-table th {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase; color: #888;
+  background: #f5f5f5; padding: 7px 10px; text-align: left; border-bottom: 1px solid #ddd;
+}
+.cost-table td { padding: 7px 10px; border-bottom: 1px solid #f0f0f0; color: #1a1a1a; vertical-align: top; }
+.cost-table tr:last-child td { border-bottom: none; }
+.cost-total td { font-weight: 700; color: #1a1a1a; border-top: 2px solid #ddd; background: #fafafa; }
+
+/* ── GENERIC TABLE ── */
+.r-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 11px; }
+.r-table th {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase; color: #888;
+  background: #f5f5f5; padding: 7px 10px; text-align: left; border-bottom: 1px solid #ddd;
+}
+.r-table td { padding: 7px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+.r-table tr:last-child td { border-bottom: none; }
+
+/* ── KV GRID ── */
+.kv-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 8px; margin-bottom: 20px; }
+.kv-cell { background: #f8f8f8; border: 1px solid #ebebeb; border-radius: 4px; padding: 10px 12px; }
+.kv-label { font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #aaa; margin-bottom: 3px; }
+.kv-value { font-size: 12px; font-weight: 600; color: #1a1a1a; }
+.kv-source { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: #aaa; margin-top: 2px; }
+
+/* ── QUESTIONS ── */
+.q-item { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
+.q-item:last-child { border-bottom: none; }
+.q-ask {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase; color: #888;
+  min-width: 88px; padding-top: 1px; flex-shrink: 0;
+}
+.q-text { font-size: 11px; color: #1a1a1a; line-height: 1.6; flex: 1; }
+
+/* ── MISSING EVIDENCE ── */
+.missing-row { display: flex; gap: 10px; align-items: flex-start; padding: 7px 0; border-bottom: 1px solid #f0f0f0; font-size: 11px; }
+.missing-row:last-child { border-bottom: none; }
+.missing-dot { width: 6px; height: 6px; border-radius: 50%; background: #d07020; flex-shrink: 0; margin-top: 3px; }
+.missing-item-name { font-weight: 600; color: #1a1a1a; min-width: 180px; }
+.missing-implication { color: #666; flex: 1; }
+
+/* ── DISCLAIMER ── */
+.r-disclaimer {
+  background: #f8f8f8; border: 1px solid #ddd; border-left: 3px solid #1a1a1a;
+  border-radius: 4px; padding: 12px 14px; margin-top: 20px;
+}
+.r-disclaimer-title { font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #1a1a1a; margin-bottom: 6px; }
+.r-disclaimer-text { font-size: 10px; color: #666; line-height: 1.7; }
+
+/* ── PAGE FOOTER ── */
+.r-footer {
+  position: absolute; bottom: 20px; left: 48px; right: 48px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-top: 1px solid #ebebeb; padding-top: 8px;
+}
+.r-footer-left { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: #bbb; }
+.r-footer-right { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: #bbb; }
+
+/* ── PRINT ── */
+@media print {
+  html, body { background: white; }
+  .screen-toolbar { display: none !important; }
+  .report-canvas { padding: 0; background: white; }
+  .rpage {
+    width: 100%; min-height: auto; box-shadow: none; margin: 0;
+    padding: 18mm 16mm 22mm; border: none; page-break-after: always;
+  }
+  .rpage:last-child { page-break-after: avoid; }
+  @page { size: A4 portrait; margin: 0; }
+  a { color: inherit; text-decoration: none; }
+}
+
+@media (max-width: 860px) {
+  .rpage { width: 100%; }
+  .report-canvas { padding: 60px 8px 32px; }
+  .flag-cards { flex-wrap: wrap; }
+  .flag-card { min-width: 44%; }
+}
+</style>
+<script>
+if(new URLSearchParams(window.location.search).get('embedded')==='1'){
+  document.documentElement.setAttribute('data-embedded','1');
+  var st=document.createElement('style');
+  // Embedded mode: hide toolbar and reduce canvas padding.
+  // The report DOCUMENT (.rpage) remains white — it is a paper document, not a UI element.
+  // Only the canvas background behind the document matches the dark cockpit.
+  // Restores gold-standard appearance: white report on dark surround.
+  st.textContent=`
+    [data-embedded="1"] .screen-toolbar{display:none!important}
+    [data-embedded="1"] .report-canvas{padding-top:8px!important;background:#111820!important}
+  `;
+  document.head.appendChild(st);
+}
+</script>
+</head>
+<body>
+
+<!-- SCREEN TOOLBAR — report-only actions, no subscription workspace links -->
+<div class="screen-toolbar" id="screenToolbar">
+  <span class="tb-logo">Legal<span>Smegal</span></span>
+  <div class="tb-right">
+    <a href="legalsmegal-upload.html" class="tb-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+      Upload another pack
+    </a>
+    <a href="legalsmegal-signin.html" class="tb-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
+      Log in
+    </a>
+    <a href="legalsmegal-card.html" class="tb-btn" id="upgradeBtn" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+      Upgrade to full workspace
+    </a>
+    <button class="tb-btn tb-print" onclick="window.print()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6z"/></svg>
+      Print / Download PDF
+    </button>
+  </div>
+</div>
+
+<!-- LOADING STATE -->
+<div class="loading-wrap" id="loadingWrap">
+  <div class="g2-screen" id="g2Screen" style="display:none">
+    <div class="g2-logo">Legal<span>Smegal</span></div>
+    <div class="g2-ring-wrap">
+      <div class="g2-ring" id="g2Ring"></div>
+      <div class="g2-pct" id="g2Pct">0%</div>
+    </div>
+    <div class="g2-stage" id="g2Stage">Preparing analysis</div>
+    <div class="g2-sub" id="g2Sub">Connecting to analysis engine…</div>
+    <div class="g2-feed" id="g2Feed"></div>
+    <div class="g2-notice">Your PDF report will be emailed to you.<br>This page will update automatically when analysis is complete.</div>
+  </div>
+  <div class="loading-text" id="loadingMsg">Loading report…</div>
+</div>
+
+<!-- REPORT OUTPUT — populated by JS -->
+<div class="report-canvas" id="reportCanvas" style="display:none"></div>
+
+<script>
+const API_BASE  = 'https://legal-smegal-api-final.onrender.com';
+const SUPA_URL  = 'https://qdgxmwdvmfrcicgpukhs.supabase.co';
+const SUPA_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkZ3htd2R2bWZyY2ljZ3B1a2hzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk1MTY3MzIsImV4cCI6MjA3NTA5MjczMn0.Xpw9u14JWCcTkhkxgt5YzeLfNMG5rGWo4R_C7zRwz-c';
+
+const params          = new URLSearchParams(window.location.search);
+const dealId          = params.get('deal_id');
+const _guestSession   = params.get('guest_session');
+const _guestToken     = params.get('token');
+const _guestProcessing = params.get('processing') === '1';
+const _isGuest2 = !!_guestSession;
+if (!dealId && !_isGuest2) { window.location.replace('legalsmegal-upload.html'); }
+
+// ─────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmtGbp(v) {
+  if (v == null || v === '') return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return String(v);
+  return '£' + n.toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+
+function fmtPct(v) {
+  if (v == null) return '—';
+  return parseFloat(v).toFixed(2) + '%';
+}
+
+function today() {
+  return new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function sevBadge(sev) {
+  const s = (sev || 'note').toLowerCase();
+  const map = { critical:'Critical disclosure', high:'Requires clarification', missing:'Missing evidence', note:'Note' };
+  const label = map[s] || s.toUpperCase();
+  return `<span class="flag-badge badge-${s}">${esc(label)}</span>`;
+}
+
+// Map severity to flag-card class
+function sevToCardClass(sev) {
+  const s = (sev||'note').toLowerCase();
+  if (s === 'critical') return 'flag-card-critical';
+  if (s === 'high')     return 'flag-card-clarify';
+  if (s === 'missing')  return 'flag-card-missing';
+  return 'flag-card-note';
+}
+
+// ── Guest2 analysis screen helpers ──────────────────────────────────
+const _g2Stages = [
+  { pct:5,  stage:'Verifying payment',        sub:'Confirming transaction with Stripe…' },
+  { pct:12, stage:'Extracting documents',     sub:'Reading uploaded legal pack PDFs…' },
+  { pct:22, stage:'Classifying documents',    sub:'Identifying title registers, leases, searches…' },
+  { pct:35, stage:'Parsing special conditions', sub:'Extracting auction terms and buyer costs…' },
+  { pct:48, stage:'Running legal analysis',   sub:'Reviewing covenants, charges and title issues…' },
+  { pct:60, stage:'Identifying risk flags',   sub:'Flagging critical disclosures and missing evidence…' },
+  { pct:72, stage:'Scoring the pack',         sub:'Calculating risk-adjusted pack score…' },
+  { pct:82, stage:'Generating report',        sub:'Compiling findings into your report…' },
+  { pct:91, stage:'Building PDF',             sub:'Formatting report for delivery…' },
+  { pct:97, stage:'Sending email',            sub:'Dispatching report to your inbox…' },
+];
+const _g2FeedMessages = [
+  'Title register located',
+  'Special conditions extracted',
+  'Lease terms identified',
+  'Local authority search assessed',
+  'Covenant analysis complete',
+  'Buyer cost exposure calculated',
+  'Missing evidence flagged',
+  'Risk weights applied',
+  'Pack score calculated',
+  'Report compiled',
+];
+
+function _g2ShowScreen() {
+  const screen = document.getElementById('g2Screen');
+  const msg    = document.getElementById('loadingMsg');
+  if (screen) screen.style.display = 'flex';
+  if (msg)    msg.style.display    = 'none';
+}
+
+function _g2SetProgress(pct, stage, sub) {
+  const ring  = document.getElementById('g2Ring');
+  const pctEl = document.getElementById('g2Pct');
+  const stEl  = document.getElementById('g2Stage');
+  const subEl = document.getElementById('g2Sub');
+  if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+  if (stEl)  stEl.textContent  = stage || '';
+  if (subEl) subEl.textContent = sub   || '';
+  if (ring) {
+    const deg = Math.round(pct * 3.6);
+    ring.style.background = `conic-gradient(var(--accent) ${deg}deg, transparent ${deg}deg)`;
+    ring.style.border = 'none';
+    ring.style.borderRadius = '50%';
+    ring.style.animation = pct >= 100 ? 'none' : 'g2spin 1.2s linear infinite';
+  }
+}
+
+function _g2AddFeed(text, type) {
+  const feed = document.getElementById('g2Feed');
+  if (!feed) return;
+  const dotClass = type === 'green' ? 'g2-dot-green' : type === 'red' ? 'g2-dot-red' : 'g2-dot-amber';
+  const item = document.createElement('div');
+  item.className = 'g2-feed-item';
+  item.innerHTML = '<div class="g2-dot ' + dotClass + '"></div><div class="g2-feed-text">' + text + '</div>';
+  feed.appendChild(item);
+  // Keep last 6 items visible
+  while (feed.children.length > 6) feed.removeChild(feed.firstChild);
+}
+
+function setLoading(msg) {
+  const el = document.getElementById('loadingMsg');
+  if (el) el.textContent = msg;
+}
+
+function showError(msg) {
+  const wrap = document.getElementById('loadingWrap');
+  if (wrap) wrap.innerHTML = `
+    <div class="loading-error">${esc(msg)}</div>
+    <div style="margin-top:16px;display:flex;gap:12px">
+      <a href="legalsmegal-upload.html" style="font-family:var(--font-mono);font-size:11px;color:var(--accent);text-decoration:none">← Upload another pack</a>
+    </div>`;
+}
+
+// Build pack status text from flags
+function buildPackStatus(counts, sj) {
+  const c = counts.critical || 0;
+  const h = counts.high || 0;
+  const m = counts.missing || 0;
+  const n = counts.note || 0;
+  const total = c + h + m + n;
+
+  if (total === 0) {
+    return 'Pack status: No disclosures extracted from the uploaded documents. Verify that all relevant documents have been uploaded and contain selectable text. This report does not provide legal advice, valuation, bid guidance, or investment recommendation.';
+  }
+
+  const parts = [];
+  if (c > 0) parts.push(`${c} critical disclosure${c > 1 ? 's' : ''}`);
+  if (h > 0) parts.push(`${h} item${h > 1 ? 's' : ''} requiring clarification`);
+  if (m > 0) parts.push(`${m} item${m > 1 ? 's' : ''} of missing or unclear evidence`);
+
+  const has = sj.special_conditions || {};
+  const costItems = [];
+  if (has.buyers_premium_pct || has.buyers_premium_gbp) costItems.push('buyer-cost exposure');
+  if (has.seller_legal_costs_gbp) costItems.push('seller legal costs payable by buyer');
+  if (has.vat_elected) costItems.push('VAT election');
+
+  let summary = `Pack status: The uploaded legal pack discloses ${parts.join(', ')}.`;
+  if (costItems.length > 0) summary += ` Buyer-cost and liability items identified include: ${costItems.join(', ')}.`;
+  summary += ' This report does not provide legal advice, valuation, bid guidance, or investment recommendation.';
+  return summary;
+}
+
+// Build disclosure summary paragraph
+function buildDisclosureSummary(sj, flags) {
+  if (sj.viability_statement) {
+    // Rewrite to remove decision language
+    let v = sj.viability_statement;
+    v = v.replace(/\b(go|no.go|proceed|do not proceed|buy|do not buy|bid|walk away|strong opportunity|great potential)\b/gi, '');
+    v = v.replace(/\b(risk score|deal score|score)\b/gi, 'disclosure count');
+    v = v.replace(/\b(ceiling|max bid|valuation|price confidence|bidding strategy)\b/gi, '');
+    v = v.replace(/\s{2,}/g, ' ').trim();
+    if (v.length > 30) return v;
+  }
+
+  const sc = sj.special_conditions || {};
+  const ct = sj.completion_terms || {};
+  const counts = sj.flag_counts || {};
+  const hasCosts = sc.buyers_premium_pct || sc.buyers_premium_gbp || sc.seller_legal_costs_gbp || sc.vat_elected || sc.admin_fee_gbp;
+  const hasMissing = (counts.missing || 0) > 0;
+  const hasCritical = (counts.critical || 0) > 0;
+
+  let s = 'The uploaded legal pack discloses ';
+  const items = [];
+  if (hasCritical) items.push('title and contractual matters requiring solicitor confirmation');
+  if (hasCosts) items.push('buyer-cost and liability items');
+  if (hasMissing) items.push('missing or unclear evidence');
+  if (ct.completion_days && ct.completion_days < 28) items.push('a non-standard completion period');
+  if (sc.addendum_present) items.push('a pack addendum');
+
+  s += (items.length > 0 ? items.join(', ') : 'legal-pack content') + '.';
+  s += ' Several items may affect completion obligations, registration, lender requirements, or buyer responsibility after exchange.';
+  s += ' The report records the disclosed items and questions to raise; it does not provide legal advice, valuation, financial modelling, or bid guidance.';
+  return s;
+}
+
+// ─────────────────────────────────────────────
+// RENDER
+// ─────────────────────────────────────────────
+function renderReport(deal, sj, docs, isSubscriber) {
+  const prop   = sj.property || {};
+  const sc     = sj.special_conditions || {};
+  const ct     = sj.completion_terms || {};
+  const pc     = sj.pack_completeness || {};
+  const flags  = Array.isArray(sj.flags) ? sj.flags : [];
+  const counts = sj.flag_counts || { critical:0, high:0, missing:0, note:0 };
+
+  const address  = prop.address || deal.address || deal.deal_name || 'Address not extracted';
+  const postcode = prop.postcode || deal.postcode || '';
+  const tenure   = prop.tenure || '—';
+  const lease    = prop.lease_years ? prop.lease_years + ' years remaining' : null;
+  const dealType = prop.type || deal.deal_type || '—';
+  const lotNum   = prop.lot_number || deal.lot_number || '—';
+  const guideGbp = deal.guide_price ? fmtGbp(deal.guide_price)
+                 : (prop.guide_price_pence ? fmtGbp(prop.guide_price_pence / 100) : '—');
+  const reportDate = today();
+  const docCount   = docs.length || sj.documents_processed || '—';
+  const score      = sj.deal_score != null ? sj.deal_score : '—';
+
+  // Buyer cost lines
+  const costLines = [];
+  if (sc.buyers_premium_gbp || sc.buyers_premium_pct) {
+    costLines.push({
+      item:   "Buyer's premium",
+      amount: sc.buyers_premium_gbp ? fmtGbp(sc.buyers_premium_gbp) : fmtPct(sc.buyers_premium_pct) + ' of hammer price',
+      type:   'Quantified cost',
+      source: 'Special Conditions'
+    });
+  }
+  if (sc.admin_fee_gbp) {
+    costLines.push({ item: 'Administration fee', amount: fmtGbp(sc.admin_fee_gbp) + (sc.vat_elected ? ' + VAT' : ''), type: 'Quantified cost', source: 'Special Conditions' });
+  }
+  if (sc.seller_legal_costs_gbp) {
+    costLines.push({ item: "Seller's legal costs (buyer payable)", amount: fmtGbp(sc.seller_legal_costs_gbp), type: 'Quantified cost', source: 'Special Conditions' });
+  }
+  if (sc.vat_elected) {
+    costLines.push({ item: 'VAT elected on sale — purchase price +20%', amount: 'See solicitor', type: 'Liability uncertainty', source: 'Special Conditions' });
+  }
+  if (ct.deposit_pct && ct.deposit_refundable === false) {
+    costLines.push({ item: 'Non-refundable deposit', amount: fmtPct(ct.deposit_pct) + ' of hammer price', type: 'Timing liability', source: 'Special Conditions' });
+  }
+  // Check flags for arrears, indemnities
+  flags.forEach(f => {
+    const t = (f.title || '').toLowerCase();
+    const e = (f.evidence || f.summation || '').toLowerCase();
+    const isArrear = t.includes('arrear') || e.includes('arrear');
+    const isIndemnity = t.includes('indemni') || e.includes('indemni');
+    const isInsurance = t.includes('insurance from exchange') || t.includes('insurance at exchange');
+    const isNoticeToComplete = t.includes('notice to complete') || t.includes('late completion');
+    if ((isArrear || isIndemnity || isInsurance || isNoticeToComplete) && costLines.length < 14) {
+      const hasAmount = f.evidence && /£[\d,]+/.test(f.evidence);
+      costLines.push({
+        item:   f.title,
+        amount: hasAmount ? (f.evidence.match(/£[\d,]+/)?.[0] || 'Not evidenced') : 'Not evidenced',
+        type:   isArrear ? 'Unquantified liability' : isIndemnity ? 'Risk transfer' : isInsurance ? 'Timing liability' : 'Timing liability',
+        source: f.source_document || '[Source: Not evidenced in uploaded material]'
+      });
+    }
+  });
+
+  // Total if possible
+  let totalCostNote = '';
+  const quantified = costLines.filter(c => c.type === 'Quantified cost' && /^£/.test(c.amount));
+  if (quantified.length >= 2) {
+    const sum = quantified.reduce((acc, c) => {
+      const n = parseFloat(c.amount.replace(/[£,]/g, ''));
+      return acc + (isNaN(n) ? 0 : n);
+    }, 0);
+    if (sum > 0) totalCostNote = fmtGbp(sum) + ' quantified buyer-cost exposure (excluding SDLT and conveyancing fees)';
+  }
+
+  // Missing evidence flags
+  const missingFlags = flags.filter(f => (f.severity||'').toLowerCase() === 'missing');
+
+  // ── PRIORITY QUESTIONS TO RAISE (max 8, mixed recipients, ranked) ──
+  // Priority order: cost/liability > missing title/lease/search > completion/timing >
+  // VAT/tax > lender/funding > freeholder confirmations > auctioneer/seller factuals
+  const PRIORITY_ORDER = ['Critical', 'Important', 'Clarification'];
+  const priorityQ = [];
+
+  // Helper to add question if budget not exhausted
+  const Q_CAP = isSubscriber ? 50 : 8;
+  function addQ(priority, ask, question, reason) {
+    if (priorityQ.length >= Q_CAP) return;
+    if (!question || !question.trim()) return;
+    priorityQ.push({ priority, ask, question: question.trim(), reason: reason || '' });
+  }
+
+  // Pass 1 — cost and liability items (Critical)
+  flags.forEach(f => {
+    const sev = (f.severity||'').toLowerCase();
+    const t   = (f.title||'').toLowerCase();
+    const isCost = t.includes('premium') || t.includes('admin fee') || t.includes('seller') ||
+                   t.includes('vat') || t.includes('arrear') || t.includes('indemni') ||
+                   t.includes('insurance') || t.includes('late completion') || t.includes('notice to complete');
+    if (isCost && f.action) {
+      const isAuction = t.includes('premium') || t.includes('addendum') || t.includes('condition');
+      addQ('Critical', isAuction ? 'Auctioneer' : 'Solicitor', f.action,
+           f.implication || 'Buyer-cost or liability exposure identified in uploaded pack');
+    }
+  });
+
+  // Pass 2 — missing title/lease/search (Critical)
+  flags.forEach(f => {
+    const sev = (f.severity||'').toLowerCase();
+    const t   = (f.title||'').toLowerCase();
+    if (sev === 'missing' && f.action) {
+      const isLease = t.includes('lease') || t.includes('management') || t.includes('service charge') || t.includes('ground rent');
+      const isSearch = t.includes('search') || t.includes('epc') || t.includes('drain');
+      addQ('Critical',
+           isLease ? 'Freeholder / Managing agent' : isSearch ? 'Solicitor' : 'Solicitor',
+           f.action,
+           f.summation || 'Evidence missing from uploaded pack — may affect title, registration, or lender requirements');
+    }
+  });
+
+  // Pass 3 — completion / timing (Important)
+  flags.forEach(f => {
+    const sev = (f.severity||'').toLowerCase();
+    const t   = (f.title||'').toLowerCase();
+    const isTiming = t.includes('completion') || t.includes('deposit') || t.includes('exchange') ||
+                     t.includes('vacant possession') || t.includes('notice to complete');
+    if (isTiming && f.action && (sev === 'critical' || sev === 'high')) {
+      addQ('Important', 'Solicitor', f.action,
+           f.implication || 'Completion or timing obligation identified in uploaded pack');
+    }
+  });
+
+  // Pass 4 — VAT / tax (Important)
+  if (sc.vat_elected) {
+    addQ('Important', 'Solicitor',
+         'Confirm whether the VAT election applies to this transaction, whether the buyer is registered for VAT, and the net cost impact.',
+         'VAT election identified — purchase price +20% if applicable and buyer is not VAT-registered');
+  }
+
+  // Pass 5 — lender / funding blockers (Important)
+  flags.forEach(f => {
+    const t = (f.title||'').toLowerCase();
+    const isLender = t.includes('lender') || t.includes('mortgage') || t.includes('ground rent') || t.includes('rpi') || t.includes('uncapped');
+    if (isLender && f.action) {
+      addQ('Important', 'Lender / Broker', f.action,
+           f.implication || 'Item may affect lender acceptability or mortgage availability');
+    }
+  });
+
+  // Pass 6 — freeholder / managing agent (Clarification)
+  flags.forEach(f => {
+    const t = (f.title||'').toLowerCase();
+    const isFreeholder = t.includes('service charge') || t.includes('ground rent') || t.includes('management') ||
+                         t.includes('arrear') || t.includes('freeholder');
+    if (isFreeholder && f.action) {
+      addQ('Clarification', 'Freeholder / Managing agent', f.action,
+           f.implication || 'Lease or management obligation requires freeholder confirmation');
+    }
+  });
+
+  // Pass 7 — auctioneer / seller factual (Clarification)
+  flags.forEach(f => {
+    const sev = (f.severity||'').toLowerCase();
+    const t   = (f.title||'').toLowerCase();
+    const isAuction = t.includes('addendum') || t.includes('auction') || t.includes('lot');
+    const isSeller  = t.includes('vacant possession') || t.includes('occupan') || t.includes('tenancy') || t.includes('tenanted');
+    if ((isAuction || isSeller) && f.action && sev !== 'note') {
+      addQ('Clarification', isAuction ? 'Auctioneer' : 'Seller / Agent', f.action,
+           f.implication || 'Factual clarification required before bidding');
+    }
+  });
+
+  // Fill remaining slots from sj.solicitor_questions if present (Clarification)
+  if (Array.isArray(sj.solicitor_questions)) {
+    sj.solicitor_questions.forEach(q => {
+      addQ('Clarification', 'Solicitor', q, 'Solicitor question from legal-pack analysis');
+    });
+  }
+
+  // Dedup by question text
+  const seenQ = new Set();
+  const uniquePriorityQ = priorityQ.filter(q => {
+    const k = q.question.toLowerCase().slice(0, 80);
+    if (seenQ.has(k)) return false;
+    seenQ.add(k);
+    return true;
+  }).slice(0, isSubscriber ? 50 : 8);
+
+  // Legal + title flags
+  const legalFlags = flags.filter(f => {
+    const t = (f.title||'').toLowerCase();
+    return t.includes('covenant') || t.includes('title') || t.includes('restrict') ||
+           t.includes('possessory') || t.includes('lease') || t.includes('easement') ||
+           t.includes('boundary') || t.includes('right of way') || t.includes('access') ||
+           t.includes('guarantee') || t.includes('lender') || t.includes('charge');
+  });
+
+  // Timing flags
+  const timingFlags = flags.filter(f => {
+    const t = (f.title||'').toLowerCase();
+    return t.includes('completion') || t.includes('deposit') || t.includes('exchange') ||
+           t.includes('insurance') || t.includes('notice') || t.includes('addendum') ||
+           t.includes('search') || t.includes('timing') || t.includes('late completion');
+  });
+
+  // Key extracted data cells
+  const kvItems = [
+    { label: 'Address',        value: prop.address || 'Not extracted',           source: 'Legal Pack' },
+    { label: 'Postcode',       value: prop.postcode || '—',                       source: 'Legal Pack' },
+    { label: 'Tenure',         value: tenure + (lease ? ' · ' + lease : ''),     source: 'Title Register' },
+    { label: 'Deal type',      value: dealType,                                   source: 'Legal Pack' },
+    { label: 'Guide price',    value: guideGbp,                                   source: 'Auction Conditions' },
+    { label: 'Deposit',        value: ct.deposit_pct ? fmtPct(ct.deposit_pct) + (ct.deposit_refundable === false ? ' · Non-refundable' : '') : '—', source: 'Special Conditions' },
+    { label: 'Completion',     value: ct.completion_days ? ct.completion_days + ' days' : '—', source: 'Special Conditions' },
+    { label: 'Vacant possession', value: ct.vacant_possession === false ? 'Not confirmed' : ct.vacant_possession === true ? 'Confirmed' : '—', source: 'Special Conditions' },
+    { label: "Buyer's premium", value: sc.buyers_premium_pct ? fmtPct(sc.buyers_premium_pct) : sc.buyers_premium_gbp ? fmtGbp(sc.buyers_premium_gbp) : '—', source: 'Special Conditions' },
+    { label: 'VAT elected',    value: sc.vat_elected ? 'Yes — +20% on purchase price' : '—', source: 'Special Conditions' },
+    { label: 'Addendum',       value: sc.addendum_present ? 'Present' + (sc.addendum_date ? ' · ' + sc.addendum_date : '') : 'None identified', source: 'Legal Pack' },
+    { label: 'Pack completeness', value: pc.completeness_pct != null ? pc.completeness_pct + '%' : '—', source: 'Document checklist' },
+  ];
+
+  // Documents reviewed
+  const docRows = Array.isArray(docs) && docs.length > 0
+    ? docs.map(d => ({ name: d.file_name || d.doc_type || 'Document', pages: d.page_count || '—', type: (d.doc_type || 'document').replace(/_/g,' ') }))
+    : [{ name: 'Documents uploaded — detail unavailable', pages: '—', type: '—' }];
+
+  // ────────────────────────────────────────────────────────────────
+  // PAGE 1 — Snapshot, Pack Status, Disclosure Flag Cards, Summary
+  // ────────────────────────────────────────────────────────────────
+  const packStatusText = buildPackStatus(counts, sj);
+  const disclosureSummary = buildDisclosureSummary(sj, flags);
+
+  const p1 = `
+<div class="rpage" id="page1">
+  <div class="r-stripe"></div>
+  <div class="r-stripe-accent" style="width:55%"></div>
+
+  <div class="r-header">
+    <div class="r-brand">
+      <div class="r-logo">LEGAL<span>SMEGAL</span></div>
+      <div class="r-tagline">Auction Legal Pack Intelligence Report</div>
+    </div>
+    <div class="r-meta">
+      <div class="r-meta-label">Generated</div>
+      <div class="r-meta-value">${esc(reportDate)}</div>
+      <div class="r-meta-value" style="margin-top:3px">Based only on uploaded documents</div>
+    </div>
+  </div>
+
+  <!-- 1. REPORT SNAPSHOT -->
+  <div class="r-section">1. Report Snapshot</div>
+  <table class="snap-table">
+    <tr><td>Property</td><td>${esc(address)}${postcode ? ', ' + esc(postcode) : ''}</td></tr>
+    <tr><td>Report type</td><td>Auction Legal Pack Intelligence Report</td></tr>
+    <tr><td>Tenure</td><td>${esc(tenure)}${lease ? ' · ' + esc(lease) : ''}</td></tr>
+    <tr><td>Deal type</td><td>${esc(dealType)}</td></tr>
+    <tr><td>Lot number</td><td>${esc(lotNum)}</td></tr>
+    <tr><td>Guide price</td><td>${esc(guideGbp)}</td></tr>
+    <tr><td>Completion period</td><td>${ct.completion_days ? esc(ct.completion_days) + ' days' + (ct.completion_type === 'working' ? ' (working days)' : '') : '— Not evidenced in uploaded material'}</td></tr>
+    <tr><td>Deposit</td><td>${ct.deposit_pct ? esc(ct.deposit_pct) + '%' + (ct.deposit_refundable === false ? ' — Non-refundable' : '') : '— Not evidenced in uploaded material'}</td></tr>
+    <tr><td>Documents reviewed</td><td>${esc(docCount)} document${docCount !== 1 ? 's' : ''}</td></tr>
+    <tr><td>Pack completeness</td><td>${pc.completeness_pct != null ? pc.completeness_pct + '%' : '—'} (${pc.present_count || '—'} of ${pc.total || 13} expected documents)</td></tr>
+    <tr><td>Flags identified</td><td>${esc((counts.critical||0) + ' critical · ' + (counts.high||0) + ' requires clarification · ' + (counts.missing||0) + ' missing evidence · ' + (counts.note||0) + ' notes')}</td></tr>
+    <tr><td>Report basis</td><td>Based only on uploaded documents. No external data used.</td></tr>
+  </table>
+
+  <!-- 2. PACK STATUS -->
+  <div class="r-section">2. Pack Status</div>
+  <div class="pack-status">
+    <span class="pack-status-label">Pack Status</span>
+    ${esc(packStatusText)}
+  </div>
+
+  <!-- 3. DISCLOSURE FLAGS SUMMARY -->
+  <div class="r-section">3. Disclosure Flags</div>
+  <div class="flag-cards">
+    <div class="flag-card flag-card-critical">
+      <div class="fc-label">Critical disclosures</div>
+      <div class="fc-count">${counts.critical||0}</div>
+      <div class="fc-desc">Buyer-cost, title, or liability items found</div>
+    </div>
+    <div class="flag-card flag-card-clarify">
+      <div class="fc-label">Requires clarification</div>
+      <div class="fc-count">${counts.high||0}</div>
+      <div class="fc-desc">Items needing solicitor or auctioneer confirmation</div>
+    </div>
+    <div class="flag-card flag-card-missing">
+      <div class="fc-label">Missing evidence</div>
+      <div class="fc-count">${counts.missing||0}</div>
+      <div class="fc-desc">Not evidenced in uploaded documents</div>
+    </div>
+    <div class="flag-card flag-card-note">
+      <div class="fc-label">Notes</div>
+      <div class="fc-count">${counts.note||0}</div>
+      <div class="fc-desc">Informational — low or no material impact</div>
+    </div>
+  </div>
+
+  <!-- 4. DISCLOSURE SUMMARY -->
+  <div class="r-section">4. Disclosure Summary</div>
+  <div class="disclosure-summary">
+    <div class="disclosure-summary-label">Disclosure Summary</div>
+    <div class="disclosure-summary-text">${esc(disclosureSummary)}</div>
+  </div>
+
+  <!-- PACK SCORE -->
+  <div class="r-section">Pack Score</div>
+  <div class="pack-score-wrap">
+    <div class="pack-score-pill">
+      <div class="pack-score-num">${score !== '—' ? esc(score) : '—'}</div>
+      <div class="pack-score-denom">/100</div>
+      <div class="pack-score-lbl">Pack Score</div>
+    </div>
+    <div class="pack-score-copy">
+      <div class="pack-score-headline">Legal packs are the risk.<br>The market doesn't show it.</div>
+      <div class="pack-score-desc">Score reflects disclosure density only: critical flags, clarification items, missing evidence, and notes. Starts at 100 — deducted for each critical (−12), high (−6), missing (−4), and note (−1) flag.</div>
+      <div class="pack-score-caveat">Not a valuation, bid guide, legal advice, or purchase recommendation.</div>
+    </div>
+  </div>
+
+  <div class="r-footer">
+    <div class="r-footer-left">LegalSmegal Technologies Ltd · Not legal or financial advice</div>
+    <div class="r-footer-right">Page 1</div>
+  </div>
+</div>`;
+
+  // ────────────────────────────────────────────────────────────────
+  // PAGE 2 — Full Disclosure Flags (detail)
+  // ────────────────────────────────────────────────────────────────
+  const flagDetailHtml = flags.length === 0
+    ? `<div style="font-size:11px;color:#888;padding:12px 0">No disclosure flags extracted from uploaded documents.</div>`
+    : flags.map(f => {
+        const sev = (f.severity||'note').toLowerCase();
+        // Subscriber gets full detail; guest gets condensed view
+        const fullDetail = isSubscriber ? `
+    ${f.evidence    ? `<div class="flag-evidence" style="font-size:10px;color:var(--text-ter,#aaa);font-style:italic;margin-top:6px;padding:6px 10px;background:var(--surface-2,#f5f5f5);border-radius:3px;line-height:1.5">&#8220;${esc(f.evidence)}&#8221;</div>` : ''}
+    ${f.implication ? `<div class="flag-implication" style="font-size:10px;color:var(--text-sec,#555);margin-top:5px;line-height:1.5"><strong>Implication:</strong> ${esc(f.implication)}</div>` : ''}
+    ${f.action      ? `<div class="flag-action" style="font-size:10px;color:var(--text-sec,#555);margin-top:5px;padding:6px 10px;background:#fffbf0;border-left:2px solid #e8943a;border-radius:0 3px 3px 0;line-height:1.5"><strong>Action:</strong> ${esc(f.action)}</div>` : ''}` : `
+    ${f.implication ? `<div class="flag-implication">Buyer implication: ${esc(f.implication)}</div>` : ''}`;
+        return `
+<div class="flag-row">
+  <div class="flag-bar ${sev}"></div>
+  <div class="flag-body">
+    <div class="flag-top">
+      ${sevBadge(sev)}
+      <span class="flag-title">${esc(f.title||'Unnamed item')}</span>
+    </div>
+    ${f.summation ? `<div class="flag-text">${esc(f.summation)}</div>` : ''}
+    ${fullDetail}
+    ${(f.source_document || f.source_clause) ? `<div class="flag-src">[Source: ${esc(f.source_document||'')}${f.source_clause ? ' · ' + esc(f.source_clause) : ''}]</div>` : `<div class="flag-src">[Source: Not evidenced in uploaded material]</div>`}
+  </div>
+</div>`;
+      }).join('');
+
+  const p2 = `
+<div class="rpage" id="page2">
+  <div class="r-stripe"></div>
+
+  <div class="r-header" style="margin-bottom:20px">
+    <div>
+      <div class="r-logo" style="font-size:14px">LEGAL<span>SMEGAL</span></div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#aaa;margin-top:2px">${esc(address)} · Disclosure Flags</div>
+    </div>
+    <div class="r-meta"><div class="r-meta-value">${esc(reportDate)}</div></div>
+  </div>
+
+  <div class="r-section">5. Disclosure Flags — ${esc(flags.length)} item${flags.length !== 1 ? 's' : ''} recorded</div>
+  ${flagDetailHtml}
+
+  <div class="r-footer">
+    <div class="r-footer-left">LegalSmegal Technologies Ltd · Not legal or financial advice</div>
+    <div class="r-footer-right">Page 2</div>
+  </div>
+</div>`;
+
+  // ────────────────────────────────────────────────────────────────
+  // PAGE 3 — Costs, Key Data, Legal/Title Implications, Timing
+  // ────────────────────────────────────────────────────────────────
+  const costsHtml = costLines.length === 0
+    ? `<div style="font-size:11px;color:#888;padding:8px 0">No buyer-cost or liability items extracted from uploaded pack. [Source: Not evidenced in uploaded material]</div>`
+    : `<table class="cost-table">
+        <thead><tr><th>Item</th><th>Amount</th><th>Classification</th><th>Source</th></tr></thead>
+        <tbody>
+          ${costLines.map(c => `<tr>
+            <td>${esc(c.item)}</td>
+            <td>${esc(c.amount)}</td>
+            <td style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#888">${esc(c.type)}</td>
+            <td style="font-size:10px;color:#aaa">${esc(c.source)}</td>
+          </tr>`).join('')}
+        </tbody>
+        ${totalCostNote ? `<tfoot><tr class="cost-total"><td colspan="2">${esc(totalCostNote)}</td><td colspan="2" style="font-size:10px;color:#aaa">Excludes SDLT, legal fees, search costs</td></tr></tfoot>` : ''}
+      </table>`;
+
+    const legalHtml = legalFlags.length === 0
+    ? `<div style="font-size:11px;color:#888;padding:8px 0">No specific legal or title implications extracted. Verify complete title documents have been uploaded.</div>`
+    : legalFlags.map(f => {
+        const sev = (f.severity||'note').toLowerCase();
+        return `<div class="flag-row">
+          <div class="flag-bar ${sev}"></div>
+          <div class="flag-body">
+            <div class="flag-top">${sevBadge(sev)}<span class="flag-title">${esc(f.title||''  )}</span></div>
+            ${f.summation ? `<div class="flag-text">${esc(f.summation)}</div>` : ''}
+            ${isSubscriber && f.evidence ? `<div class="flag-evidence" style="font-size:10px;color:#aaa;font-style:italic;margin-top:4px;padding:4px 8px;background:#f5f5f5;border-radius:3px">&#8220;${esc(f.evidence)}&#8221;</div>` : ''}
+            ${isSubscriber && f.action ? `<div class="flag-action" style="font-size:10px;color:#555;margin-top:4px;padding:5px 8px;background:#fffbf0;border-left:2px solid #e8943a;border-radius:0 3px 3px 0"><strong>Action:</strong> ${esc(f.action)}</div>` : ''}
+            ${(f.source_document||f.source_clause) ? `<div class="flag-src">[Source: ${esc(f.source_document||'')}${f.source_clause ? ' · ' + esc(f.source_clause) : ''}]</div>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+
+    const timingHtml = timingFlags.length === 0
+    ? `<div style="font-size:11px;color:#888;padding:8px 0">No specific completion or timing disclosures extracted. Verify Special Conditions have been uploaded.</div>`
+    : timingFlags.map(f => {
+        const sev = (f.severity||'note').toLowerCase();
+        return `<div class="flag-row">
+          <div class="flag-bar ${sev}"></div>
+          <div class="flag-body">
+            <div class="flag-top">${sevBadge(sev)}<span class="flag-title">${esc(f.title||''  )}</span></div>
+            ${f.summation ? `<div class="flag-text">${esc(f.summation)}</div>` : ''}
+            ${isSubscriber && f.evidence ? `<div class="flag-evidence" style="font-size:10px;color:#aaa;font-style:italic;margin-top:4px;padding:4px 8px;background:#f5f5f5;border-radius:3px">&#8220;${esc(f.evidence)}&#8221;</div>` : ''}
+            ${isSubscriber && f.action ? `<div class="flag-action" style="font-size:10px;color:#555;margin-top:4px;padding:5px 8px;background:#fffbf0;border-left:2px solid #e8943a;border-radius:0 3px 3px 0"><strong>Action:</strong> ${esc(f.action)}</div>` : ''}
+            ${(f.source_document||f.source_clause) ? `<div class="flag-src">[Source: ${esc(f.source_document||'')}${f.source_clause ? ' · ' + esc(f.source_clause) : ''}]</div>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+
+  const p3 = `
+<div class="rpage" id="page3">
+  <div class="r-stripe"></div>
+
+  <div class="r-header" style="margin-bottom:20px">
+    <div>
+      <div class="r-logo" style="font-size:14px">LEGAL<span>SMEGAL</span></div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#aaa;margin-top:2px">${esc(address)} · Costs · Key Data · Legal / Timing</div>
+    </div>
+    <div class="r-meta"><div class="r-meta-value">${esc(reportDate)}</div></div>
+  </div>
+
+  <!-- 6. BUYER COST & LIABILITY DISCLOSURES -->
+  <div class="r-section">6. Buyer Cost &amp; Liability Disclosures</div>
+  ${costsHtml}
+
+  <!-- 7. KEY EXTRACTED DATA -->
+  <div class="r-section">7. Key Extracted Data</div>
+  <div class="kv-grid">
+    ${kvItems.map(k => `
+    <div class="kv-cell">
+      <div class="kv-label">${esc(k.label)}</div>
+      <div class="kv-value">${esc(k.value)}</div>
+      <div class="kv-source">[Source: ${esc(k.source)}]</div>
+    </div>`).join('')}
+  </div>
+
+  <!-- 8. LEGAL / TITLE IMPLICATIONS -->
+  <div class="r-section">8. Legal / Title Implications</div>
+  ${legalHtml}
+
+  <!-- 9. COMPLETION & TIMING DISCLOSURES -->
+  <div class="r-section" style="margin-top:14px">9. Completion &amp; Timing Disclosures</div>
+  ${timingHtml}
+
+  <div class="r-footer">
+    <div class="r-footer-left">LegalSmegal Technologies Ltd · Not legal or financial advice</div>
+    <div class="r-footer-right">Page 3</div>
+  </div>
+</div>`;
+
+  // ────────────────────────────────────────────────────────────────
+  // PAGE 4 — Missing Evidence, Questions, Documents, Legal Caution
+  // ────────────────────────────────────────────────────────────────
+  const missingHtml = missingFlags.length === 0
+    ? `<div style="font-size:11px;color:#888;padding:8px 0">No material missing evidence identified from the uploaded pack.</div>`
+    : missingFlags.map(f => `
+      <div class="missing-row">
+        <div class="missing-dot"></div>
+        <div class="missing-item-name">${esc(f.title||'')}</div>
+        <div class="missing-implication">${esc(f.summation||f.implication||'')} <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#aaa">[Source: Not evidenced in uploaded material]</span></div>
+      </div>`).join('');
+
+  const questionsHtml = uniquePriorityQ.length === 0
+    ? `<div style="font-size:11px;color:#888;padding:8px 0">Priority questions could not be automatically generated. Review disclosure flags above and consult a solicitor.</div>`
+    : `<table class="r-table" style="margin-bottom:10px">
+        <thead>
+          <tr>
+            <th style="width:11%">Priority</th>
+            <th style="width:18%">Ask</th>
+            <th style="width:45%">Question</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${uniquePriorityQ.map(q => {
+            const priColour = q.priority === 'Critical' ? 'color:#c82828;font-weight:700'
+                            : q.priority === 'Important' ? 'color:#c87800;font-weight:600'
+                            : 'color:#555';
+            return `<tr>
+              <td style="font-family:'IBM Plex Mono',monospace;font-size:9px;${priColour}">${esc(q.priority)}</td>
+              <td style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#888;font-weight:600">${esc(q.ask)}</td>
+              <td>${esc(q.question)}</td>
+              <td style="color:#777">${esc(q.reason)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#aaa;line-height:1.6;padding:8px 10px;background:#f8f8f8;border:1px solid #ebebeb;border-radius:4px">
+        ${isSubscriber ? '' : 'This report provides a priority shortlist. For the full question set, workflow tracking and flag resolution use the LegalSmegal workspace.'}
+      </div>`;
+
+  const docsHtml = `<table class="r-table">
+    <thead><tr><th>Document</th><th style="text-align:right">Pages</th><th>Type</th></tr></thead>
+    <tbody>
+      ${docRows.map(d => `<tr><td>${esc(d.name)}</td><td style="text-align:right">${esc(d.pages)}</td><td>${esc(d.type)}</td></tr>`).join('')}
+    </tbody>
+  </table>`;
+
+  const p4 = `
+<div class="rpage" id="page4">
+  <div class="r-stripe"></div>
+
+  <div class="r-header" style="margin-bottom:20px">
+    <div>
+      <div class="r-logo" style="font-size:14px">LEGAL<span>SMEGAL</span></div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#aaa;margin-top:2px">${esc(address)} · Missing Evidence · Questions · Documents</div>
+    </div>
+    <div class="r-meta"><div class="r-meta-value">${esc(reportDate)}</div></div>
+  </div>
+
+  <!-- 10. MISSING / UNCLEAR EVIDENCE -->
+  <div class="r-section">10. Missing / Unclear Evidence</div>
+  ${missingHtml}
+
+  <!-- 11. PRIORITY QUESTIONS TO RAISE -->
+  <div class="r-section" style="margin-top:18px">11. Priority Questions to Raise</div>
+  ${questionsHtml}
+
+  <!-- 12. DOCUMENTS REVIEWED -->
+  <div class="r-section" style="margin-top:18px">12. Documents Reviewed</div>
+  ${docsHtml}
+
+  <!-- 13. LEGAL CAUTION -->
+  <div class="r-disclaimer">
+    <div class="r-disclaimer-title">Legal Caution</div>
+    <div class="r-disclaimer-text">This report is a legal-pack intelligence summary based only on the uploaded documents. It is not legal advice, financial advice, or a substitute for solicitor review. A qualified solicitor should confirm title, contract conditions, buyer liabilities, VAT/tax treatment, and completion obligations before exchange or bidding. LegalSmegal Technologies Ltd is not a law firm and is not regulated by the Solicitors Regulation Authority. All decisions are made solely at the user's risk and discretion.</div>
+  </div>
+
+  <div class="r-footer">
+    <div class="r-footer-left">LegalSmegal Technologies Ltd · legalsmegal.com · Registered in England &amp; Wales</div>
+    <div class="r-footer-right">Page 4</div>
+  </div>
+</div>`;
+
+  document.getElementById('reportCanvas').innerHTML = p1 + p2 + p3 + p4;
+  document.getElementById('loadingWrap').style.display  = 'none';
+  document.getElementById('reportCanvas').style.display = 'flex';
+  document.title = `Legal Pack Report — ${address} — LegalSmegal`;
+
+  // Show upgrade button if legalsmegal-card.html exists (non-blocking)
+  const upgradeBtn = document.getElementById('upgradeBtn');
+  if (upgradeBtn) upgradeBtn.style.display = 'inline-flex';
+}
+
+// ─────────────────────────────────────────────
+// GUEST2 BOOT — no Supabase, token-gated
+// ─────────────────────────────────────────────
+if (_isGuest2) {
+  (async function bootGuest2() {
+    _g2ShowScreen();
+    _g2SetProgress(5, 'Verifying payment', 'Confirming transaction with Stripe…');
+
+    const POLL_MS  = 5000;
+    const POLL_MAX = 72;
+    let   attempts = 0;
+    let   resolvedToken = _guestToken || null;
+    let   stageIdx = 0;
+
+    // Advance the visual stage independently of poll results
+    function _advanceStage() {
+      if (stageIdx < _g2Stages.length - 1) stageIdx++;
+      const s = _g2Stages[stageIdx];
+      const feedIdx = Math.min(stageIdx, _g2FeedMessages.length - 1);
+      _g2SetProgress(s.pct, s.stage, s.sub);
+      if (stageIdx > 0 && stageIdx <= _g2FeedMessages.length) {
+        _g2AddFeed(_g2FeedMessages[stageIdx - 1], 'green');
+      }
+    }
+
+    // Advance stage every ~18s to mirror analysis pipeline timing
+    const _stageTimer = setInterval(_advanceStage, 18000);
+    // First advance after 3s
+    setTimeout(_advanceStage, 3000);
+
+    while (attempts < POLL_MAX) {
+      try {
+        if (resolvedToken) {
+          const res2 = await fetch(
+            `${API_BASE}/api/guest2/report?guest_session=${encodeURIComponent(_guestSession)}&token=${encodeURIComponent(resolvedToken)}`
+          );
+          if (res2.status === 401 || res2.status === 404) {
+            clearInterval(_stageTimer);
+            showError('This report link is invalid or has expired. Please check your email for the PDF.');
+            return;
+          }
+          if (res2.ok) {
+            const data = await res2.json();
+            if (data.status === 'complete' && data.summary_json) {
+              clearInterval(_stageTimer);
+              _g2SetProgress(100, 'Complete', 'Loading your report…');
+              _g2AddFeed('Analysis complete — rendering report', 'green');
+              await new Promise(r => setTimeout(r, 600));
+              const sj   = data.summary_json;
+              const docs = data.documents || [];
+              const deal = { summary_json: sj, documents: docs, deal_score: sj.deal_score };
+              renderReport(deal, sj, docs);
+              return;
+            }
+          }
+        }
+
+        const res = await fetch(
+          `${API_BASE}/api/guest2/status?guest_session=${encodeURIComponent(_guestSession)}`
+        );
+        if (res.status === 404) {
+          clearInterval(_stageTimer);
+          showError('Session expired. Please check your email for the report PDF.');
+          return;
+        }
+        if (res.status === 402) {
+          clearInterval(_stageTimer);
+          showError('Payment not yet confirmed. Please wait a moment and refresh.');
+          return;
+        }
+        if (res.ok) {
+          const data = await res.json();
+          if (data.status === 'complete' && data.token) {
+            resolvedToken = data.token;
+            continue;
+          }
+          if (data.status === 'processing') {
+            attempts++;
+            await new Promise(r => setTimeout(r, POLL_MS));
+            continue;
+          }
+          if (data.status === 'expired') {
+            clearInterval(_stageTimer);
+            showError('Session expired. Please check your email for the report PDF.');
+            return;
+          }
+        }
+      } catch(e) {
+        console.warn('[guest2 poll]', e);
+      }
+      attempts++;
+      await new Promise(r => setTimeout(r, POLL_MS));
+    }
+    clearInterval(_stageTimer);
+    showError('Analysis is taking longer than expected. Your report will be emailed to you shortly.');
+  })();
+} else {
+
+// ─────────────────────────────────────────────
+// SUBSCRIBER BOOT
+// ─────────────────────────────────────────────
+(async function boot() {
+  let accessToken = null;
+  try {
+    const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+    const sb = createClient(SUPA_URL, SUPA_ANON);
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) {
+      accessToken = session.access_token;
+    }
+    // No forced redirect — one-off report accessible without login
+    // Auth guard is soft: if token present, use it; if not, still render from API
+  } catch(e) {
+    console.warn('[auth]', e);
+  }
+
+  const authHeaders = accessToken
+    ? { 'Authorization': 'Bearer ' + accessToken }
+    : {};
+
+  // ── 1. Fetch deal ──
+  setLoading('Loading report…');
+
+  let deal;
+  try {
+    const res = await fetch(`${API_BASE}/api/deals/${encodeURIComponent(dealId)}`, { headers: authHeaders });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    deal = data.deal || data;
+  } catch(e) {
+    showError('Could not load report data. Please check your connection and try again.');
+    return;
+  }
+
+  const sj = deal.summary_json;
+
+  // Fix 10 — Stop embedded old report from triggering summarise.
+  // When loaded inside the Deal Report cockpit iframe (embedded=1), this file
+  // must NEVER call /summarise. The parent page's processing flow owns analysis
+  // triggering. A second concurrent /summarise call creates a write race that
+  // can overwrite ceiling objects and flag state from the primary flow.\n  // In embedded mode: if analysis is not complete, show a quiet loading state\n  // and poll for completion rather than firing a duplicate analysis call.
+  const _isEmbedded = new URLSearchParams(window.location.search).get('embedded') === '1';
+
+  // ── 2. Trigger analysis if not yet complete ──
+  if (!sj || sj.deal_score == null) {
+    if (_isEmbedded) {
+      // Embedded: do not start analysis — poll for completion from parent flow
+      setLoading('Analysis in progress…');
+      let _embedPoll = 0;
+      const _embedInterval = setInterval(async () => {
+        _embedPoll++;
+        try {
+          const _pr = await fetch(`${API_BASE}/api/deals/${encodeURIComponent(dealId)}`, { headers: authHeaders });
+          if (_pr.ok) {
+            const _pd = await _pr.json();
+            const _pd2 = _pd.deal || _pd;
+            if (_pd2.summary_json && _pd2.summary_json.deal_score != null) {
+              clearInterval(_embedInterval);
+              const docs2 = Array.isArray(_pd2.documents) ? _pd2.documents : [];
+              renderReport(_pd2, _pd2.summary_json, docs2);
+              return;
+            }
+          }
+        } catch(_) {}
+        if (_embedPoll >= 30) { clearInterval(_embedInterval); setLoading('Analysis not yet available — reload Deal Report.'); }
+      }, 3000);
+      return;
+    }
+    setLoading('Starting analysis — this may take 30–90 seconds…');
+    try {
+      const res = await fetch(`${API_BASE}/api/deals/${encodeURIComponent(dealId)}/summarise`, {
+        method:  'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' }
+      });
+      if (res.status === 402) {
+        showError('Usage limit reached. Please contact support or upload via a subscribed account.');
+        return;
+      }
+      if (!res.ok && res.status !== 202) {
+        const d = await res.json().catch(() => ({}));
+        showError('Analysis failed: ' + (d.error || 'HTTP ' + res.status));
+        return;
+      }
+    } catch(e) {
+      showError('Network error starting analysis. Please try again.');
+      return;
+    }
+
+    // Poll for completion
+    const POLL_MS  = 3000;
+    const POLL_MAX = 60;
+    let attempts = 0;
+
+    while (attempts < POLL_MAX) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+      attempts++;
+      setLoading(`Analysing documents… (${Math.min(attempts * 5, 99)}%)`);
+      try {
+        const res2 = await fetch(`${API_BASE}/api/deals/${encodeURIComponent(dealId)}`, { headers: authHeaders });
+        if (!res2.ok) continue;
+        const data2 = await res2.json();
+        const d2 = data2.deal || data2;
+        if (d2.status === 'error') {
+          showError('Analysis failed: ' + ((d2.summary_json||{}).error || 'Server error. Please try again.'));
+          return;
+        }
+        if (d2.summary_json && d2.summary_json.deal_score != null) {
+          const docs = Array.isArray(d2.documents) ? d2.documents : [];
+          renderReport(d2, d2.summary_json, docs);
+          return;
+        }
+      } catch(_) {}
+    }
+    showError('Analysis timed out. Please reload the page to check if it completed.');
+    return;
+  }
+
+  // ── 3. Already analysed — load resolved flags then render ──
+  // ── 3. Already analysed ──
+  const docs = Array.isArray(deal.documents) ? deal.documents : [];
+  renderReport(deal, sj, docs, true); // true = subscriber, show full flag detail
+})();
+} // end subscriber boot
+</script>
+</body>
+</html>
