@@ -114,6 +114,7 @@ except Exception:
     answer_flag = None  # type: ignore
 
 app = Flask(__name__)
+from guest_routes import guest_bp; app.register_blueprint(guest_bp)  # guest2 pipeline — independent of subscriber flow
 
 # CORS: wildcard origin + supports_credentials=True is rejected by all modern browsers.
 # Use an explicit allowlist. Add CORS_ORIGINS env var on Render if you add more origins.
