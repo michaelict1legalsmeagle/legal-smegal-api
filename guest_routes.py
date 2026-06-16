@@ -637,13 +637,200 @@ def _build_report_html(summary_json: dict, docs: list) -> str:
 </html>"""
 
 
-def _generate_pdf_bytes(html: str) -> bytes:
-    """Render HTML to PDF using WeasyPrint. Returns bytes."""
-    try:
-        from weasyprint import HTML as _WP
-        return _WP(string=html).write_pdf()
-    except ImportError:
-        raise RuntimeError("weasyprint not installed — add to requirements.txt")
+def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
+    """Generate PDF using ReportLab (pure Python, no system deps)."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+    import io as _io, re as _re, json as _json
+    from datetime import date
+
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=18*mm, rightMargin=18*mm,
+        topMargin=16*mm, bottomMargin=20*mm)
+
+    C_BLACK = colors.HexColor("#1a1a1a")
+    C_GOLD  = colors.HexColor("#c8a84b")
+    C_MUTED = colors.HexColor("#7a8fa3")
+    C_CRIT  = colors.HexColor("#e05c5c")
+    C_HIGH  = colors.HexColor("#e8943a")
+    C_MISS  = colors.HexColor("#4a9eff")
+    C_NOTE  = colors.HexColor("#7a8fa3")
+    C_GREEN = colors.HexColor("#3ecf8e")
+    C_WHITE = colors.white
+    MONO = "Courier"
+    SANS = "Helvetica"
+    W = A4[0] - 36*mm
+
+    def sty(name, **kw):
+        from reportlab.lib.styles import getSampleStyleSheet
+        base = getSampleStyleSheet()
+        return ParagraphStyle(name, parent=base["Normal"], **kw)
+
+    s_logo  = sty("logo", fontName=MONO,  fontSize=16, textColor=C_BLACK, spaceAfter=2)
+    s_tag   = sty("tag",  fontName=MONO,  fontSize=7,  textColor=C_MUTED, spaceAfter=14, leading=10)
+    s_sec   = sty("sec",  fontName=MONO,  fontSize=7,  textColor=C_MUTED, spaceBefore=10, spaceAfter=5, leading=9)
+    s_kv_k  = sty("kvk",  fontName=SANS,  fontSize=9,  textColor=C_MUTED)
+    s_kv_v  = sty("kvv",  fontName=SANS+"-Bold", fontSize=9, textColor=C_BLACK, alignment=TA_RIGHT)
+    s_body  = sty("body", fontName=SANS,  fontSize=8,  textColor=C_BLACK, leading=11)
+    s_bold  = sty("bold", fontName=SANS+"-Bold", fontSize=8, textColor=C_BLACK, leading=11)
+    s_small = sty("sml",  fontName=SANS,  fontSize=7,  textColor=C_MUTED, leading=10)
+    s_mono  = sty("mono", fontName=MONO,  fontSize=7,  textColor=C_MUTED, leading=10)
+    s_li    = sty("li",   fontName=SANS,  fontSize=8,  textColor=C_BLACK, leading=12, leftIndent=8)
+    s_ntc   = sty("ntc",  fontName=SANS,  fontSize=7,  textColor=colors.HexColor("#555"), leading=10)
+
+    sj       = summary_json or {}
+    flags    = sj.get("flags") or []
+    prop     = sj.get("property") or {}
+    counts   = sj.get("flag_counts") or {}
+    sc       = sj.get("special_conditions") or {}
+    score    = sj.get("deal_score", "?")
+    address  = prop.get("address") or "?"
+    postcode = prop.get("postcode") or ""
+    tenure   = prop.get("tenure") or "?"
+    lease    = prop.get("lease_years")
+    guide_p  = prop.get("guide_price_pence")
+    guide    = f"£{int(guide_p)//100:,}" if guide_p else "?"
+    viability= sj.get("viability_statement") or ""
+    today    = date.today().strftime("%d %B %Y")
+
+    story = []
+
+    def section(title):
+        story.append(Spacer(1, 3*mm))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=C_MUTED))
+        story.append(Paragraph(title.upper(), s_sec))
+
+    def kv(key, val):
+        t = Table([[Paragraph(key, s_kv_k), Paragraph(str(val or ""), s_kv_v)]],
+                  colWidths=[W*0.55, W*0.45])
+        t.setStyle(TableStyle([
+            ("BOTTOMPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),3),
+            ("LINEBELOW",(0,0),(-1,-1),0.3,colors.HexColor("#f0f0f0")),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+        ]))
+        story.append(t)
+
+    def sev_col(sev):
+        return {"critical":C_CRIT,"high":C_HIGH,"missing":C_MISS}.get((sev or "").lower(), C_NOTE)
+
+    def sev_lbl(sev):
+        return {"critical":"CRITICAL","high":"HIGH","missing":"MISSING","note":"NOTE"}.get((sev or "").lower(), "NOTE")
+
+    # Logo
+    story.append(Paragraph("LegalSmegal", s_logo))
+    story.append(Paragraph("AUCTION LEGAL PACK INTELLIGENCE REPORT", s_tag))
+
+    section("1. Report Snapshot")
+    kv("Property", address)
+    kv("Postcode", postcode)
+    kv("Tenure", tenure + (f" - {lease} years remaining" if lease else ""))
+    kv("Guide price", guide)
+    kv("Report date", today)
+
+    score_c = C_GREEN if (isinstance(score,(int,float)) and score>=70) else C_HIGH if (isinstance(score,(int,float)) and score>=50) else C_CRIT
+    sc_t = Table([[
+        Paragraph(f"<b>{score}</b>", sty("scr",fontName=MONO,fontSize=18,textColor=C_WHITE,alignment=TA_CENTER)),
+        Paragraph(f"<b>Pack Score / 100</b><br/>{viability}", sty("scv",fontName=SANS,fontSize=8,textColor=C_BLACK,leading=11)),
+    ]], colWidths=[22*mm, W-22*mm])
+    sc_t.setStyle(TableStyle([("BACKGROUND",(0,0),(0,0),score_c),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)]))
+    story.append(Spacer(1, 3*mm))
+    story.append(sc_t)
+
+    section("2. Pack Status")
+    st = Table([[
+        Paragraph(f"<b>{counts.get("critical",0)}</b>", sty("s1",fontName=MONO,fontSize=16,textColor=C_CRIT,alignment=TA_CENTER)),
+        Paragraph(f"<b>{counts.get("high",0)}</b>",     sty("s2",fontName=MONO,fontSize=16,textColor=C_HIGH,alignment=TA_CENTER)),
+        Paragraph(f"<b>{counts.get("missing",0)}</b>",  sty("s3",fontName=MONO,fontSize=16,textColor=C_MISS,alignment=TA_CENTER)),
+        Paragraph(f"<b>{counts.get("note",0)}</b>",     sty("s4",fontName=MONO,fontSize=16,textColor=C_NOTE,alignment=TA_CENTER)),
+    ],[
+        Paragraph("CRITICAL",s_mono),Paragraph("HIGH",s_mono),Paragraph("MISSING",s_mono),Paragraph("NOTES",s_mono),
+    ]], colWidths=[W/4]*4)
+    st.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER"),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+    story.append(st)
+
+    section("3. Special Conditions")
+    sc_lines = []
+    if sc.get("buyers_premium_pct"):     sc_lines.append(f"Buyer premium: {sc["buyers_premium_pct"]}%")
+    if sc.get("buyers_premium_gbp"):     sc_lines.append(f"Buyer premium (fixed): £{sc["buyers_premium_gbp"]:,}")
+    if sc.get("admin_fee_gbp"):          sc_lines.append(f"Admin fee: £{sc["admin_fee_gbp"]:,}")
+    if sc.get("vat_elected"):            sc_lines.append("VAT ELECTED - purchase price +20%")
+    if sc.get("non_refundable_deposit"): sc_lines.append("Deposit is non-refundable")
+    if sc.get("completion_days"):        sc_lines.append(f"Completion: {sc["completion_days"]} days")
+    if sc.get("special_conditions_missing"): sc_lines.append("Special Conditions not present in pack")
+    if not sc_lines: sc_lines = ["No special conditions extracted"]
+    for line in sc_lines:
+        story.append(Paragraph(f"- {line}", s_li))
+
+    def flag_table(flag_list):
+        if not flag_list:
+            story.append(Paragraph("No flags in this category.", s_small))
+            return
+        rows = [[Paragraph("SEV",s_mono), Paragraph("FLAG",s_mono), Paragraph("SOURCE",s_mono)]]
+        for f in flag_list:
+            sev = (f.get("severity") or "note").lower()
+            col = sev_col(sev)
+            lbl = sev_lbl(sev)
+            rows.append([
+                Paragraph(f"<font color="#{col.hexval()[1:]}">{lbl}</font>", sty(f"sv{sev}",fontName=MONO,fontSize=6,textColor=col)),
+                [Paragraph(f"<b>{f.get("title","")}</b>", s_bold),
+                 Paragraph(f.get("summation","") or "", s_body),
+                 Paragraph(f.get("action","") or "", s_small)],
+                Paragraph((f.get("source_document") or "")[:40], s_small),
+            ])
+        cw = [20*mm, W-20*mm-26*mm, 26*mm]
+        tbl = Table(rows, colWidths=cw, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f5f5f5")),
+            ("LINEBELOW",(0,0),(-1,-1),0.3,colors.HexColor("#eeeeee")),
+            ("VALIGN",(0,0),(-1,-1),"TOP"),
+            ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+            ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),
+        ]))
+        story.append(tbl)
+
+    section("4. Buyer Cost Exposure")
+    flag_table([f for f in flags if any(k in ((f.get("title") or "")+(f.get("summation") or "")).lower() for k in ["premium","fee","cost","charge","vat","arrear","deposit","indemnit"])])
+
+    section("5. Missing Evidence")
+    flag_table([f for f in flags if (f.get("severity") or "").lower() == "missing"])
+
+    section(f"6. Full Flag Register ({len(flags)} flags)")
+    flag_table(flags)
+
+    section("7. Document Inventory")
+    if docs:
+        dr = [[Paragraph("FILE",s_mono), Paragraph("PG",s_mono), Paragraph("TYPE",s_mono)]]
+        for d in docs:
+            dr.append([Paragraph((d.get("file_name") or "")[:50],s_body), Paragraph(str(d.get("page_count") or ""),s_body), Paragraph((d.get("doc_type") or "").replace("_"," ").title(),s_body)])
+        dt = Table(dr, colWidths=[W*0.55, W*0.1, W*0.35], repeatRows=1)
+        dt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f5f5f5")),("LINEBELOW",(0,0),(-1,-1),0.3,colors.HexColor("#eeeeee")),("VALIGN",(0,0),(-1,-1),"TOP"),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),("LEFTPADDING",(0,0),(-1,-1),3)]))
+        story.append(dt)
+    else:
+        story.append(Paragraph("No documents recorded.", s_small))
+
+    story.append(Spacer(1,5*mm))
+    disc = Table([[Paragraph("This report is produced by LegalSmegal Technologies Ltd for investor decision-support purposes only. It does not constitute legal advice. Always instruct a qualified solicitor before bidding at auction.", s_ntc)]], colWidths=[W])
+    disc.setStyle(TableStyle([("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),("LINEABOVE",(0,0),(-1,-1),1,C_BLACK),("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#f9f9f9"))]))
+    story.append(disc)
+
+    def _footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(MONO, 7)
+        canvas.setFillColor(C_MUTED)
+        canvas.drawString(18*mm, 12*mm, "LegalSmegal Technologies Ltd")
+        canvas.drawCentredString(A4[0]/2, 12*mm, "Not legal advice - investor decision support only")
+        canvas.drawRightString(A4[0]-18*mm, 12*mm, today)
+        canvas.setStrokeColor(colors.HexColor("#e5e5e5"))
+        canvas.line(18*mm, 15*mm, A4[0]-18*mm, 15*mm)
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buf.getvalue()
 
 
 # ── Email delivery ───────────────────────────────────────────────────────────
@@ -729,8 +916,7 @@ def _run_analysis_and_deliver(session_id: str):
     # Generate PDF
     address = (summary_json.get("property") or {}).get("address") or "Legal Pack"
     try:
-        html      = _build_report_html(summary_json, docs)
-        pdf_bytes = _generate_pdf_bytes(html)
+        pdf_bytes = _generate_pdf_bytes(summary_json, docs)
         logger.info(f"[guest2] PDF generated ({len(pdf_bytes):,} bytes) for session {session_id}")
     except Exception as e:
         logger.error(f"[guest2] PDF generation failed: {e}")
