@@ -775,7 +775,7 @@ def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
             sev = (f.get("severity") or "note").lower()
             col = sev_col(sev)
             lbl = sev_lbl(sev)
-            _hex = col.hexval()[1:]
+            _hex = col.hexval().lstrip("#x")
             _sp = Paragraph("<font color=\"#" + _hex + "\">" + lbl + "</font>", sty("sv"+sev, fontName=MONO, fontSize=6, textColor=col))
             _fc = [Paragraph("<b>"+(f.get("title") or "")+"</b>", s_bold), Paragraph(f.get("summation","") or "", s_body), Paragraph(f.get("action","") or "", s_small)]
             rows.append([_sp, _fc, Paragraph((f.get("source_document") or "")[:40], s_small)])
