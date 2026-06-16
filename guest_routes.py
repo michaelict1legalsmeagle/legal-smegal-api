@@ -359,14 +359,15 @@ def _run_llm_analysis(documents: list) -> dict:
     return result
 
 # ── PDF generation (ReportLab) ───────────────────────────────────────────────
-def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
+def _generate_pdf_local(summary_json: dict, docs: list) -> bytes:
+    """Local ReportLab PDF generation — fallback only."""
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.lib import colors
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    Table, TableStyle, HRFlowable)
     from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-    from reportlab.lib.styles import getSampleStyleSheet
     import io as _io
     from datetime import date
 
@@ -383,17 +384,17 @@ def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
     def sty(name, **kw):
         return ParagraphStyle(name, parent=getSampleStyleSheet()["Normal"], **kw)
 
-    s_logo = sty("logo", fontName=MONO, fontSize=16, textColor=C_BLACK, spaceAfter=2)
-    s_tag  = sty("tag",  fontName=MONO, fontSize=7,  textColor=C_MUTED, spaceAfter=14, leading=10)
-    s_sec  = sty("sec",  fontName=MONO, fontSize=7,  textColor=C_MUTED, spaceBefore=10, spaceAfter=5, leading=9)
-    s_kv_k = sty("kvk",  fontName=SANS, fontSize=9,  textColor=C_MUTED)
-    s_kv_v = sty("kvv",  fontName=SANS+"-Bold", fontSize=9, textColor=C_BLACK, alignment=TA_RIGHT)
-    s_body = sty("body", fontName=SANS, fontSize=8,  textColor=C_BLACK, leading=11)
-    s_bold = sty("bold", fontName=SANS+"-Bold", fontSize=8, textColor=C_BLACK, leading=11)
-    s_small= sty("sml",  fontName=SANS, fontSize=7,  textColor=C_MUTED, leading=10)
-    s_mono = sty("mono", fontName=MONO, fontSize=7,  textColor=C_MUTED, leading=10)
-    s_li   = sty("li",   fontName=SANS, fontSize=8,  textColor=C_BLACK, leading=12, leftIndent=8)
-    s_ntc  = sty("ntc",  fontName=SANS, fontSize=7,  textColor=colors.HexColor("#555555"), leading=10)
+    s_logo = sty("logo2", fontName=MONO, fontSize=16, textColor=C_BLACK, spaceAfter=2)
+    s_tag  = sty("tag2",  fontName=MONO, fontSize=7,  textColor=C_MUTED, spaceAfter=14, leading=10)
+    s_sec  = sty("sec2",  fontName=MONO, fontSize=7,  textColor=C_MUTED, spaceBefore=10, spaceAfter=5, leading=9)
+    s_kv_k = sty("kvk2",  fontName=SANS, fontSize=9,  textColor=C_MUTED)
+    s_kv_v = sty("kvv2",  fontName=SANS+"-Bold", fontSize=9, textColor=C_BLACK, alignment=TA_RIGHT)
+    s_body = sty("body2", fontName=SANS, fontSize=8,  textColor=C_BLACK, leading=11)
+    s_bold = sty("bold2", fontName=SANS+"-Bold", fontSize=8, textColor=C_BLACK, leading=11)
+    s_small= sty("sml2",  fontName=SANS, fontSize=7,  textColor=C_MUTED, leading=10)
+    s_mono = sty("mono2", fontName=MONO, fontSize=7,  textColor=C_MUTED, leading=10)
+    s_li   = sty("li2",   fontName=SANS, fontSize=8,  textColor=C_BLACK, leading=12, leftIndent=8)
+    s_ntc  = sty("ntc2",  fontName=SANS, fontSize=7,  textColor=colors.HexColor("#555555"), leading=10)
 
     sj = summary_json or {}
     flags = sj.get("flags") or []; prop = sj.get("property") or {}
@@ -407,10 +408,10 @@ def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
 
     story = []
 
-    def section(title):
+    def section(t):
         story.append(Spacer(1, 3*mm))
         story.append(HRFlowable(width="100%", thickness=0.5, color=C_MUTED))
-        story.append(Paragraph(title.upper(), s_sec))
+        story.append(Paragraph(t.upper(), s_sec))
 
     def kv(key, val):
         t = Table([[Paragraph(key, s_kv_k), Paragraph(str(val or ""), s_kv_v)]],
@@ -420,7 +421,7 @@ def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
         story.append(t)
 
     def sev_col(sev):
-        return {"critical":C_CRIT,"high":C_HIGH,"missing":C_MISS}.get((sev or "").lower(), C_NOTE)
+        return {"critical":C_CRIT,"high":C_HIGH,"missing":C_MISS}.get((sev or "").lower(),C_NOTE)
 
     def sev_lbl(sev):
         return {"critical":"CRITICAL","high":"HIGH","missing":"MISSING","note":"NOTE"}.get((sev or "").lower(),"NOTE")
@@ -428,118 +429,114 @@ def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
     def flag_table(flag_list):
         if not flag_list:
             story.append(Paragraph("No flags in this category.", s_small)); return
-        rows = [[Paragraph("SEV",s_mono), Paragraph("FLAG",s_mono), Paragraph("SOURCE",s_mono)]]
+        rows = [[Paragraph("SEV",s_mono),Paragraph("FLAG",s_mono),Paragraph("SOURCE",s_mono)]]
         for f in flag_list:
             sev = (f.get("severity") or "note").lower()
             col = sev_col(sev); lbl = sev_lbl(sev)
             hex_str = col.hexval().lstrip("#x")
-            sp = Paragraph("<font color=\"#" + hex_str + "\">" + lbl + "</font>",
-                           sty("sv"+sev, fontName=MONO, fontSize=6, textColor=col))
-            fc = [Paragraph("<b>"+(f.get("title") or "")+"</b>", s_bold),
-                  Paragraph(f.get("summation","") or "", s_body),
-                  Paragraph(f.get("action","") or "", s_small)]
-            rows.append([sp, fc, Paragraph((f.get("source_document") or "")[:40], s_small)])
-        tbl = Table(rows, colWidths=[20*mm, W-20*mm-26*mm, 26*mm], repeatRows=1)
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f5f5f5")),
+            sp = Paragraph("<font color=\"#"+hex_str+"\">"+lbl+"</font>",
+                           sty("sv2"+sev,fontName=MONO,fontSize=6,textColor=col))
+            fc = [Paragraph("<b>"+(f.get("title") or "")+"</b>",s_bold),
+                  Paragraph(f.get("summation","") or "",s_body),
+                  Paragraph(f.get("action","") or "",s_small)]
+            rows.append([sp,fc,Paragraph((f.get("source_document") or "")[:40],s_small)])
+        tbl = Table(rows,colWidths=[20*mm,W-20*mm-26*mm,26*mm],repeatRows=1)
+        tbl.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f5f5f5")),
             ("LINEBELOW",(0,0),(-1,-1),0.3,colors.HexColor("#eeeeee")),
-            ("VALIGN",(0,0),(-1,-1),"TOP"),
-            ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
-            ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),
-        ]))
+            ("VALIGN",(0,0),(-1,-1),"TOP"),("TOPPADDING",(0,0),(-1,-1),4),
+            ("BOTTOMPADDING",(0,0),(-1,-1),4),("LEFTPADDING",(0,0),(-1,-1),3),
+            ("RIGHTPADDING",(0,0),(-1,-1),3)]))
         story.append(tbl)
 
-    story.append(Paragraph("LegalSmegal", s_logo))
-    story.append(Paragraph("AUCTION LEGAL PACK INTELLIGENCE REPORT", s_tag))
-
+    story.append(Paragraph("LegalSmegal",s_logo))
+    story.append(Paragraph("AUCTION LEGAL PACK INTELLIGENCE REPORT",s_tag))
     section("1. Report Snapshot")
-    kv("Property", address); kv("Postcode", postcode)
-    kv("Tenure", tenure + (f" - {lease} years remaining" if lease else ""))
-    kv("Guide price", guide); kv("Report date", today)
-
-    score_c = C_GREEN if (isinstance(score,(int,float)) and score>=70) else \
-              C_HIGH  if (isinstance(score,(int,float)) and score>=50) else C_CRIT
-    sc_t = Table([[
-        Paragraph(f"<b>{score}</b>", sty("scr",fontName=MONO,fontSize=18,textColor=C_WHITE,alignment=TA_CENTER)),
-        Paragraph(f"<b>Pack Score / 100</b><br/>{viability}", sty("scv",fontName=SANS,fontSize=8,textColor=C_BLACK,leading=11)),
-    ]], colWidths=[22*mm, W-22*mm])
+    kv("Property",address); kv("Postcode",postcode)
+    kv("Tenure",tenure+(f" - {lease} years remaining" if lease else ""))
+    kv("Guide price",guide); kv("Report date",today)
+    score_c = C_GREEN if (isinstance(score,(int,float)) and score>=70) else C_HIGH if (isinstance(score,(int,float)) and score>=50) else C_CRIT
+    sc_t = Table([[Paragraph(f"<b>{score}</b>",sty("scr2",fontName=MONO,fontSize=18,textColor=C_WHITE,alignment=TA_CENTER)),
+        Paragraph(f"<b>Pack Score / 100</b><br/>{viability}",sty("scv2",fontName=SANS,fontSize=8,textColor=C_BLACK,leading=11))]],
+        colWidths=[22*mm,W-22*mm])
     sc_t.setStyle(TableStyle([("BACKGROUND",(0,0),(0,0),score_c),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)]))
     story.append(Spacer(1,3*mm)); story.append(sc_t)
-
     section("2. Pack Status")
-    st = Table([[
-        Paragraph(f"<b>{counts.get('critical',0)}</b>", sty("s1",fontName=MONO,fontSize=16,textColor=C_CRIT,alignment=TA_CENTER)),
-        Paragraph(f"<b>{counts.get('high',0)}</b>",     sty("s2",fontName=MONO,fontSize=16,textColor=C_HIGH,alignment=TA_CENTER)),
-        Paragraph(f"<b>{counts.get('missing',0)}</b>",  sty("s3",fontName=MONO,fontSize=16,textColor=C_MISS,alignment=TA_CENTER)),
-        Paragraph(f"<b>{counts.get('note',0)}</b>",     sty("s4",fontName=MONO,fontSize=16,textColor=C_NOTE,alignment=TA_CENTER)),
-    ],[Paragraph("CRITICAL",s_mono),Paragraph("HIGH",s_mono),Paragraph("MISSING",s_mono),Paragraph("NOTES",s_mono)],
-    ], colWidths=[W/4]*4)
+    st = Table([[Paragraph(f"<b>{counts.get('critical',0)}</b>",sty("s12",fontName=MONO,fontSize=16,textColor=C_CRIT,alignment=TA_CENTER)),
+        Paragraph(f"<b>{counts.get('high',0)}</b>",sty("s22",fontName=MONO,fontSize=16,textColor=C_HIGH,alignment=TA_CENTER)),
+        Paragraph(f"<b>{counts.get('missing',0)}</b>",sty("s32",fontName=MONO,fontSize=16,textColor=C_MISS,alignment=TA_CENTER)),
+        Paragraph(f"<b>{counts.get('note',0)}</b>",sty("s42",fontName=MONO,fontSize=16,textColor=C_NOTE,alignment=TA_CENTER))],
+        [Paragraph("CRITICAL",s_mono),Paragraph("HIGH",s_mono),Paragraph("MISSING",s_mono),Paragraph("NOTES",s_mono)]],
+        colWidths=[W/4]*4)
     st.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER"),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
     story.append(st)
-
     section("3. Special Conditions")
     sc_lines = []
-    if sc.get("buyers_premium_pct"):     sc_lines.append(f"Buyer premium: {sc['buyers_premium_pct']}%")
-    if sc.get("buyers_premium_gbp"):     sc_lines.append(f"Buyer premium (fixed): \u00a3{sc['buyers_premium_gbp']:,}")
-    if sc.get("admin_fee_gbp"):          sc_lines.append(f"Admin fee: \u00a3{sc['admin_fee_gbp']:,}")
-    if sc.get("vat_elected"):            sc_lines.append("VAT ELECTED - purchase price +20%")
+    if sc.get("buyers_premium_pct"): sc_lines.append(f"Buyer premium: {sc['buyers_premium_pct']}%")
+    if sc.get("vat_elected"):        sc_lines.append("VAT ELECTED - purchase price +20%")
     if sc.get("non_refundable_deposit"): sc_lines.append("Deposit is non-refundable")
-    if sc.get("completion_days"):        sc_lines.append(f"Completion: {sc['completion_days']} days")
-    if sc.get("special_conditions_missing"): sc_lines.append("Special Conditions not present in pack")
+    if sc.get("completion_days"):    sc_lines.append(f"Completion: {sc['completion_days']} days")
     if not sc_lines: sc_lines = ["No special conditions extracted"]
-    for line in sc_lines: story.append(Paragraph(f"- {line}", s_li))
-
+    for line in sc_lines: story.append(Paragraph(f"- {line}",s_li))
     section("4. Buyer Cost Exposure")
-    flag_table([f for f in flags if any(k in ((f.get("title") or "")+(f.get("summation") or "")).lower()
-        for k in ["premium","fee","cost","charge","vat","arrear","deposit","indemnit"])])
-
+    flag_table([f for f in flags if any(k in ((f.get("title") or "")+(f.get("summation") or "")).lower() for k in ["premium","fee","cost","charge","vat","arrear","deposit","indemnit"])])
     section("5. Missing Evidence")
     flag_table([f for f in flags if (f.get("severity") or "").lower()=="missing"])
-
     section(f"6. Full Flag Register ({len(flags)} flags)")
     flag_table(flags)
-
     section("7. Document Inventory")
     if docs:
         dr = [[Paragraph("FILE",s_mono),Paragraph("PG",s_mono),Paragraph("TYPE",s_mono)]]
         for d in docs:
-            dr.append([Paragraph((d.get("file_name") or "")[:50],s_body),
-                       Paragraph(str(d.get("page_count") or ""),s_body),
-                       Paragraph((d.get("doc_type") or "").replace("_"," ").title(),s_body)])
-        dt = Table(dr, colWidths=[W*0.55,W*0.1,W*0.35], repeatRows=1)
-        dt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f5f5f5")),
-            ("LINEBELOW",(0,0),(-1,-1),0.3,colors.HexColor("#eeeeee")),
-            ("VALIGN",(0,0),(-1,-1),"TOP"),("TOPPADDING",(0,0),(-1,-1),3),
-            ("BOTTOMPADDING",(0,0),(-1,-1),3),("LEFTPADDING",(0,0),(-1,-1),3)]))
+            dr.append([Paragraph((d.get("file_name") or "")[:50],s_body),Paragraph(str(d.get("page_count") or ""),s_body),Paragraph((d.get("doc_type") or "").replace("_"," ").title(),s_body)])
+        dt = Table(dr,colWidths=[W*0.55,W*0.1,W*0.35],repeatRows=1)
+        dt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f5f5f5")),("LINEBELOW",(0,0),(-1,-1),0.3,colors.HexColor("#eeeeee")),
+            ("VALIGN",(0,0),(-1,-1),"TOP"),("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),("LEFTPADDING",(0,0),(-1,-1),3)]))
         story.append(dt)
-    else:
-        story.append(Paragraph("No documents recorded.", s_small))
-
     story.append(Spacer(1,5*mm))
-    disc = Table([[Paragraph(
-        "This report is produced by LegalSmegal Technologies Ltd for investor decision-support purposes only. "
-        "It does not constitute legal advice. Always instruct a qualified solicitor before bidding at auction.",
-        s_ntc)]], colWidths=[W])
-    disc.setStyle(TableStyle([("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),
-        ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
-        ("LINEABOVE",(0,0),(-1,-1),1,C_BLACK),("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#f9f9f9"))]))
+    disc = Table([[Paragraph("This report is produced by LegalSmegal Technologies Ltd for investor decision-support purposes only. It does not constitute legal advice. Always instruct a qualified solicitor before bidding at auction.",s_ntc)]],colWidths=[W])
+    disc.setStyle(TableStyle([("LEFTPADDING",(0,0),(-1,-1),8),("RIGHTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),("LINEABOVE",(0,0),(-1,-1),1,C_BLACK),("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#f9f9f9"))]))
     story.append(disc)
 
     def _footer(canvas, doc):
-        canvas.saveState(); canvas.setFont(MONO, 7)
-        canvas.setFillColor(C_MUTED)
-        canvas.drawString(18*mm, 12*mm, "LegalSmegal Technologies Ltd")
-        canvas.drawCentredString(A4[0]/2, 12*mm, "Not legal advice - investor decision support only")
-        canvas.drawRightString(A4[0]-18*mm, 12*mm, today)
+        canvas.saveState(); canvas.setFont(MONO,7); canvas.setFillColor(C_MUTED)
+        canvas.drawString(18*mm,12*mm,"LegalSmegal Technologies Ltd")
+        canvas.drawCentredString(A4[0]/2,12*mm,"Not legal advice - investor decision support only")
+        canvas.drawRightString(A4[0]-18*mm,12*mm,today)
         canvas.setStrokeColor(colors.HexColor("#e5e5e5"))
-        canvas.line(18*mm, 15*mm, A4[0]-18*mm, 15*mm)
+        canvas.line(18*mm,15*mm,A4[0]-18*mm,15*mm)
         canvas.restoreState()
 
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     return buf.getvalue()
 
-# ── Email ────────────────────────────────────────────────────────────────────
+
+def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
+    """Call Hetzner PDF microservice. Falls back to local generation if unavailable."""
+    pdf_url    = (os.getenv("PDF_SERVICE_URL") or "").strip()
+    pdf_secret = (os.getenv("PDF_SECRET") or "").strip()
+
+    if pdf_url:
+        try:
+            resp = requests.post(
+                pdf_url,
+                headers={"X-PDF-Secret": pdf_secret, "Content-Type": "application/json"},
+                json={"summary_json": summary_json, "docs": docs},
+                timeout=90,
+            )
+            if resp.status_code == 200:
+                logger.info(f"[guest2] PDF from Hetzner: {len(resp.content):,} bytes")
+                return resp.content
+            logger.warning(f"[guest2] Hetzner PDF {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"[guest2] Hetzner PDF call failed: {e} — falling back to local")
+
+    # Local fallback (used if Hetzner unreachable)
+    logger.info("[guest2] Generating PDF locally (fallback)")
+    return _generate_pdf_local(summary_json, docs)
+
+
+
 def _send_report_email(to_email: str, address: str, report_url: str, pdf_bytes: bytes) -> bool:
     if not RESEND_API_KEY:
         logger.warning("[guest2] RESEND_API_KEY not set"); return False
