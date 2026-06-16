@@ -1191,9 +1191,25 @@ def guest2_get_report():
 
 @guest_bp.route("/api/guest2/status", methods=["GET", "OPTIONS"])
 def guest2_status():
-    """Poll endpoint for the viewer page while analysis runs.
-    Query: ?guest_session=<id>&token=<signed_token>
-    Returns: { status: 'processing' | 'complete' | 'error' }"""
+    """Token-free poll endpoint. Returns token once analysis is complete.
+    Query: ?guest_session=<id>
+    Returns: { status: 'processing'|'complete'|'unpaid'|'expired', token?: str }"""
     if request.method == "OPTIONS":
         return "", 204
-    return guest2_get_report()
+
+    session_id = (request.args.get("guest_session") or "").strip()
+    if not session_id:
+        return jsonify({"error": "guest_session required"}), 400
+
+    session = _get_session(session_id)
+    if not session:
+        return jsonify({"status": "expired"}), 404
+    if not session.get("paid"):
+        return jsonify({"status": "unpaid"}), 402
+
+    summary_json = session.get("summary_json")
+    if not summary_json:
+        return jsonify({"status": "processing"}), 202
+
+    token = session.get("report_token") or _sign_report_token(session_id)
+    return jsonify({"status": "complete", "token": token}), 200
