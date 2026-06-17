@@ -9481,6 +9481,11 @@ STRIPE_WH_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
 RESEND_API_KEY   = (os.getenv("RESEND_API_KEY") or "").strip()
 RESEND_FROM      = (os.getenv("RESEND_FROM_EMAIL") or "reports@legalsmegal.com").strip()
 REPORT_JWT_SECRET = (os.getenv("REPORT_JWT_SECRET") or "").strip()
+if not REPORT_JWT_SECRET:
+    raise RuntimeError(
+        "[app] REPORT_JWT_SECRET env var is required. "
+        "Set it in Render environment variables. Refusing to start with no token secret."
+    )
 REPORT_PRICE_GBP  = int(os.getenv("REPORT_PRICE_GBP", "29"))
 FRONTEND_BASE     = (os.getenv("FRONTEND_BASE_URL") or "https://legalsmegal-frontend.onrender.com").strip()
 
@@ -9488,7 +9493,7 @@ FRONTEND_BASE     = (os.getenv("FRONTEND_BASE_URL") or "https://legalsmegal-fron
 def _sign_report_token(deal_id: str) -> str:
     """Sign a 72-hour report access token."""
     import jwt as _jwt, time as _time
-    secret = REPORT_JWT_SECRET or "dev-secret-replace-in-prod"
+    secret = REPORT_JWT_SECRET
     return _jwt.encode(
         {"deal_id": deal_id, "exp": int(_time.time()) + 72 * 3600},
         secret, algorithm="HS256"
@@ -9498,7 +9503,7 @@ def _sign_report_token(deal_id: str) -> str:
 def _verify_report_token(token: str) -> str | None:
     """Return deal_id if token valid, None otherwise."""
     import jwt as _jwt
-    secret = REPORT_JWT_SECRET or "dev-secret-replace-in-prod"
+    secret = REPORT_JWT_SECRET
     try:
         payload = _jwt.decode(token, secret, algorithms=["HS256"])
         return payload.get("deal_id")

@@ -70,6 +70,13 @@ ANTHROPIC_API_KEY   = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
 SUPA_URL            = (os.getenv("SUPABASE_URL") or "").strip()
 SUPA_KEY            = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
 
+_TOKEN_SECRET = (os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "").strip()
+if not _TOKEN_SECRET:
+    raise RuntimeError(
+        "[guest_routes] FLASK_SECRET_KEY (or SECRET_KEY) env var is required. "
+        "Set it in Render environment variables. Refusing to start with no token secret."
+    )
+
 SESSION_TTL_HOURS   = 2
 REPORT_TOKEN_TTL    = 72 * 3600   # 72-hour viewer link
 MAX_FILE_BYTES      = 20 * 1024 * 1024
@@ -225,7 +232,7 @@ def _infer_doc_type(filename: str, text: str) -> str:
 # ── Report token ─────────────────────────────────────────────────────────────
 def _sign_report_token(session_id: str) -> str:
     import base64
-    secret  = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "guest2-secret"
+    secret  = _TOKEN_SECRET
     expires = int(time.time()) + REPORT_TOKEN_TTL
     payload = f"{session_id}:{expires}"
     sig     = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
@@ -235,7 +242,7 @@ def _sign_report_token(session_id: str) -> str:
 def _verify_report_token(token: str) -> str | None:
     import base64
     try:
-        secret = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "guest2-secret"
+        secret = _TOKEN_SECRET
         encoded, sig = token.rsplit(".", 1)
         payload  = base64.urlsafe_b64decode(encoded.encode()).decode()
         expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
