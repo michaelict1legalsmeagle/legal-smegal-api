@@ -11399,5 +11399,139 @@ def _upsert_auction_listings(supabase_client, listings: list) -> tuple:
     return new_c, updated_c
 
 
+# ── STRIPE BILLING ROUTES ─────────────────────────────────────────────────────
+
+@app.route("/api/billing/checkout", methods=["POST"])
+@require_auth
+def create_checkout():
+    """Create a Stripe Checkout session for subscription or one-off payment."""
+    import stripe as _stripe
+    _stripe.api_key = STRIPE_SECRET
+    if not _stripe.api_key:
+        return jsonify({"error": "Billing not configured"}), 503
+
+    data        = request.get_json(silent=True) or {}
+    price_id    = data.get("price_id")
+    mode        = data.get("mode", "subscription")
+    plan        = data.get("plan", "starter")
+    deal_id     = data.get("deal_id")
+    success_url = data.get("success_url", "https://legalsmegal-frontend.onrender.com/legalsmegal-dashboard.html?upgraded=1")
+    cancel_url  = data.get("cancel_url",  "https://legalsmegal-frontend.onrender.com/legalsmegal-card.html")
+
+    ALLOWED_PRICE_IDS = {
+        "price_1SGKAuACdQXaNPBV6Sxywnd4",
+        "price_1TjH94ACdQXaNPBV4urMtc8o",
+        "price_1TjHA7ACdQXaNPBVTEemQBvu",
+        "price_1TjHAjACdQXaNPBVV6RUBg5q",
+    }
+    if not price_id:
+        return jsonify({"error": "price_id required"}), 400
+    if price_id not in ALLOWED_PRICE_IDS:
+        return jsonify({"error": "Invalid price_id"}), 400
+
+    try:
+        profile     = supabase.table("profiles").select("stripe_customer_id, email").eq("id", request.user_id).single().execute()
+        customer_id = (profile.data or {}).get("stripe_customer_id")
+
+        if not customer_id:
+            user        = supabase.auth.admin.get_user(request.user_id)
+            email       = (user.user.email if user and user.user else None) or ""
+            customer    = _stripe.Customer.create(email=email, metadata={"user_id": request.user_id})
+            customer_id = customer.id
+            supabase.table("profiles").update({"stripe_customer_id": customer_id}).eq("id", request.user_id).execute()
+
+        session = _stripe.checkout.Session.create(
+            customer=customer_id,
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            mode=mode,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={"user_id": request.user_id, "plan": plan, "deal_id": deal_id or ""},
+        )
+        return jsonify({"ok": True, "session_id": session.id, "url": session.url}), 200
+
+    except _stripe.error.StripeError as e:
+        app.logger.error(f"Stripe checkout error: {e}")
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("create_checkout failed")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route("/api/billing/webhook", methods=["POST"])
+def stripe_billing_webhook():
+    """Handle Stripe webhook events — upgrades user plan on successful payment."""
+    import stripe as _stripe
+    _stripe.api_key = STRIPE_SECRET
+
+    payload    = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    if not STRIPE_WH_SECRET:
+        app.logger.error("[stripe-wh] STRIPE_WEBHOOK_SECRET not set — rejecting all webhook events")
+        return jsonify({"error": "Webhook not configured"}), 503
+
+    try:
+        event = _stripe.Webhook.construct_event(payload, sig_header, STRIPE_WH_SECRET)
+    except _stripe.error.SignatureVerificationError:
+        app.logger.warning("[stripe-wh] Signature verification failed")
+        return jsonify({"error": "Invalid signature"}), 400
+    except Exception as e:
+        return jsonify({"error": "Internal server error"}), 400
+
+    event_type = event["type"]
+    app.logger.info(f"[STRIPE] event={event_type}")
+
+    PLAN_MAP = {
+        "price_1SGKAuACdQXaNPBV6Sxywnd4": "report",
+        "price_1TjH94ACdQXaNPBV4urMtc8o": "starter",
+        "price_1TjHA7ACdQXaNPBVTEemQBvu": "professional",
+        "price_1TjHAjACdQXaNPBVV6RUBg5q": "portfolio",
+    }
+
+    if event_type == "checkout.session.completed":
+        session  = event["data"]["object"]
+        user_id  = session.get("metadata", {}).get("user_id")
+        plan     = session.get("metadata", {}).get("plan", "starter")
+        deal_id  = session.get("metadata", {}).get("deal_id") or None
+        sub_id   = session.get("subscription")
+        customer = session.get("customer")
+
+        if not user_id:
+            app.logger.warning("[STRIPE] checkout.session.completed missing user_id")
+            return jsonify({"received": True}), 200
+
+        try:
+            if plan == "report" and deal_id:
+                deal = supabase.table("deals").select("summary_json").eq("id", deal_id).single().execute()
+                sj   = deal.data.get("summary_json") or {}
+                sj.setdefault("meta", {})["summary_purchased"] = True
+                supabase.table("deals").update({"summary_json": sj}).eq("id", deal_id).execute()
+                app.logger.info(f"[STRIPE] summary_purchased set for deal={deal_id}")
+            else:
+                supabase.table("profiles").update({
+                    "plan": plan,
+                    "stripe_customer_id":     customer,
+                    "stripe_subscription_id": sub_id,
+                }).eq("id", user_id).execute()
+                app.logger.info(f"[STRIPE] user={user_id} upgraded to plan={plan}")
+        except Exception as e:
+            app.logger.error(f"[STRIPE] webhook processing error: {e}")
+
+    elif event_type in ("customer.subscription.deleted", "customer.subscription.updated"):
+        sub         = event["data"]["object"]
+        customer_id = sub.get("customer")
+        status      = sub.get("status")
+        if customer_id and status in ("canceled", "unpaid"):
+            try:
+                supabase.table("profiles").update({"plan": "free"}).eq("stripe_customer_id", customer_id).execute()
+                app.logger.info(f"[STRIPE] customer={customer_id} downgraded to free (status={status})")
+            except Exception as e:
+                app.logger.error(f"[STRIPE] subscription update error: {e}")
+
+    return jsonify({"received": True}), 200
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5050)
