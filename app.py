@@ -6572,7 +6572,7 @@ def summarise_deal(deal_id: str):
             p = profile.data
             plan = p.get("plan", "starter")
             used = p.get("summaries_used", 0)
-            limits = {"free": 1, "starter": 5, "professional": 20, "enterprise": 999}
+            limits = {"free": 1, "starter": 5, "professional": 20, "portfolio": 999, "enterprise": 999}
             limit = limits.get(plan, 1)
 
             if not DEV_BYPASS_LIMITS and used >= limit:
@@ -9134,7 +9134,7 @@ def summarise_stream(deal_id: str):
                     p = profile.data
                     plan = p.get("plan", "starter")
                     used = p.get("summaries_used", 0)
-                    limits = {"free": 1, "starter": 5, "professional": 20, "enterprise": 999}
+                    limits = {"free": 1, "starter": 5, "professional": 20, "portfolio": 999, "enterprise": 999}
                     limit = limits.get(plan, 1)
                     if used >= limit:
                         yield ev("limit", used=used, limit=limit, plan=plan)
