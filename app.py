@@ -11434,8 +11434,7 @@ def create_checkout():
         customer_id = (profile.data or {}).get("stripe_customer_id")
 
         if not customer_id:
-            user        = supabase.auth.admin.get_user(request.user_id)
-            email       = (user.user.email if user and user.user else None) or ""
+            email       = (profile.data or {}).get("email") or ""
             customer    = _stripe.Customer.create(email=email, metadata={"user_id": request.user_id})
             customer_id = customer.id
             supabase.table("profiles").update({"stripe_customer_id": customer_id}).eq("id", request.user_id).execute()
