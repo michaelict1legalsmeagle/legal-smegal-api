@@ -70,13 +70,6 @@ ANTHROPIC_API_KEY   = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
 SUPA_URL            = (os.getenv("SUPABASE_URL") or "").strip()
 SUPA_KEY            = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
 
-_TOKEN_SECRET = (os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "").strip()
-if not _TOKEN_SECRET:
-    raise RuntimeError(
-        "[guest_routes] FLASK_SECRET_KEY (or SECRET_KEY) env var is required. "
-        "Set it in Render environment variables. Refusing to start with no token secret."
-    )
-
 SESSION_TTL_HOURS   = 2
 REPORT_TOKEN_TTL    = 72 * 3600   # 72-hour viewer link
 MAX_FILE_BYTES      = 20 * 1024 * 1024
@@ -232,7 +225,7 @@ def _infer_doc_type(filename: str, text: str) -> str:
 # ── Report token ─────────────────────────────────────────────────────────────
 def _sign_report_token(session_id: str) -> str:
     import base64
-    secret  = _TOKEN_SECRET
+    secret  = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "guest2-secret"
     expires = int(time.time()) + REPORT_TOKEN_TTL
     payload = f"{session_id}:{expires}"
     sig     = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
@@ -242,7 +235,7 @@ def _sign_report_token(session_id: str) -> str:
 def _verify_report_token(token: str) -> str | None:
     import base64
     try:
-        secret = _TOKEN_SECRET
+        secret = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "guest2-secret"
         encoded, sig = token.rsplit(".", 1)
         payload  = base64.urlsafe_b64decode(encoded.encode()).decode()
         expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
@@ -711,19 +704,21 @@ def guest2_checkout():
 def guest2_stripe_webhook():
     payload = request.get_data()
     sig     = request.headers.get("Stripe-Signature", "")
-    if STRIPE_WH_SECRET:
-        try:
-            parts    = {k: v for k, v in (p.split("=", 1) for p in sig.split(",") if "=" in p)}
-            ts       = parts.get("t", "0"); v1 = parts.get("v1", "")
-            signed   = f"{ts}.{payload.decode('utf-8')}"
-            expected = hmac.new(STRIPE_WH_SECRET.encode(), signed.encode(), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(expected, v1):
-                return jsonify({"error": "Invalid signature"}), 400
-            if abs(int(time.time()) - int(ts)) > 300:
-                return jsonify({"error": "Timestamp too old"}), 400
-        except Exception as e:
-            logger.warning(f"[guest2-wh] Sig check failed: {e}")
-            return jsonify({"error": "Signature error"}), 400
+    if not STRIPE_WH_SECRET:
+        logger.error("[guest2-wh] STRIPE_GUEST_WEBHOOK_SECRET not set — rejecting all webhook events")
+        return jsonify({"error": "Webhook not configured"}), 503
+    try:
+        parts    = {k: v for k, v in (p.split("=", 1) for p in sig.split(",") if "=" in p)}
+        ts       = parts.get("t", "0"); v1 = parts.get("v1", "")
+        signed   = f"{ts}.{payload.decode('utf-8')}"
+        expected = hmac.new(STRIPE_WH_SECRET.encode(), signed.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, v1):
+            return jsonify({"error": "Invalid signature"}), 400
+        if abs(int(time.time()) - int(ts)) > 300:
+            return jsonify({"error": "Timestamp too old"}), 400
+    except Exception as e:
+        logger.warning(f"[guest2-wh] Sig check failed: {e}")
+        return jsonify({"error": "Signature error"}), 400
 
     event      = request.get_json(force=True, silent=True) or {}
     event_type = event.get("type", "")

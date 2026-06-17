@@ -98,10 +98,10 @@ def stripe_webhook():
 
     # Map Stripe plan to internal plan name
     PLAN_MAP = {
-        "price_REPLACE_REPORT":       "report",
-        "price_REPLACE_STARTER":      "starter",
-        "price_REPLACE_PROFESSIONAL": "professional",
-        "price_REPLACE_PORTFOLIO":    "portfolio",
+        "price_1SGKAuACdQXaNPBV6Sxywnd4":       "report",
+        "price_1TjH94ACdQXaNPBV4urMtc8o":      "starter",
+        "price_1TjHA7ACdQXaNPBVTEemQBvu": "professional",
+        "price_1TjHAjACdQXaNPBVV6RUBg5q":    "portfolio",
     }
 
     if event_type == "checkout.session.completed":

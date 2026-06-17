@@ -9481,11 +9481,6 @@ STRIPE_WH_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
 RESEND_API_KEY   = (os.getenv("RESEND_API_KEY") or "").strip()
 RESEND_FROM      = (os.getenv("RESEND_FROM_EMAIL") or "reports@legalsmegal.com").strip()
 REPORT_JWT_SECRET = (os.getenv("REPORT_JWT_SECRET") or "").strip()
-if not REPORT_JWT_SECRET:
-    raise RuntimeError(
-        "[app] REPORT_JWT_SECRET env var is required. "
-        "Set it in Render environment variables. Refusing to start with no token secret."
-    )
 REPORT_PRICE_GBP  = int(os.getenv("REPORT_PRICE_GBP", "29"))
 FRONTEND_BASE     = (os.getenv("FRONTEND_BASE_URL") or "https://legalsmegal-frontend.onrender.com").strip()
 
@@ -9493,7 +9488,7 @@ FRONTEND_BASE     = (os.getenv("FRONTEND_BASE_URL") or "https://legalsmegal-fron
 def _sign_report_token(deal_id: str) -> str:
     """Sign a 72-hour report access token."""
     import jwt as _jwt, time as _time
-    secret = REPORT_JWT_SECRET
+    secret = REPORT_JWT_SECRET or "dev-secret-replace-in-prod"
     return _jwt.encode(
         {"deal_id": deal_id, "exp": int(_time.time()) + 72 * 3600},
         secret, algorithm="HS256"
@@ -9503,7 +9498,7 @@ def _sign_report_token(deal_id: str) -> str:
 def _verify_report_token(token: str) -> str | None:
     """Return deal_id if token valid, None otherwise."""
     import jwt as _jwt
-    secret = REPORT_JWT_SECRET
+    secret = REPORT_JWT_SECRET or "dev-secret-replace-in-prod"
     try:
         payload = _jwt.decode(token, secret, algorithms=["HS256"])
         return payload.get("deal_id")
@@ -9825,25 +9820,28 @@ def stripe_webhook():
     payload = request.get_data()
     sig     = request.headers.get("Stripe-Signature", "")
 
-    # Verify signature if webhook secret is set
-    if STRIPE_WH_SECRET:
-        try:
-            import hmac as _hmac, hashlib as _hl, time as _t
-            # Parse Stripe-Signature header
-            parts = {k: v for k, v in (p.split("=", 1) for p in sig.split(",") if "=" in p)}
-            ts    = parts.get("t", "0")
-            v1    = parts.get("v1", "")
-            signed_payload = f"{ts}.{payload.decode('utf-8')}"
-            expected = _hmac.new(
-                STRIPE_WH_SECRET.encode(), signed_payload.encode(), _hl.sha256
-            ).hexdigest()
-            if not _hmac.compare_digest(expected, v1):
-                return jsonify({"error": "Invalid signature"}), 400
-            if abs(int(_t.time()) - int(ts)) > 300:
-                return jsonify({"error": "Timestamp too old"}), 400
-        except Exception as e:
-            app.logger.warning(f"[stripe-wh] Signature check failed: {e}")
-            return jsonify({"error": "Signature error"}), 400
+    # Reject all events if webhook secret is not configured
+    if not STRIPE_WH_SECRET:
+        app.logger.error("[stripe-wh] STRIPE_WEBHOOK_SECRET not set — rejecting all webhook events")
+        return jsonify({"error": "Webhook not configured"}), 503
+
+    try:
+        import hmac as _hmac, hashlib as _hl, time as _t
+        # Parse Stripe-Signature header
+        parts = {k: v for k, v in (p.split("=", 1) for p in sig.split(",") if "=" in p)}
+        ts    = parts.get("t", "0")
+        v1    = parts.get("v1", "")
+        signed_payload = f"{ts}.{payload.decode('utf-8')}"
+        expected = _hmac.new(
+            STRIPE_WH_SECRET.encode(), signed_payload.encode(), _hl.sha256
+        ).hexdigest()
+        if not _hmac.compare_digest(expected, v1):
+            return jsonify({"error": "Invalid signature"}), 400
+        if abs(int(_t.time()) - int(ts)) > 300:
+            return jsonify({"error": "Timestamp too old"}), 400
+    except Exception as e:
+        app.logger.warning(f"[stripe-wh] Signature check failed: {e}")
+        return jsonify({"error": "Signature error"}), 400
 
     try:
         event = request.get_json(force=True, silent=True) or {}
