@@ -5616,7 +5616,6 @@ def qa_clarify():
 
 
 @app.route("/llm/json", methods=["POST"])
-@require_auth
 def llm_json_route():
     """
     Dual-mode endpoint:
@@ -5630,6 +5629,14 @@ def llm_json_route():
     Contract (always returned, even on failure):
       { score:number, summary:string, positives:string[], risks:string[] }
     """
+    # Inline auth guard — require_auth decorator cannot be used here because
+    # this route is defined before require_auth is declared in the module.
+    if request.method != "OPTIONS":
+        _uid = get_user_id_from_request()
+        if not _uid:
+            return jsonify({"error": "Unauthorised — valid JWT required"}), 401
+        request.user_id = _uid
+
     system = ""
     prompt = None
     options = {}
