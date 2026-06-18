@@ -5616,6 +5616,7 @@ def qa_clarify():
 
 
 @app.route("/llm/json", methods=["POST"])
+@require_auth
 def llm_json_route():
     """
     Dual-mode endpoint:
@@ -7692,12 +7693,13 @@ def get_dashboard():
 
 # ── HPI DATA DIAGNOSTIC ENDPOINT ─────────────────────────────
 @app.route("/api/test-hpi", methods=["GET", "OPTIONS"])
+@require_auth
 def test_hpi_endpoint():
     """
     GET /api/test-hpi
     Diagnostic: verify uk_hpi_monthly is populated and queryable.
     Returns sample area_codes and whether England aggregate exists.
-    NO AUTH REQUIRED — read-only diagnostic only.
+    Requires auth — read-only diagnostic only.
     """
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -9421,8 +9423,9 @@ PROPERTY TYPE EXTRACTION — populate the property object correctly:
     return response
 
 @app.route("/api/test-llm", methods=["GET"])
+@require_auth
 def test_llm():
-    """Diagnostic endpoint — tests Anthropic client directly. No auth required.
+    """Diagnostic endpoint — tests Anthropic client directly. Requires auth.
     Returns the exact error if something is wrong with the key or model."""
     result = {"ok": False, "model": "claude-sonnet-4-6", "error": None, "detail": None}
     try:
@@ -10026,6 +10029,7 @@ def home():
 
 
 @app.route("/api/auction-triangulation", methods=["GET"])
+@require_auth
 def auction_triangulation():
     guide = request.args.get("guide", type=float)
     postcode = request.args.get("postcode", type=str)
@@ -10047,9 +10051,10 @@ def auction_triangulation():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @app.route("/api/diag/runtime-health", methods=["GET", "OPTIONS"])
+@require_auth
 def diag_runtime_health():
     """
-    Forensic runtime health check. NO AUTH — read-only, no PII, no deal data.
+    Forensic runtime health check. Requires auth — read-only, no PII, no deal data.
     Tests every database path independently with timing. Reports exact failure text.
     """
     if request.method == "OPTIONS":
