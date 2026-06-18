@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from werkzeug.utils import secure_filename
 import requests
 import os
 import time
@@ -6384,7 +6385,9 @@ def upload_document():
     if not file:
         return jsonify({"error": "No file uploaded"}), 400
 
-    filename = file.filename or "document.pdf"
+    filename = secure_filename(file.filename or "document.pdf")
+    if not filename:
+        filename = "document.pdf"
     if not filename.lower().endswith(".pdf"):
         return jsonify({"error": "Only PDF files are accepted"}), 400
 
@@ -6405,6 +6408,8 @@ def upload_document():
     try:
         file_bytes = file.read()
         file_size = len(file_bytes)
+        if not file_bytes.startswith(b"%PDF"):
+            return jsonify({"error": "File does not appear to be a valid PDF"}), 400
     except Exception as e:
         return jsonify({"error": f"File read failed: {e}"}), 400
 
@@ -9690,11 +9695,15 @@ def guest_upload_document():
     try:
         file_bytes = file.read()
         file_size  = len(file_bytes)
+        if not file_bytes.startswith(b"%PDF"):
+            return jsonify({"error": "File does not appear to be a valid PDF"}), 400
         if file_size > 50 * 1024 * 1024:
             return jsonify({"error": "File too large (max 50 MB)"}), 413
 
         import io as _io
-        fname = file.filename or "document.pdf"
+        fname = secure_filename(file.filename or "document.pdf")
+        if not fname:
+            fname = "document.pdf"
 
         # Extract text using existing helpers
         extracted_text = ""
