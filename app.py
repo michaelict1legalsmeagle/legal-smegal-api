@@ -4158,7 +4158,7 @@ def get_epc_data(postcode: str) -> Dict[str, Any]:
 
     except Exception as e:
         print(f"[WARN] get_epc_data failed for {postcode}: {e}")
-        return {"fetch_status": "error", "error": str(e), "metrics": {}}
+        return {"fetch_status": "error", "error": "fetch failed", "metrics": {}}
 
 
 def get_planning_data(lat: Optional[float], lng: Optional[float], postcode: str = "") -> Dict[str, Any]:
@@ -5932,12 +5932,12 @@ def ai_explain():
         return jsonify({"error": "AI rate limit reached — please try again"}), 429
     except _anthropic.APIError as e:
         app.logger.exception("Anthropic API error in ai_explain")
-        return jsonify({"error": f"AI service error: {str(e)}"}), 500
+        app.logger.error("AI service error: %s", e, exc_info=True); return jsonify({"error": "AI service unavailable"}), 500
     except RuntimeError as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
     except Exception as e:
         app.logger.exception("Unexpected error in ai_explain")
-        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        app.logger.error("Unexpected error: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 # ── PDF TEXT EXTRACTION ─────────────────────────────────────
@@ -6099,7 +6099,7 @@ def create_deal():
 
     except Exception as e:
         app.logger.exception("create_deal failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/profile", methods=["GET"])
@@ -6142,7 +6142,7 @@ def list_deals():
         return jsonify({"ok": True, "deals": result.data}), 200
     except Exception as e:
         app.logger.exception("list_deals failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/deals/<deal_id>", methods=["GET"])
@@ -6199,7 +6199,7 @@ def get_deal(deal_id: str):
         return jsonify({"ok": True, "deal": deal}), 200
     except Exception as e:
         app.logger.exception("get_deal failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/deals/<deal_id>", methods=["PATCH"])
@@ -6230,7 +6230,7 @@ def update_deal(deal_id: str):
         return jsonify({"ok": True, "deal": result.data[0] if result.data else {}}), 200
     except Exception as e:
         app.logger.exception("update_deal failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/deals/<deal_id>", methods=["DELETE"])
@@ -6275,7 +6275,7 @@ def delete_deal(deal_id: str):
             return jsonify({"ok": True, "archived": True, "deal_id": deal_id}), 200
     except Exception as e:
         app.logger.exception("delete_deal failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 
@@ -6334,7 +6334,7 @@ def save_flags_resolved(deal_id: str):
         return jsonify({"ok": True}), 200
     except Exception as e:
         app.logger.exception("save_flags_resolved failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/deals/<deal_id>/flags-resolved", methods=["GET"])
@@ -6351,7 +6351,7 @@ def get_flags_resolved(deal_id: str):
         sj = row.data.get("summary_json") or {}
         return jsonify({"ok": True, "resolved": sj.get("_resolved_flags") or {}}), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 # ── DOCUMENT UPLOAD ─────────────────────────────────────────
@@ -6411,7 +6411,7 @@ def upload_document():
         if not file_bytes.startswith(b"%PDF"):
             return jsonify({"error": "File does not appear to be a valid PDF"}), 400
     except Exception as e:
-        return jsonify({"error": f"File read failed: {e}"}), 400
+        app.logger.warning("File read failed: %s", e); return jsonify({"error": "File could not be read"}), 400
 
     # Belt-and-braces size check (in case MAX_CONTENT_LENGTH was bypassed)
     MAX_SIZE = 20 * 1024 * 1024
@@ -6472,7 +6472,7 @@ def upload_document():
 
     except Exception as e:
         app.logger.exception("document insert failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/documents/<deal_id>", methods=["GET"])
@@ -6491,7 +6491,7 @@ def list_documents(deal_id: str):
         return jsonify({"ok": True, "documents": result.data}), 200
     except Exception as e:
         app.logger.exception("list_documents failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 # ── USAGE ───────────────────────────────────────────────────
@@ -6536,7 +6536,7 @@ def get_usage():
 
     except Exception as e:
         app.logger.exception("get_usage failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 # ── DOCUMENT SUMMARY ────────────────────────────────────────
@@ -6607,7 +6607,7 @@ def summarise_deal(deal_id: str):
             .execute()
         documents = docs_result.data or []
     except Exception as e:
-        return jsonify({"error": f"Could not fetch documents: {e}"}), 500
+        app.logger.error("Could not fetch documents: %s", e, exc_info=True); return jsonify({"error": "Could not fetch documents"}), 500
 
     print(f"DEBUG: Found {len(documents)} documents for deal {deal_id}", flush=True)
 
@@ -7078,7 +7078,7 @@ PROPERTY TYPE EXTRACTION — populate the property object correctly:
 
     except Exception as e:
         app.logger.exception("Summarise setup failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
     prop = {}  # unreachable but keeps linter happy
     # Write to analyses table — matches actual Supabase schema
@@ -7199,7 +7199,7 @@ def analyse_deal(deal_id: str):
         docs = supabase.table("documents")             .select("doc_type, file_name, extracted_text, page_count")             .eq("deal_id", deal_id)             .eq("user_id", request.user_id)             .execute()
         documents = docs.data or []
     except Exception as e:
-        return jsonify({"error": f"Could not fetch documents: {e}"}), 500
+        app.logger.error("Could not fetch documents: %s", e, exc_info=True); return jsonify({"error": "Could not fetch documents"}), 500
 
     if not documents:
         return jsonify({"error": "No documents found for this deal"}), 400
@@ -7236,7 +7236,7 @@ def analyse_deal(deal_id: str):
         )
     except Exception as e:
         app.logger.exception("Full analysis LLM failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
     # Add summary flags from deal if available
     try:
@@ -7326,7 +7326,7 @@ def get_me():
         return jsonify({"ok": True, "profile": profile}), 200
     except Exception as e:
         app.logger.exception("get_me failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 # ── FINANCIAL MODEL ──────────────────────────────────────────
@@ -7519,7 +7519,7 @@ def get_financials(deal_id: str):
         return jsonify({"ok": True, "financials": financials}), 200
     except Exception as e:
         app.logger.exception("get_financials failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/deals/<deal_id>/financials", methods=["POST"])
@@ -7605,7 +7605,7 @@ def get_dashboard():
         deals = result.data or []
     except Exception as e:
         app.logger.exception("dashboard fetch failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
     total_deals      = len(deals)
     scored           = [d for d in deals if d.get("deal_score") is not None]
@@ -8234,7 +8234,7 @@ def ceiling_endpoint():
 
     except Exception as e:
         app.logger.exception("[ceiling] /api/ceiling failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Auto-backfill area_json.census.demographics on read.
@@ -8397,7 +8397,7 @@ def get_area(deal_id: str):
         }), 200
     except Exception as e:
         app.logger.exception("get_area failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 def _recompute_deal_ceiling(deal_id: str, area_data: dict):
@@ -9067,7 +9067,7 @@ def get_auction_brief(deal_id: str):
         )
     except Exception as e:
         app.logger.exception("auction_brief LLM failed")
-        return jsonify({"error": f"Brief generation failed: {e}"}), 500
+        app.logger.error("Brief generation failed: %s", e, exc_info=True); return jsonify({"error": "Brief generation failed"}), 500
 
     # Fill display values if LLM left them blank
     try:
@@ -9649,7 +9649,7 @@ def guest_create_deal():
         return jsonify({"ok": True, "deal_id": deal_id}), 201
     except Exception as e:
         app.logger.exception("guest_create_deal failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 # ── GUEST: UPLOAD DOCUMENT ───────────────────────────────────────────────
@@ -9757,7 +9757,7 @@ def guest_upload_document():
 
     except Exception as e:
         app.logger.exception("guest_upload_document failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 # ── GUEST: CREATE STRIPE CHECKOUT ────────────────────────────────────────
@@ -9828,7 +9828,7 @@ def guest_checkout():
 
     except Exception as e:
         app.logger.exception("guest_checkout failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 # ── STRIPE WEBHOOK ────────────────────────────────────────────────────────
@@ -9929,7 +9929,7 @@ def guest_get_report():
         return jsonify({"ok": True, "deal": row.data}), 200
     except Exception as e:
         app.logger.exception("guest_get_report failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 # ════════════════════════════════════════════════════════════════════════════
 # END ONE-OFF REPORT FLOW
@@ -10904,7 +10904,7 @@ def auction_sources_list():
         return jsonify({"ok": True, "sources": res.data or []}), 200
     except Exception as e:
         app.logger.exception("auction_sources_list failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/auction/listings", methods=["GET", "OPTIONS"])
@@ -10976,7 +10976,7 @@ def auction_listings_list():
 
     except Exception as e:
         app.logger.exception("auction_listings_list failed")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/auction/listings/<listing_id>", methods=["GET", "OPTIONS"])
@@ -10998,7 +10998,7 @@ def auction_listing_detail(listing_id: str):
         return jsonify({"ok": True, "listing": res.data}), 200
     except Exception as e:
         app.logger.exception("auction_listing_detail failed for %s", listing_id)
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 
@@ -11067,7 +11067,7 @@ def auction_listing_infer(listing_id):
 
     except Exception as e:
         app.logger.exception("[LLM_INFER] endpoint error for %s", listing_id)
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/auction/enrichment/debug/<listing_id>", methods=["GET", "OPTIONS"])
@@ -11127,7 +11127,7 @@ def enrichment_debug(listing_id):
         }), 200
     except Exception as e:
         app.logger.exception("enrichment_debug failed for %s", listing_id)
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/auction/listings/<listing_id>/convert", methods=["POST", "OPTIONS"])
@@ -11255,7 +11255,7 @@ def auction_listing_convert(listing_id: str):
 
     except Exception as e:
         app.logger.exception("auction_listing_convert failed for listing %s", listing_id)
-        return jsonify({"error": str(e)}), 500
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
 @app.route("/api/auction/scan", methods=["POST", "OPTIONS"])
@@ -11288,7 +11288,7 @@ def auction_manual_scan():
     try:
         from services.auction_scraper import scrape_source as _scrape
     except ImportError as e:
-        return jsonify({"error": f"Scraper not available: {e}"}), 503
+        app.logger.warning("Scraper not available: %s", e); return jsonify({"error": "Scraper not available"}), 503
 
     data = request.get_json(silent=True) or {}
     target_slug = (data.get("slug") or "").strip()
@@ -11473,7 +11473,7 @@ def create_checkout():
 
     except _stripe.error.StripeError as e:
         app.logger.error(f"Stripe checkout error: {e}")
-        return jsonify({"error": str(e)}), 400
+        app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 400
     except Exception as e:
         app.logger.exception("create_checkout failed")
         return jsonify({"error": "Internal server error"}), 500
@@ -11552,6 +11552,41 @@ def stripe_billing_webhook():
 
     return jsonify({"received": True}), 200
 
+
+
+# ── S17: STARTUP ENV VAR VALIDATION ──────────────────────────────────────────
+# Fail fast at boot if any required env var is missing. Prevents silent
+# mis-configuration where the app starts but fails at runtime.
+import sys as _sys
+
+_REQUIRED_ENV_VARS = [
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_JWT_SECRET",
+    "SUPABASE_DB_URL",
+    "FLASK_SECRET_KEY",
+    "REPORT_JWT_SECRET",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "STRIPE_GUEST_WEBHOOK_SECRET",
+    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "RESEND_API_KEY",
+    "PDF_SERVICE_URL",
+    "PDF_SECRET",
+    "ENVIRONMENT",
+]
+
+_missing = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v, "").strip()]
+if _missing:
+    import logging as _startup_log
+    _startup_log.basicConfig(level=_startup_log.ERROR)
+    _startup_log.error(
+        "[STARTUP] Missing required environment variables — refusing to start: %s",
+        ", ".join(_missing)
+    )
+    _sys.exit(1)
+# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5050)
