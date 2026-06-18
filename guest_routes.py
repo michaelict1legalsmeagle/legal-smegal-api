@@ -578,7 +578,28 @@ def _run_analysis_and_deliver(session_id: str):
     try:
         summary_json = _run_llm_analysis(docs)
     except Exception as e:
-        logger.error(f"[guest2] LLM failed: {e}"); return
+        logger.error(f"[guest2] LLM failed: {e}")
+        _session_update(session_id, {"status": "failed"})
+        # Send failure email so user isn't left in limbo
+        try:
+            requests.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "from": RESEND_FROM,
+                    "to": [email],
+                    "subject": "LegalSmegal — Report generation failed",
+                    "html": (
+                        "<p>We're sorry — your legal pack report could not be generated due to a technical error.</p>"
+                        "<p>You have not been charged. If payment was taken, it will be automatically refunded within 5 working days.</p>"
+                        "<p>Please try again or contact support at support@legalsmegal.com.</p>"
+                    ),
+                },
+                timeout=15,
+            )
+        except Exception as mail_err:
+            logger.warning(f"[guest2] Failure email error: {mail_err}")
+        return
 
     token      = _sign_report_token(session_id)
     report_url = f"{FRONTEND_BASE}/legalsmegal-report.html?guest_session={session_id}&token={token}"
@@ -697,7 +718,7 @@ def guest2_checkout():
         return jsonify({"ok": True, "checkout_url": checkout_url}), 200
     except Exception as e:
         logger.exception("guest2_checkout failed")
-        return jsonify({"error": str(e)}), 500
+        logger.exception("guest2_checkout failed"); return jsonify({"error": "Payment setup failed"}), 500
 
 
 @guest_bp.route("/api/webhooks/stripe-guest", methods=["POST"])
@@ -749,6 +770,7 @@ def guest2_status():
     session = _session_get(session_id)
     if not session:              return jsonify({"status": "expired"}), 404
     if not session.get("paid"): return jsonify({"status": "unpaid"}), 402
+    if session.get("status") == "failed":  return jsonify({"status": "failed"}), 200
     if not session.get("summary_json"): return jsonify({"status": "processing"}), 202
     token = session.get("report_token") or _sign_report_token(session_id)
     return jsonify({"status": "complete", "token": token}), 200
