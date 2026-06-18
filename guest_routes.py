@@ -691,6 +691,22 @@ def guest2_checkout():
     session    = _session_get(session_id)
     if not session:                    return jsonify({"error": "Session not found or expired"}), 404
     if not session.get("documents"):   return jsonify({"error": "No documents uploaded"}), 400
+
+    # S28 — Scanned PDF detection: block checkout if no document has extractable text.
+    # A legal pack where every PDF is a scanned image will produce an empty LLM analysis.
+    # Better to catch this before payment than after.
+    docs = session.get("documents") or []
+    all_empty = all(not (d.get("extracted_text") or "").strip() for d in docs)
+    if all_empty:
+        return jsonify({
+            "error": "scanned_pdf",
+            "message": (
+                "Your documents appear to be scanned images with no text layer. "
+                "LegalSmegal cannot analyse image-only PDFs. Please upload text-based PDFs "
+                "or OCR your documents before uploading."
+            ),
+        }), 422
+
     email = session["email"]
     try:
         resp = requests.post(
