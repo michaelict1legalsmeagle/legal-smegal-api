@@ -8,6 +8,19 @@ import re
 import math
 import random
 import csv
+import logging
+
+# S29 — Root logger configuration. Without this, neither app.logger (Flask's
+# logger) nor logging.getLogger(__name__) calls in this file or in imported
+# modules (e.g. guest_routes.py) have any handler attached when running under
+# gunicorn, so every logger.info/warning/error call is silently dropped and
+# never reaches Render's log stream. This must run before any other module
+# is imported or any logger is used, so it sits at the very top of the file.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+
 from flask_cors import CORS
 from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
