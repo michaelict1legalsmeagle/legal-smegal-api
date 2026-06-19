@@ -129,6 +129,35 @@ def _session_update(session_id: str, fields: dict) -> bool:
         logger.error(f"[guest2] session_update {session_id}: {e}")
         return False
 
+def _session_claim_paid(session_id: str) -> bool:
+    """Atomically mark a session as paid, but only if it is not already paid.
+
+    This is a single conditional UPDATE ... WHERE paid = false sent to
+    PostgREST — not a read-then-write. Two concurrent callers (e.g. two
+    near-simultaneous webhook deliveries for the same session) will both
+    issue this UPDATE; PostgreSQL serialises the two statements, so only
+    one of them actually matches a row (the other's WHERE clause finds
+    nothing, because the first writer already flipped paid to true).
+
+    Returns True only for the caller that actually won the claim — i.e.
+    only one caller, ever, gets True for a given session_id. All other
+    callers (including genuine duplicate webhook deliveries) get False
+    and must not proceed to start analysis or send email.
+    """
+    try:
+        r = _get_supa().table("guest_sessions")\
+            .update({"paid": True})\
+            .eq("session_id", session_id)\
+            .eq("paid", False)\
+            .execute()
+        won = bool(r.data)
+        if not won:
+            logger.info(f"[guest2] Claim lost for {session_id} — already paid by another writer")
+        return won
+    except Exception as e:
+        logger.error(f"[guest2] session_claim_paid {session_id}: {e}")
+        return False
+
 def _session_append_doc(session_id: str, doc: dict) -> bool:
     """Append a document to the session's documents JSONB array."""
     try:
@@ -692,6 +721,26 @@ def guest2_checkout():
     if not session:                    return jsonify({"error": "Session not found or expired"}), 404
     if not session.get("documents"):   return jsonify({"error": "No documents uploaded"}), 400
 
+    # S30 — Duplicate-purchase guard. If this session has already been paid,
+    # refuse to create a second Checkout Session — the customer would be
+    # charged twice for the same upload and the second payment would spawn
+    # a second, independent analysis run (duplicate summary_json, duplicate
+    # email, divergent flag counts vs the first). This is the correct place
+    # to stop it: before Stripe is asked to take a second payment at all.
+    if session.get("paid"):
+        return jsonify({
+            "error": "already_paid",
+            "message": "This upload has already been paid for. Check your email for the report, or refresh the report page.",
+        }), 409
+
+    # NOTE: we deliberately do NOT add a second guard here based on the local
+    # "locked" flag. A flag like that goes stale the moment a customer cancels
+    # checkout or their connection drops mid-payment — it would then trap them,
+    # unable to ever pay for this upload again. The idempotency key below is
+    # the correct fix: it makes a second checkout-creation call for the same
+    # session_id safe by construction, because Stripe — not a local flag —
+    # is the source of truth on whether a session already exists.
+
     # S28 — Scanned PDF detection: block checkout if no document has extractable text.
     # A legal pack where every PDF is a scanned image will produce an empty LLM analysis.
     # Better to catch this before payment than after.
@@ -712,6 +761,18 @@ def guest2_checkout():
         resp = requests.post(
             "https://api.stripe.com/v1/checkout/sessions",
             auth=(STRIPE_SECRET, ""),
+            # S30 — Idempotency key, deterministic per session_id. If this
+            # endpoint is called more than once for the same session_id
+            # (double-click, browser back/forward, dropped connection and
+            # client-side retry, the Cancel-then-resubmit path on the upload
+            # page), Stripe recognises the repeated key and returns the
+            # *original* Checkout Session instead of creating a second one.
+            # This is Stripe's own documented mechanism for exactly this
+            # problem — see https://stripe.com/docs/api/idempotent_requests —
+            # and is strictly stronger than any local "locked" flag, because
+            # Stripe enforces it server-side regardless of what our own
+            # database thinks happened.
+            headers={"Idempotency-Key": f"guest2-checkout-{session_id}"},
             data={
                 "mode": "payment",
                 "line_items[0][price_data][currency]":                "gbp",
@@ -734,7 +795,7 @@ def guest2_checkout():
         return jsonify({"ok": True, "checkout_url": checkout_url}), 200
     except Exception as e:
         logger.exception("guest2_checkout failed")
-        logger.exception("guest2_checkout failed"); return jsonify({"error": "Payment setup failed"}), 500
+        return jsonify({"error": "Payment setup failed"}), 500
 
 
 @guest_bp.route("/api/webhooks/stripe-guest", methods=["POST"])
@@ -764,15 +825,42 @@ def guest2_stripe_webhook():
     if event_type == "checkout.session.completed":
         obj        = (event.get("data") or {}).get("object") or {}
         session_id = (obj.get("metadata") or {}).get("guest2_session_id", "")
+        event_id   = event.get("id", "")
         if not session_id:
             return jsonify({"ok": True}), 200
-        if obj.get("payment_status") == "paid":
-            _session_update(session_id, {"paid": True})
-            t = threading.Thread(target=_run_analysis_and_deliver,
-                                 args=(session_id,), daemon=True,
-                                 name=f"guest2-{session_id[:8]}")
-            t.start()
-            logger.info(f"[guest2-wh] Analysis thread started: {session_id}")
+
+        if obj.get("payment_status") != "paid":
+            return jsonify({"ok": True}), 200
+
+        # S30 — Atomic claim. The previous version of this check did
+        # _session_get() (read) followed by _session_update() (write) as two
+        # separate calls. That leaves a race window: two near-simultaneous
+        # deliveries of either the same event (Stripe redelivery) or two
+        # genuinely different completed checkouts for the same session_id
+        # (e.g. the Cancel-then-resubmit path on the upload page) could both
+        # read paid=false before either has written paid=true, and both
+        # would then proceed to start an analysis thread and send an email.
+        #
+        # _session_claim_paid() sends a single conditional UPDATE ... WHERE
+        # paid = false to PostgREST. PostgreSQL serialises the two UPDATE
+        # statements at the database level — only one can possibly match
+        # the WHERE clause, because the other writer already flipped the
+        # row. This makes "only one thread ever starts analysis for a given
+        # session_id" a guarantee enforced by the database, not by
+        # application-level timing.
+        won_claim = _session_claim_paid(session_id)
+        if not won_claim:
+            logger.info(
+                f"[guest2-wh] event={event_id} session={session_id} — "
+                f"claim already held, not starting a second analysis run"
+            )
+            return jsonify({"ok": True}), 200
+
+        t = threading.Thread(target=_run_analysis_and_deliver,
+                             args=(session_id,), daemon=True,
+                             name=f"guest2-{session_id[:8]}")
+        t.start()
+        logger.info(f"[guest2-wh] event={event_id} session={session_id} — analysis thread started")
 
     return jsonify({"ok": True}), 200
 
