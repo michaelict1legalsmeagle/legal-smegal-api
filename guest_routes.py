@@ -46,6 +46,11 @@ except ImportError:
     _pdfplumber = None
 
 try:
+    import docai_ocr as _docai_ocr
+except ImportError:
+    _docai_ocr = None
+
+try:
     import anthropic as _anthropic
 except ImportError:
     _anthropic = None
@@ -228,7 +233,12 @@ def _get_anthropic():
 # timeout; if it doesn't finish in time, give up on that file and return
 # empty text rather than hanging the worker. Callers already handle empty
 # text gracefully (doc_type falls back to "unknown", upload still succeeds).
-_EXTRACT_TEXT_TIMEOUT_SECONDS = 25
+_EXTRACT_TEXT_TIMEOUT_SECONDS = 100
+# S33 — raised from 25s for the same reason as app.py's
+# _EXTRACT_PDF_TEXT_TIMEOUT_SECONDS: image-only PDFs now fall through to
+# Document AI's batchProcess OCR flow (docai_ocr.py, internal ceiling 90s),
+# a real network round-trip rather than a local hang. 25s would cut off an
+# OCR call that was about to succeed.
 
 def _extract_text_impl(file_bytes: bytes, filename: str, _result: dict) -> None:
     text, pages = "", 0
@@ -249,6 +259,27 @@ def _extract_text_impl(file_bytes: bytes, filename: str, _result: dict) -> None:
             doc.close()
         except Exception as e:
             logger.warning(f"[guest2] fitz: {e}")
+    if not text and _docai_ocr is not None:
+        # S33 — both standard extraction methods came back empty. Before
+        # accepting that as "scanned, no text available", check whether
+        # this is genuinely an image-only PDF (no text layer at all) and,
+        # if so, route it through Document AI OCR rather than silently
+        # giving up. Buyer-liability documents (e.g. Local Authority
+        # Searches) must be read, not skipped — see app.py's
+        # extract_pdf_text for the fuller rationale and the original
+        # discovery of this gap.
+        try:
+            if _docai_ocr.is_image_only_pdf(file_bytes):
+                logger.info(
+                    f"[guest2] {filename!r} detected as image-only PDF — "
+                    f"routing to Document AI OCR"
+                )
+                ocr_text = _docai_ocr.extract_text_via_docai(file_bytes)
+                if ocr_text.strip():
+                    text = ocr_text
+        except Exception as e:
+            logger.warning(f"[guest2] Document AI OCR failed for "
+                            f"{filename!r}: {e}")
     _result["text"]  = text
     _result["pages"] = pages
 

@@ -35,6 +35,10 @@ try:
     import pdfplumber
 except ImportError:
     pdfplumber = None
+try:
+    import docai_ocr
+except ImportError:
+    docai_ocr = None
 
 # --- Solicitor Q&A (bounded clarification) ---
 # --- Ceiling engine (relational comparable valuation) ---
@@ -6043,7 +6047,16 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     return result["text"], result["pages"]
 
 
-_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 25
+_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 100
+# S33 — raised from 25s. The previous value was sized only for local
+# pymupdf/pdfplumber hangs. Now that image-only PDFs route to Document AI's
+# batchProcess OCR flow (docai_ocr.py, internal ceiling 90s — a network
+# round-trip: upload to GCS, batch job, poll, download results), the outer
+# timeout must comfortably exceed that internal one. 25s would cut off an
+# OCR call that was about to succeed, wasting the API cost and the request
+# both. 100s gives the 90s OCR path headroom to actually finish, while
+# still bounding worst-case request latency to something Render's gunicorn
+# worker timeout (180s, see gunicorn.conf.py) can absorb.
 
 
 def _extract_pdf_text_impl(file_bytes: bytes, _result: dict) -> None:
@@ -6075,6 +6088,51 @@ def _extract_pdf_text_impl(file_bytes: bytes, _result: dict) -> None:
         app.logger.info("pymupdf not available — trying pdfplumber")
     except Exception as e:
         app.logger.warning(f"pymupdf failed: {e} — trying pdfplumber")
+
+    # ── S33 — Image-only PDF circuit breaker ──
+    # Before falling into pdfplumber's double-pass retry loop, check
+    # whether this PDF actually has any text layer at all. If pymupdf
+    # found zero text-type blocks across every page (confirmed via
+    # page.get_text('dict') block types — 0 = text, 1 = image), this is a
+    # genuinely scanned/flattened document, not a font-encoding quirk.
+    # pdfplumber has no more chance of extracting text from a JPEG than
+    # pymupdf does, but it WILL burn ~30-40MB of memory per page trying —
+    # on a 32-page document that crosses this container's 512MB ceiling
+    # at roughly the same moment the 25s timeout would otherwise fire,
+    # a race the timeout can lose once real process overhead is added.
+    # Route straight to Document AI OCR instead — buyer-liability
+    # documents like Local Authority Searches must be read, not skipped.
+    if docai_ocr is not None:
+        try:
+            if docai_ocr.is_image_only_pdf(file_bytes):
+                app.logger.info(
+                    "extract_pdf_text: detected image-only PDF (no text "
+                    "blocks found) — routing to Document AI OCR instead "
+                    "of pdfplumber retry loop"
+                )
+                ocr_text = docai_ocr.extract_text_via_docai(file_bytes)
+                if ocr_text.strip():
+                    _result["text"]  = ocr_text
+                    _result["pages"] = page_count
+                    return
+                app.logger.warning(
+                    "extract_pdf_text: Document AI OCR returned no text — "
+                    "falling through to scanned-PDF handling"
+                )
+                _result["text"]  = ""
+                _result["pages"] = page_count
+                return
+        except Exception as e:
+            app.logger.warning(
+                f"extract_pdf_text: Document AI OCR failed ({e}) — "
+                f"falling through to pdfplumber as last resort"
+            )
+            # Deliberately falls through to the pdfplumber attempt below
+            # rather than returning empty here — if OCR itself is down
+            # (credentials, quota, network), pdfplumber is still worth a
+            # try in case this document isn't actually image-only after
+            # all (is_image_only_pdf already returned True, but err on
+            # the side of attempting extraction rather than giving up).
 
     # ── Attempt 2: pdfplumber ──
     if pdfplumber is not None:
