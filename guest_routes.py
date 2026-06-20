@@ -216,7 +216,21 @@ def _get_anthropic():
         return _anthropic_client
 
 # ── PDF text extraction ──────────────────────────────────────────────────────
-def _extract_text(file_bytes: bytes, filename: str) -> tuple[str, int]:
+# S31 — Hard timeout on extraction. pdfplumber/pdfminer has no internal timeout
+# and can hang indefinitely on certain malformed/pathological PDFs (complex
+# embedded fonts, corrupted content streams). A single such file can block a
+# Gunicorn worker for up to the full 180s worker timeout — with only 2 workers
+# configured, that's enough to make every other concurrent request on this
+# service fail (observed live on 2026-06-20: WORKER TIMEOUT after 188s,
+# producing 502s on unrelated /api/guest2/upload and /api/deals/* requests
+# that browsers then misreport as CORS failures, since there's no response
+# to read CORS headers from). Run extraction in a daemon thread with a join
+# timeout; if it doesn't finish in time, give up on that file and return
+# empty text rather than hanging the worker. Callers already handle empty
+# text gracefully (doc_type falls back to "unknown", upload still succeeds).
+_EXTRACT_TEXT_TIMEOUT_SECONDS = 25
+
+def _extract_text_impl(file_bytes: bytes, filename: str, _result: dict) -> None:
     text, pages = "", 0
     if _pdfplumber:
         try:
@@ -235,7 +249,28 @@ def _extract_text(file_bytes: bytes, filename: str) -> tuple[str, int]:
             doc.close()
         except Exception as e:
             logger.warning(f"[guest2] fitz: {e}")
-    return text, pages
+    _result["text"]  = text
+    _result["pages"] = pages
+
+def _extract_text(file_bytes: bytes, filename: str) -> tuple[str, int]:
+    result = {"text": "", "pages": 0}
+    t = threading.Thread(
+        target=_extract_text_impl,
+        args=(file_bytes, filename, result),
+        daemon=True,
+    )
+    t.start()
+    t.join(timeout=_EXTRACT_TEXT_TIMEOUT_SECONDS)
+    if t.is_alive():
+        # Extraction is still running in the background thread (it's a daemon
+        # thread, so it will not block process/worker shutdown). We give up
+        # waiting for it and return empty text so the request can complete.
+        logger.warning(
+            f"[guest2] _extract_text: TIMEOUT after {_EXTRACT_TEXT_TIMEOUT_SECONDS}s "
+            f"on {filename!r} — returning empty text, doc_type will fall back to 'unknown'."
+        )
+        return "", 0
+    return result["text"], result["pages"]
 
 def _infer_doc_type(filename: str, text: str) -> str:
     fn = filename.lower(); tx = text.lower()
