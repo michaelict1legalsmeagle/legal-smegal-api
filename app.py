@@ -9,6 +9,7 @@ import math
 import random
 import csv
 import logging
+import threading
 
 # S29 — Root logger configuration. Without this, neither app.logger (Flask's
 # logger) nor logging.getLogger(__name__) calls in this file or in imported
@@ -5999,15 +6000,59 @@ def detect_document_type(filename: str, text: str) -> str:
 
 def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     """Extract text from PDF bytes. Returns (text, page_count).
-    
+
     Strategy:
     1. pymupdf (fitz) — best on complex layouts, tables, multi-column
     2. pdfplumber — fallback, good on standard text PDFs
     3. Empty string — if both fail (scanned/image PDFs)
-    
+
     Checks text density per page — if very low, likely scanned.
+
+    S32 — Hard timeout, same pattern as guest_routes.py's _extract_text.
+    pymupdf/pdfplumber have no internal timeout and can hang indefinitely on
+    certain malformed/pathological PDFs. Observed live on 2026-06-20: a
+    pymupdf low-yield fallback into pdfplumber hung for 17+ seconds and the
+    container restarted — worse than the guest pipeline's worker-timeout
+    failure, because this took the whole instance down, not just one worker.
+    Runs the real extraction (_extract_pdf_text_impl) in a daemon thread with
+    a join timeout; if it doesn't finish in time, gives up and returns empty
+    text rather than hanging/crashing. The existing call site already treats
+    empty extracted_text as a valid, non-fatal outcome (extraction_status
+    becomes "empty", doc_type falls back via detect_document_type on
+    filename alone, upload still succeeds) — so this degrades exactly the
+    same way a genuinely scanned/image PDF already does today.
     """
+    result = {"text": "", "pages": 0}
+    t = threading.Thread(
+        target=_extract_pdf_text_impl,
+        args=(file_bytes, result),
+        daemon=True,
+    )
+    t.start()
+    t.join(timeout=_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS)
+    if t.is_alive():
+        # Extraction is still running in the background thread (daemon, so
+        # it will not block process/worker shutdown). Give up waiting and
+        # return empty text so this request can complete normally instead
+        # of hanging the worker / risking another container restart.
+        app.logger.warning(
+            f"extract_pdf_text: TIMEOUT after {_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS}s "
+            f"— returning empty text, doc will fall through to scanned-PDF handling."
+        )
+        return "", 0
+    return result["text"], result["pages"]
+
+
+_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 25
+
+
+def _extract_pdf_text_impl(file_bytes: bytes, _result: dict) -> None:
+    """The actual extraction work, unchanged from the original function body.
+    Runs inside a daemon thread — see extract_pdf_text() above for the
+    timeout wrapper. Writes into _result instead of returning, since a
+    thread's return value isn't otherwise retrievable."""
     # ── Attempt 1: pymupdf ──
+    page_count = 0
     try:
         import fitz  # pymupdf
         doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -6022,7 +6067,9 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
         # Check text density — if meaningful text extracted, use it
         if combined.strip() and len(combined) > page_count * 50:
             app.logger.info(f"pymupdf extracted {len(combined):,} chars from {page_count} pages")
-            return combined, page_count
+            _result["text"]  = combined
+            _result["pages"] = page_count
+            return
         app.logger.info(f"pymupdf low yield ({len(combined)} chars) — trying pdfplumber")
     except ImportError:
         app.logger.info("pymupdf not available — trying pdfplumber")
@@ -6047,13 +6094,16 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
             combined = "\n\n".join(text_parts)
             if combined.strip():
                 app.logger.info(f"pdfplumber extracted {len(combined):,} chars from {page_count} pages")
-                return combined, page_count
+                _result["text"]  = combined
+                _result["pages"] = page_count
+                return
         except Exception as e:
             app.logger.warning(f"pdfplumber failed: {e}")
 
     # ── Both failed — likely scanned PDF ──
     app.logger.warning("Both extraction methods failed — PDF may be scanned/image-based")
-    return "", page_count if 'page_count' in dir() else 0
+    _result["text"]  = ""
+    _result["pages"] = page_count
 
 
 
