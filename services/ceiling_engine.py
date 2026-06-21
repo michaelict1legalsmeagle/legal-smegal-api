@@ -561,6 +561,20 @@ CAP_UNQUANTIFIED_RISKS = 0.55
 # same reasoning applied here: a confidence penalty, never a fabricated
 # discount.
 CAP_CONDITION_RISK_SIGNALS = 0.55
+# S33-FIX (2026-06-21): cap for EVIDENCE_TIER_PPD_CATEGORY_A (open-market
+# only, no distressed-sale or auction comparables available — see
+# EVIDENCE_TIER_* near the DISTANCE RULE section). Found live: a Hey Street
+# (NG10 3HA) run with 10 type/age-matched comps, all Category A, scored
+# 0.60-0.79 ("Moderate confidence") purely from comp count and other
+# factors, with NOTHING in the confidence formula penalising the fact that
+# every comp was the weakest available evidence tier. The Section 1 card
+# text for this exact case explicitly says "Treat this figure as an
+# UPPER-BOUND reference, not an expected auction outcome" — labelling that
+# same valuation "Moderate confidence" directly contradicts the disclosure
+# sitting right next to it. 0.59 keeps Category-A-only results strictly
+# below the 0.60 "Moderate" threshold regardless of comp count, so the
+# confidence label can never contradict the upper-bound caveat text.
+CAP_CATEGORY_A_ONLY = 0.59
 
 def _confidence_label(v: float) -> str:
     if v >= 0.80: return "High confidence"
@@ -985,6 +999,7 @@ def _calculate_confidence(
     tenure_unknown: bool,
     lease_unknown: bool,
     short_lease_no_band: bool,
+    evidence_tier_used: str = "",
 ) -> tuple[float, list[dict], str]:
     """
     raw_confidence =
@@ -1116,6 +1131,21 @@ def _calculate_confidence(
                 ),
             })
             conf = min(conf, CAP_CONDITION_RISK_SIGNALS)
+
+    # S33-FIX: Category-A-only evidence (no distressed/auction comps found)
+    # must never score "Moderate" or higher — that label would contradict
+    # the upper-bound disclosure shown alongside it on the Verdict page.
+    if evidence_tier_used == "ppd_category_a_open_market":
+        if conf > CAP_CATEGORY_A_ONLY:
+            caps.append({
+                "cap": CAP_CATEGORY_A_ONLY,
+                "reason": (
+                    "evidence_tier=ppd_category_a_open_market — no distressed-sale "
+                    "or auction comparables found; this is the weakest available "
+                    "evidence tier and cannot be rated above Low confidence"
+                ),
+            })
+            conf = min(conf, CAP_CATEGORY_A_ONLY)
 
     final = round(max(0.00, min(1.00, conf)), 2)
     return final, caps, _confidence_label(final)
@@ -1698,6 +1728,7 @@ def calculate_ceiling(
         final_conf, conf_caps, conf_label = _calculate_confidence(
             valid_comps, subject, legal_flags, included_risks,
             tenure_unknown, lease_unknown, short_lease_no_band,
+            evidence_tier_used,
         )
 
     formula_trace.append(f"step_5_result: confidence={final_conf} label={conf_label}")
