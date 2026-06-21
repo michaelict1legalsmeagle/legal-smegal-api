@@ -9,22 +9,6 @@ NOT legal advice.
 NOT financial advice.
 NOT acquisition underwriting.
 
-HARD BOUNDARY (S33-STEP4b, 2026-06-21): this module NEVER reads
-summary_json._condition_override or any uploaded condition photo. That
-field is a user-set assessment ("does this property's condition look
-comparable to the comps?") with an optional photo for the USER's own
-reference while making that judgement — it exists purely as display
-context on the Verdict page. It is not, and must never become, an input
-to comp weighting, the IQR trim, the evidence-tier selection (see
-EVIDENCE_TIER_* below), or base_value. An unaudited, uncalibrated
-image-derived "condition score" sitting in the same pipeline as RICS-
-grounded comp data and HMLR's own PPD category fields would undermine the
-traceability standard every other input in this module is held to. If a
-future change proposes reading _condition_override here, that proposal
-should be rejected unless the underlying decision (allow user judgement
-to influence pricing) is revisited explicitly and deliberately — not
-introduced as an incidental side effect of a refactor.
-
 Formula
 -------
 base_value =
@@ -556,10 +540,8 @@ CAP_UNQUANTIFIED_RISKS = 0.55
 # completion contingency, or explicit reference to squatters/unauthorised
 # occupiers. These are real, document-traceable signals (see the flag
 # extraction prompt rule added in app.py under the same tag) but do NOT
-# translate into any defensible numeric price adjustment — see this
-# module's "HARD BOUNDARY" docstring note on _condition_override for the
-# same reasoning applied here: a confidence penalty, never a fabricated
-# discount.
+# translate into any defensible numeric price adjustment — a confidence
+# penalty, never a fabricated discount.
 CAP_CONDITION_RISK_SIGNALS = 0.55
 # S33-FIX (2026-06-21): cap for EVIDENCE_TIER_PPD_CATEGORY_A (open-market
 # only, no distressed-sale or auction comparables available — see
@@ -1627,8 +1609,9 @@ def calculate_ceiling(
             "No distressed-sale (PPD Category B) or auction (EIG) comparables "
             "found nearby. This valuation is based on standard open-market "
             "sales only and should be treated as an UPPER-BOUND reference, "
-            "not an expected auction outcome — see RICS Comparable Evidence "
-            "guidance on forced-sale vs market-value bases."
+            "not an expected auction outcome — open-market sale prices and "
+            "auction hammer prices are different bases of value and "
+            "commonly diverge."
         )
 
     n_valid = len(valid_comps)
