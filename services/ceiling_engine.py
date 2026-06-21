@@ -9,6 +9,22 @@ NOT legal advice.
 NOT financial advice.
 NOT acquisition underwriting.
 
+HARD BOUNDARY (S33-STEP4b, 2026-06-21): this module NEVER reads
+summary_json._condition_override or any uploaded condition photo. That
+field is a user-set assessment ("does this property's condition look
+comparable to the comps?") with an optional photo for the USER's own
+reference while making that judgement — it exists purely as display
+context on the Verdict page. It is not, and must never become, an input
+to comp weighting, the IQR trim, the evidence-tier selection (see
+EVIDENCE_TIER_* below), or base_value. An unaudited, uncalibrated
+image-derived "condition score" sitting in the same pipeline as RICS-
+grounded comp data and HMLR's own PPD category fields would undermine the
+traceability standard every other input in this module is held to. If a
+future change proposes reading _condition_override here, that proposal
+should be rejected unless the underlying decision (allow user judgement
+to influence pricing) is revisited explicitly and deliberately — not
+introduced as an incidental side effect of a refactor.
+
 Formula
 -------
 base_value =
@@ -48,9 +64,66 @@ VERSION = "ceiling_relational_paper_valuation_v1"
 # =============================================================================
 # DISTANCE RULE
 # =============================================================================
-PRIMARY_RADIUS_MILES = 0.5
+# S33-STEP1 (2026-06-21): PRIMARY_RADIUS_MILES retained as the band used for
+# the "primary" comp population (drives confidence labelling, NOT inclusion).
+# Inclusion is no longer a hard cutoff at 0.5mi — see EXTENDED_DISTANCE_BANDS
+# and _distance_score() below. This was changed because a live audit (Hey
+# Street, NG10 3HA, 2026-06-20) found type/room/age-band-matched comps at
+# 0.82-1.27 miles being excluded outright by the old hard cutoff, leaving a
+# single comp to anchor the entire valuation. Per RICS "Comparable Evidence
+# in Real Estate Valuation" (2019/2023), comparables should be "comprehensive
+# — several rather than a single transaction" and thin evidence should be
+# addressed by looking further afield, not accepted as n=1.
+PRIMARY_RADIUS_MILES = 0.5       # still used for confidence labelling only
+MAX_RADIUS_MILES     = 3.0       # absolute outer bound — never search beyond this
 MIN_REQUIRED_COMPS   = 3
 PREFERRED_COMPS      = 5
+
+# =============================================================================
+# EVIDENCE TIER (S33-STEP3, 2026-06-21)
+# =============================================================================
+# WHY: the subject property has not yet transacted — every deal on this
+# platform is a forthcoming auction lot, not a completed sale. Land Registry
+# Price Paid Data contains NO field identifying which comparable SALES were
+# themselves auction sales — PPD's only channel signal is ppd_category_type
+# (A = standard market sale; B = repossession/power-of-sale/buy-to-let/
+# corporate transfer — a blended, non-auction-specific category per HMLR's
+# own documentation). Per RICS "Comparable Evidence in Real Estate
+# Valuation," sale price evidence from a forced/distressed disposal is a
+# different basis of value to open-market evidence and must not be blended
+# into one pool.
+#
+# This platform will obtain real EIG (Essential Information Group) auction
+# results data in production — genuine hammer prices at known addresses,
+# the closest available analogue to "what will THIS property actually
+# fetch at auction." EIG_ENABLED is False until that feed is connected;
+# the tier exists now so connecting it later requires no further engine
+# changes — only setting EIG_ENABLED=True and supplying real records via
+# get_eig_comps_for_postcode().
+EIG_ENABLED = False  # flip to True once the EIG feed is live
+
+EVIDENCE_TIER_EIG_AUCTION   = "eig_auction_hammer_price"     # Tier 1 — not yet connected
+EVIDENCE_TIER_PPD_CATEGORY_B = "ppd_category_b_distressed"    # Tier 2 — repossession/power-of-sale proxy
+EVIDENCE_TIER_PPD_CATEGORY_A = "ppd_category_a_open_market"   # Tier 3 — open-market reference only
+
+def get_eig_comps_for_postcode(postcode: str, radius_miles: float) -> list[dict]:
+    """
+    Placeholder for the EIG auction-results feed (S33-STEP3). Returns an
+    empty list until EIG_ENABLED is True and a real data source is wired in.
+    Expected real-record shape, once connected (per EIG's documented public
+    fields): address, postcode, hammer_price, guide_price, sale_date,
+    auction_house, lot_status ('sold'/'withdrawn'/'unsold'), property_type.
+    DO NOT populate this with estimated/inferred values — only real EIG
+    records once the feed exists. An empty list here is the correct,
+    honest state until that integration is built.
+    """
+    if not EIG_ENABLED:
+        return []
+    # TODO(S33-STEP3-EIG): real EIG API/data integration goes here.
+    raise NotImplementedError(
+        "EIG_ENABLED is True but get_eig_comps_for_postcode() has no real "
+        "data source wired in yet. Do not stub this with fake data."
+    )
 
 # =============================================================================
 # WEIGHT CALIBRATION (deterministic)
@@ -72,11 +145,24 @@ LEASE_UNKNOWN    = 0.40   # + confidence cap
 LEASE_NON_ADJ    = None   # exclude
 
 # distance_score (miles)
-DISTANCE_BANDS = [
+# S33-STEP1: extended beyond the old hard 0.5mi cutoff. The 0-0.5mi shape is
+# UNCHANGED from the original DISTANCE_BANDS (1.00 / 0.90 / 0.80) — only the
+# tail beyond 0.5mi is new, continuing the same decay pattern outward to
+# MAX_RADIUS_MILES rather than excluding outright. A comp at 0.51mi is not
+# meaningfully different from one at 0.50mi; a hard cutoff there was always
+# arbitrary precision, not a real distinction.
+EXTENDED_DISTANCE_BANDS = [
     (0.00, 0.10, 1.00),
     (0.10, 0.25, 0.90),
     (0.25, 0.50, 0.80),
+    (0.50, 1.00, 0.65),
+    (1.00, 1.50, 0.50),
+    (1.50, 2.00, 0.35),
+    (2.00, 3.00, 0.20),
 ]
+# Backward-compat alias — some call sites may still reference DISTANCE_BANDS
+# directly for the primary-band confidence check (0-0.5mi only).
+DISTANCE_BANDS = [b for b in EXTENDED_DISTANCE_BANDS if b[1] <= 0.50]
 
 # recency_score (months)
 RECENCY_BANDS = [
@@ -463,6 +549,18 @@ CAP_TENURE_UNRESOLVED  = 0.45
 CAP_LEASE_MISSING      = 0.40
 CAP_SHORT_LEASE_NO_BAND= 0.35
 CAP_UNQUANTIFIED_RISKS = 0.55
+# S33-STEP4a (2026-06-21): confidence cap when the legal pack contains
+# language suggesting the subject property's actual condition may not be
+# comparable to the comp evidence used — e.g. a clause stating the seller
+# will not answer buyer enquiries, an unusually extended death/probate
+# completion contingency, or explicit reference to squatters/unauthorised
+# occupiers. These are real, document-traceable signals (see the flag
+# extraction prompt rule added in app.py under the same tag) but do NOT
+# translate into any defensible numeric price adjustment — see this
+# module's "HARD BOUNDARY" docstring note on _condition_override for the
+# same reasoning applied here: a confidence penalty, never a fabricated
+# discount.
+CAP_CONDITION_RISK_SIGNALS = 0.55
 
 def _confidence_label(v: float) -> str:
     if v >= 0.80: return "High confidence"
@@ -525,12 +623,15 @@ def _weighted_median(pairs: list[tuple[float, float]]) -> Optional[float]:
 # SCORE HELPERS
 # =============================================================================
 def _distance_score(miles: Optional[float]) -> Optional[float]:
-    if miles is None or miles > PRIMARY_RADIUS_MILES:
-        return None  # outside primary radius — exclude
-    for lo, hi, score in DISTANCE_BANDS:
+    # S33-STEP1: only excludes beyond MAX_RADIUS_MILES (3mi) now, not 0.5mi.
+    # Comps between PRIMARY_RADIUS_MILES and MAX_RADIUS_MILES are included
+    # with reduced weight via EXTENDED_DISTANCE_BANDS, not excluded outright.
+    if miles is None or miles > MAX_RADIUS_MILES:
+        return None  # outside absolute outer bound — exclude
+    for lo, hi, score in EXTENDED_DISTANCE_BANDS:
         if lo <= miles <= hi:
             return score
-    return 0.80  # exactly 0.5 miles
+    return EXTENDED_DISTANCE_BANDS[-1][2]  # beyond last band but within MAX_RADIUS_MILES
 
 def _recency_score(months: Optional[float]) -> float:
     if months is None:
@@ -618,7 +719,7 @@ def _assess_comp(
 
     dist_score = _distance_score(dist)
     if dist_score is None:
-        return None, {"comp_idx": comp_idx, "reason": f"outside_0.5_miles dist={dist}", "comp": comp}
+        return None, {"comp_idx": comp_idx, "reason": f"outside_{MAX_RADIUS_MILES}_mile_outer_bound dist={dist}", "comp": comp}
 
     # Duplicate detection by address
     comp_addr = (comp.get("address") or "").strip().lower()
@@ -777,6 +878,15 @@ def _assess_comp(
         "lease_length":    comp_lease_len,
         "lease_band":      comp_band,
         "internal_area":   comp_area,
+        # S33-STEP3: PPD's only real transaction-channel signal. A = standard
+        # market sale; B = repossession/power-of-sale/buy-to-let/corporate
+        # transfer (HMLR's own documented definition — a blended distressed-
+        # adjacent category, NOT a clean "auction" flag, since PPD has no
+        # such field). Carried through here so the tiered evidence-selection
+        # logic in the calling function can split the pool rather than blend
+        # categories with materially different bases of value.
+        "ppd_category_type": (comp.get("ppd_category_type") or "A").strip().upper() or "A",
+        "evidence_tier":     EVIDENCE_TIER_PPD_CATEGORY_B if str(comp.get("ppd_category_type") or "").strip().upper() == "B" else EVIDENCE_TIER_PPD_CATEGORY_A,
         "adjustments": {
             "time":      round(time_adj, 4),
             "size":      round(size_adj, 4),
@@ -970,12 +1080,42 @@ def _calculate_confidence(
             caps.append({"cap": CAP_SHORT_LEASE_NO_BAND, "reason": "subject lease < 80 and no same-band lease comps"})
             conf = min(conf, CAP_SHORT_LEASE_NO_BAND)
 
+    # S33-STEP4a: scan the already-extracted flags array for condition/
+    # distress risk language. Matches on flag TITLE since the extraction
+    # prompt (app.py) was instructed to title these specific patterns
+    # consistently — matching on title rather than free-text evidence
+    # avoids false positives from incidental word overlap elsewhere in a
+    # flag's summation/implication text.
+    _CONDITION_RISK_TITLE_MARKERS = (
+        "no enquiries", "will not answer", "seller will not respond",
+        "death of seller", "death of the seller", "probate", "grant of administration",
+        "squatter", "unauthorised occupier", "unknown occupier", "unauthorized occupier",
+    )
+    condition_risk_flags = [
+        f for f in all_flags
+        if any(m in (f.get("title") or "").lower() for m in _CONDITION_RISK_TITLE_MARKERS)
+    ]
+
     unquantified = any(r.get("value_adjustment", 0) == 0 and r.get("severity", "note") not in ("note", "low")
                        for r in included_risks)
     if unquantified:
         if conf > CAP_UNQUANTIFIED_RISKS:
             caps.append({"cap": CAP_UNQUANTIFIED_RISKS, "reason": "material unquantified legal-pack value risks"})
             conf = min(conf, CAP_UNQUANTIFIED_RISKS)
+
+    if condition_risk_flags:
+        if conf > CAP_CONDITION_RISK_SIGNALS:
+            caps.append({
+                "cap": CAP_CONDITION_RISK_SIGNALS,
+                "reason": (
+                    f"legal pack contains {len(condition_risk_flags)} condition/distress "
+                    f"risk signal(s) (e.g. no-enquiries clause, extended probate "
+                    f"contingency, or occupier risk language) that may make this "
+                    f"property's actual condition non-comparable to nearby sold "
+                    f"comparables — no numeric adjustment applied, confidence reduced"
+                ),
+            })
+            conf = min(conf, CAP_CONDITION_RISK_SIGNALS)
 
     final = round(max(0.00, min(1.00, conf)), 2)
     return final, caps, _confidence_label(final)
@@ -1398,6 +1538,72 @@ def calculate_ceiling(
     n_valid = len(valid_comps)
     formula_trace.append(f"step_1b_result: post_trim_comps={n_valid}")
 
+    # ── STEP 1c: Tiered evidence-source selection (S33-STEP3) ──────────────
+    # Do not blend PPD Category A (standard open-market sale) and Category B
+    # (repossession/power-of-sale/buy-to-let/corporate transfer) comps into
+    # one pool — RICS treats forced/distressed-sale evidence as a different
+    # basis of value to open-market evidence. Try the best available tier
+    # first; fall through only when a tier has no usable evidence.
+    #
+    # Tier 1 — EIG auction hammer prices (not yet connected; see EIG_ENABLED
+    #          near the top of this module). Real comparable hammer prices
+    #          at known addresses — the closest available analogue to "what
+    #          will THIS property fetch at auction," once this feed exists.
+    # Tier 2 — PPD Category B. A real, present-day signal correlated with
+    #          distressed/below-open-market conditions, though HMLR's own
+    #          documentation is explicit this is a blended category, not a
+    #          clean auction flag.
+    # Tier 3 — PPD Category A. Open-market reference only. Always labelled
+    #          as such — never presented as the central auction-outcome
+    #          estimate.
+    evidence_tier_used = EVIDENCE_TIER_PPD_CATEGORY_A
+    _subject_postcode = (subject.get("postcode") or "").strip()
+    eig_comps = (
+        get_eig_comps_for_postcode(_subject_postcode, MAX_RADIUS_MILES)
+        if EIG_ENABLED and _subject_postcode
+        else []
+    )
+
+    cat_b_comps = [c for c in valid_comps if c.get("ppd_category_type") == "B"]
+    cat_a_comps = [c for c in valid_comps if c.get("ppd_category_type") != "B"]
+
+    if eig_comps:
+        # Tier 1 not yet populated by any real call site — defensive only.
+        valid_comps = eig_comps
+        evidence_tier_used = EVIDENCE_TIER_EIG_AUCTION
+        formula_trace.append(f"step_1c: evidence_tier=EIG n={len(eig_comps)}")
+    elif len(cat_b_comps) >= 1:
+        valid_comps = cat_b_comps
+        evidence_tier_used = EVIDENCE_TIER_PPD_CATEGORY_B
+        formula_trace.append(
+            f"step_1c: evidence_tier=PPD_CATEGORY_B n={len(cat_b_comps)} "
+            f"(repossession/power-of-sale proxy — {len(cat_a_comps)} "
+            f"category-A comps available as open-market reference only, not used in central estimate)"
+        )
+        warnings.append(
+            "Central estimate uses PPD Category B (repossession/power-of-sale) "
+            "comparables as the closer analogue to a forced/auction-adjacent "
+            "sale. This is a blended HMLR category, not a confirmed auction "
+            "flag — treat with appropriate caution."
+        )
+    else:
+        valid_comps = cat_a_comps
+        evidence_tier_used = EVIDENCE_TIER_PPD_CATEGORY_A
+        formula_trace.append(
+            f"step_1c: evidence_tier=PPD_CATEGORY_A n={len(cat_a_comps)} "
+            f"(no Category B or EIG evidence available — open-market reference only)"
+        )
+        warnings.append(
+            "No distressed-sale (PPD Category B) or auction (EIG) comparables "
+            "found nearby. This valuation is based on standard open-market "
+            "sales only and should be treated as an UPPER-BOUND reference, "
+            "not an expected auction outcome — see RICS Comparable Evidence "
+            "guidance on forced-sale vs market-value bases."
+        )
+
+    n_valid = len(valid_comps)
+    formula_trace.append(f"step_1c_result: evidence_tier={evidence_tier_used} comps={n_valid}")
+
     # ── STEP 2: Compute base_value via weighted median ────────────────────────
     insufficient_evidence = False
     base_value: Optional[float] = None
@@ -1415,8 +1621,8 @@ def calculate_ceiling(
 
     elif n_valid == 0:
         insufficient_evidence = True
-        formula_trace.append("step_2: insufficient_evidence — no valid comps within 0.5 miles after matching+trim")
-        evidence_gaps.append("No valid sold comparables within 0.5 miles after type/tenure matching and IQR trim")
+        formula_trace.append(f"step_2: insufficient_evidence — no valid comps within {MAX_RADIUS_MILES} miles after matching+trim")
+        evidence_gaps.append(f"No valid sold comparables within {MAX_RADIUS_MILES} miles after type/tenure matching and IQR trim")
 
     elif n_valid < MIN_REQUIRED_COMPS and not fallback_allowed:
         insufficient_evidence = True
@@ -1549,6 +1755,11 @@ def calculate_ceiling(
             "excluded_comparable_count": len(excluded_comps),
             "pre_iqr_trim_count":      _pre_trim_count,
             "post_iqr_trim_count":     n_valid,
+            # S33-STEP3: which evidence tier actually produced base_value.
+            # See EVIDENCE_TIER_* constants near top of module. Frontend
+            # should surface this plainly — "open-market reference only" vs
+            # "distressed-sale proxy" carry materially different confidence.
+            "evidence_tier":           evidence_tier_used,
         },
         # Explicit semantic fields — unambiguous across Verdict and Workbench.
         # comparable_valuation: weighted median of HPI-adjusted like-for-like comps.
