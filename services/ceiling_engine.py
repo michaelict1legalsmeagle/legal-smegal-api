@@ -558,6 +558,42 @@ CAP_CONDITION_RISK_SIGNALS = 0.55
 # confidence label can never contradict the upper-bound caveat text.
 CAP_CATEGORY_A_ONLY = 0.59
 
+# S33-WORKBENCH-FIX (2026-06-21): hoisted from inside _calculate_confidence
+# so calculate_workbench_ceiling can apply the identical condition-risk match
+# to the REAL active_legal_flags it receives, rather than a duplicated tuple
+# that could silently drift out of sync with the one Verdict's path uses.
+# Root cause this fixes: calculate_workbench_ceiling previously copied
+# verdict_ceiling.confidence verbatim and never looked at active_legal_flags
+# for confidence purposes — confirmed twice on real, independently-extracted
+# legal packs (Hey Street NG10 3HA, two separate fresh runs) where a real
+# "Seller Will Not Answer Buyer Enquiries" flag existed and matched this
+# exact tuple, yet no condition-risk cap ever appeared in the persisted
+# confidence object, because _calculate_confidence was never called with
+# real flags anywhere in the live request path.
+_CONDITION_RISK_TITLE_MARKERS = (
+    "no enquiries", "will not answer", "seller will not respond",
+    "death of seller", "death of the seller", "probate", "grant of administration",
+    "squatter", "unauthorised occupier", "unknown occupier", "unauthorized occupier",
+)
+
+def _condition_risk_flags(flags: list[dict]) -> list[dict]:
+    """Real flags whose title matches a condition/distress risk marker.
+    Shared by _calculate_confidence (Verdict path, called with flags=[] in
+    the live system) and calculate_workbench_ceiling (Workbench path, the
+    only place in production that ever receives the real flags array)."""
+    if not isinstance(flags, list):
+        return []
+    return [
+        f for f in flags
+        if isinstance(f, dict) and any(m in (f.get("title") or "").lower() for m in _CONDITION_RISK_TITLE_MARKERS)
+    ]
+
+def _category_a_only_active(evidence_tier_used: str) -> bool:
+    """True when the comparable valuation was built from PPD Category A
+    (open-market) evidence only — the weakest available tier. Shared
+    helper so workbench and verdict apply the identical test."""
+    return evidence_tier_used == "ppd_category_a_open_market"
+
 def _confidence_label(v: float) -> str:
     if v >= 0.80: return "High confidence"
     if v >= 0.60: return "Moderate confidence"
@@ -1083,15 +1119,10 @@ def _calculate_confidence(
     # consistently — matching on title rather than free-text evidence
     # avoids false positives from incidental word overlap elsewhere in a
     # flag's summation/implication text.
-    _CONDITION_RISK_TITLE_MARKERS = (
-        "no enquiries", "will not answer", "seller will not respond",
-        "death of seller", "death of the seller", "probate", "grant of administration",
-        "squatter", "unauthorised occupier", "unknown occupier", "unauthorized occupier",
-    )
-    condition_risk_flags = [
-        f for f in all_flags
-        if any(m in (f.get("title") or "").lower() for m in _CONDITION_RISK_TITLE_MARKERS)
-    ]
+    # S33-WORKBENCH-FIX: now calls the shared module-level helper (see
+    # _condition_risk_flags near CAP_CATEGORY_A_ONLY) instead of an inline
+    # tuple, so this and calculate_workbench_ceiling can never drift apart.
+    condition_risk_flags = _condition_risk_flags(all_flags)
 
     unquantified = any(r.get("value_adjustment", 0) == 0 and r.get("severity", "note") not in ("note", "low")
                        for r in included_risks)
@@ -1117,7 +1148,7 @@ def _calculate_confidence(
     # S33-FIX: Category-A-only evidence (no distressed/auction comps found)
     # must never score "Moderate" or higher — that label would contradict
     # the upper-bound disclosure shown alongside it on the Verdict page.
-    if evidence_tier_used == "ppd_category_a_open_market":
+    if _category_a_only_active(evidence_tier_used):
         if conf > CAP_CATEGORY_A_ONLY:
             caps.append({
                 "cap": CAP_CATEGORY_A_ONLY,
@@ -1300,6 +1331,66 @@ def calculate_workbench_ceiling(
         total_adjustment=_total_adj,
     )
 
+    # ── S33-WORKBENCH-FIX (2026-06-21): workbench-specific confidence ──────
+    # ROOT CAUSE FIXED: this function previously copied verdict_ceiling's
+    # confidence object verbatim (see "confidence": verdict_ceiling.get(...)
+    # below, prior to this fix) and never looked at active_legal_flags for
+    # confidence purposes. Confirmed twice on real, independently-extracted
+    # legal packs (Hey Street NG10 3HA) that a genuine "Seller Will Not
+    # Answer Buyer Enquiries" flag — correctly detected by
+    # _condition_risk_flags() — never produced a confidence cap, because
+    # Verdict is computed with legal_flags=[] by design ("Verdict =
+    # comparable base only") and Workbench, the only place that ever
+    # receives the real flags, never used them for this purpose.
+    #
+    # EXPLICIT STACKING RULE (decided here, not left to code-order accident):
+    #   1. Start from verdict_ceiling's own confidence + its own caps
+    #      (e.g. comp-count, category-A-only) — never discarded.
+    #   2. If the REAL active_legal_flags contain a condition/distress risk
+    #      signal, apply CAP_CONDITION_RISK_SIGNALS on top.
+    #   3. Final confidence = min(verdict_confidence, condition_cap) when
+    #      the condition cap applies; otherwise unchanged from Verdict.
+    #   Confidence can only move DOWN from additional real flag evidence,
+    #   never up — Workbench is reviewing real risk, not discovering reasons
+    #   to be more confident than Verdict already was.
+    #
+    # SCOPE BOUNDARY: this does NOT change what Verdict sees or computes.
+    # Verdict's own legal_flags=[] call is untouched. This only makes
+    # Workbench's *own* confidence honest about the flags Workbench itself
+    # already receives — it does not reopen "should Verdict see flags."
+    _verdict_conf_obj = verdict_ceiling.get("confidence") or {}
+    _verdict_conf_final = _verdict_conf_obj.get("final")
+    try:
+        _verdict_conf_final = float(_verdict_conf_final) if _verdict_conf_final is not None else None
+    except (TypeError, ValueError):
+        _verdict_conf_final = None
+    _verdict_caps = list(_verdict_conf_obj.get("caps") or [])
+
+    _wb_condition_flags = _condition_risk_flags(active_legal_flags)
+    if _verdict_conf_final is not None and _wb_condition_flags and _verdict_conf_final > CAP_CONDITION_RISK_SIGNALS:
+        _wb_conf_final = CAP_CONDITION_RISK_SIGNALS
+        _wb_caps = _verdict_caps + [{
+            "cap": CAP_CONDITION_RISK_SIGNALS,
+            "reason": (
+                f"legal pack contains {len(_wb_condition_flags)} condition/distress "
+                f"risk signal(s) (e.g. no-enquiries clause, extended probate "
+                f"contingency, or occupier risk language) among the active "
+                f"legal-pack flags reviewed in this workbench — no numeric "
+                f"adjustment applied, confidence reduced"
+            ),
+        }]
+        _wb_confidence = {
+            "raw":   _verdict_conf_obj.get("raw"),
+            "caps":  _wb_caps,
+            "final": round(_wb_conf_final, 2),
+            "label": _confidence_label(_wb_conf_final),
+        }
+    else:
+        # No real condition-risk flags active, or Verdict's confidence was
+        # already at/below the condition cap — Workbench confidence is
+        # identical to Verdict's, unchanged from pre-fix behaviour.
+        _wb_confidence = verdict_ceiling.get("confidence")
+
     return {
         "_ceiling_type": "workbench",
         "status": "all_flags_resolved" if all_resolved else verdict_ceiling.get("status", "ok"),
@@ -1337,7 +1428,7 @@ def calculate_workbench_ceiling(
             "midpoint": verdict_mid,             # backward compat
             "high":     verdict_high,
         },
-        "confidence":        verdict_ceiling.get("confidence"),
+        "confidence":        _wb_confidence,
         "base":              verdict_ceiling.get("base"),
         "base_valuation":    verdict_ceiling.get("base_valuation"),
         "base_method":       verdict_ceiling.get("base_method"),
