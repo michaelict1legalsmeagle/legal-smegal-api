@@ -572,6 +572,19 @@ CAP_CATEGORY_A_ONLY = 0.59
 # real flags anywhere in the live request path.
 _CONDITION_RISK_TITLE_MARKERS = (
     "no enquiries", "will not answer", "seller will not respond",
+    "refuses to answer",
+    # ^ S33-STEP4a-FIX (2026-06-22): confirmed live on Hey Street (NG10 3HA)
+    # that the LLM extraction produced "Seller Refuses to Answer Buyer
+    # Enquiries" — a real condition-risk signal that matched NONE of the
+    # markers above ("no enquiries" / "will not answer" / "seller will not
+    # respond" are none of them substrings of "refuses to answer"). This is
+    # why CAP_CONDITION_RISK_SIGNALS never fired despite the flag existing
+    # and being correctly extracted: title-substring matching is brittle
+    # against LLM phrasing variance. Title-substring matching itself is NOT
+    # being redesigned here — that's a separate, larger piece of work
+    # (matching on flag category/risk_id semantics instead of title text).
+    # This is a surgical addition of one confirmed real phrasing gap, not a
+    # rewrite of the matching mechanism.
     "death of seller", "death of the seller", "probate", "grant of administration",
     "squatter", "unauthorised occupier", "unknown occupier", "unauthorized occupier",
 )
@@ -587,6 +600,123 @@ def _condition_risk_flags(flags: list[dict]) -> list[dict]:
         f for f in flags
         if isinstance(f, dict) and any(m in (f.get("title") or "").lower() for m in _CONDITION_RISK_TITLE_MARKERS)
     ]
+
+# S33-TIME-COST-LOOKUP (2026-06-22): deterministic time/cost lookup, NOT LLM
+# estimation. Per explicit product instruction: "no estimates, we have the
+# ranges used by other models, no guessing, trust [built] by the user." The
+# LLM extraction step identifies flags and severity; it is never asked to
+# invent a cost or time figure, because that would recreate the exact
+# unfounded-number problem already found and removed from legal_risk_weight
+# (an ungoverned 1-10 score with no stated methodology anywhere in this
+# file's prompts). Every entry below traces to a specific source from one of
+# two research passes run this session:
+#   - "LegalSmegal Risk-Pricing Engine" report (council search turnaround
+#     data, defect cost/time benchmarks across 17 categories)
+#   - "Monetising Time-to-Resolve" report (RICS CAC interest rate, bridging
+#     finance, development appraisal rates) — NOT used for per-flag figures
+#     below, since the user explicitly ruled out auction-window/day-rate
+#     normalisation; kept only as background context.
+# Matching is by title substring, same brittleness-aware approach as
+# _CONDITION_RISK_TITLE_MARKERS — a flag type not listed here returns
+# UNRESEARCHED, never a guess. This table is expected to grow; it is NOT
+# exhaustive across the ~17+ defect categories identified in research.
+
+TIME_COST_UNDISCLOSED = "UNDISCLOSED"   # the legal pack itself withholds the figure
+TIME_COST_UNRESEARCHED = "UNRESEARCHED"  # not yet covered by researched data
+
+# S33-TIME-COST-INDICATIVE (2026-06-22): two SRA-bar gaps closed here.
+# (1) Every entry now carries an explicit `methodology` string — the
+#     citation a user or auditor can be shown, not just a code comment only
+#     visible to a developer. This is the "named, explained, indicative not
+#     definitive" requirement from the SRA risk-scoring warning notice.
+# (2) `outlier_note` is populated ONLY where the source report itself
+#     flagged genuine skew/tail risk — currently just local authority
+#     search (the report's own words: "same-day to 180 working days").
+#     Adding this note to every entry generically would be a second kind of
+#     dishonesty — implying uncertainty that isn't in the source data for
+#     entries like chancel repair or drainage, which the report describes
+#     as tight, low-variance ranges. Most entries correctly have
+#     outlier_note=None.
+_TIME_COST_LOOKUP = (
+    # (markers, time_days, cost_gbp, methodology, outlier_note)
+    (("local authority search",), (7, 21), (100, 300),
+     "LegalSmegal Risk-Pricing Engine report, 2026: national median ~8wd, "
+     "two-thirds of councils within 10wd; £100-300 typical official-search fee.",
+     "Source range is a national TYPICAL band, not a guarantee. The same "
+     "report found genuine outliers from same-day (e.g. East Suffolk) to "
+     "180 working days (e.g. Hackney) depending which council the property "
+     "falls under. This figure does not know which council applies here."),
+    (("environmental search",), (1, 3), (35, 60),
+     "LegalSmegal Risk-Pricing Engine report, 2026: standard search-provider turnaround.",
+     None),
+    (("mining", "ground stability"), (1, 14), (35, 55),
+     "LegalSmegal Risk-Pricing Engine report, 2026: CON29M fee, bundled into standard search turnaround.",
+     None),
+    (("chancel repair",), (0, 1), (20, 30),
+     "LegalSmegal Risk-Pricing Engine report, 2026: indemnity route, typically issued within 24h, often skipping the search entirely.",
+     None),
+    (("restrictive covenant", "building line"), (0.5, 5), (200, 2000),
+     "LegalSmegal Risk-Pricing Engine report, 2026: indemnity insurance route. "
+     "Deed-of-release route is weeks-to-months with cost not researched — "
+     "this figure covers the indemnity path only.",
+     None),
+    (("indemnity insurance",), (0, 1), (20, 500),
+     "LegalSmegal Risk-Pricing Engine report, 2026: general indemnity premium range, same-day to 24h issue.",
+     None),
+    (("epc rating", "no insulation", "solid brick"), (7, 30), (1500, 5000),
+     "LegalSmegal Risk-Pricing Engine report, 2026: D-to-C uplift cost range. "
+     "Works-dependent; MEES 2030 secondary legislation not yet passed — "
+     "treat as a forward liability, not settled law.",
+     None),
+    (("drainage", "water search", "con29dw"), (5, 10), (40, 100),
+     "LegalSmegal Risk-Pricing Engine report, 2026: CON29DW standard turnaround.",
+     None),
+)
+
+def lookup_time_cost(title: str) -> dict:
+    """Returns {time_days, cost_gbp, methodology, outlier_note} for a flag
+    title. time_days/cost_gbp are each either a (low, high) tuple of real
+    researched figures, or TIME_COST_UNRESEARCHED if no entry matches.
+    methodology is always a real citation string (never blank) when figures
+    are present, satisfying the SRA "named, explained" requirement.
+    outlier_note is None unless the source data itself warned of skew —
+    never populated generically. Never returns an estimate."""
+    title_l = (title or "").lower()
+    for markers, time_days, cost_gbp, methodology, outlier_note in _TIME_COST_LOOKUP:
+        if any(m in title_l for m in markers):
+            return {
+                "time_days": time_days,
+                "cost_gbp": cost_gbp,
+                "methodology": methodology,
+                "outlier_note": outlier_note,
+            }
+    return {
+        "time_days": TIME_COST_UNRESEARCHED,
+        "cost_gbp": TIME_COST_UNRESEARCHED,
+        "methodology": None,
+        "outlier_note": None,
+    }
+
+def attach_time_cost(flags: list[dict]) -> list[dict]:
+    """Mutates each flag dict in place, adding time_days, cost_gbp,
+    time_cost_methodology, and time_cost_outlier_note via lookup_time_cost.
+    Safe to call multiple times (idempotent). Does not touch severity,
+    value_adjustment, or any other existing field."""
+    if not isinstance(flags, list):
+        return flags
+    for f in flags:
+        if not isinstance(f, dict):
+            continue
+        result = lookup_time_cost(f.get("title"))
+        f["time_days"] = result["time_days"]
+        f["cost_gbp"] = result["cost_gbp"]
+        f["time_cost_methodology"] = result["methodology"]
+        f["time_cost_outlier_note"] = result["outlier_note"]
+        # SRA bar: indicative, not definitive. Always present, always true —
+        # this is a statement about the nature of the figure, not a hedge
+        # added only when uncertain.
+        f["time_cost_indicative"] = True
+    return flags
 
 def _category_a_only_active(evidence_tier_used: str) -> bool:
     """True when the comparable valuation was built from PPD Category A
@@ -1263,6 +1393,15 @@ def calculate_workbench_ceiling(
     If active_legal_flags is empty, workbench_ceiling equals verdict_ceiling.
     """
     active_legal_flags = active_legal_flags if isinstance(active_legal_flags, list) else []
+
+    # S33-TIME-COST-LOOKUP (2026-06-22): attach time_days/cost_gbp to every
+    # active flag via deterministic lookup (see lookup_time_cost above) —
+    # never an LLM estimate. This is the one production code path that
+    # receives the real flags array; attaching here means the frontend
+    # (legalsmegal-workbench.html, renderTimeCostRows) finally has real data
+    # to render instead of nothing, without touching the LLM extraction
+    # prompts in app.py at all.
+    attach_time_cost(active_legal_flags)
 
     verdict_vr   = verdict_ceiling.get("valuation_range") or {}
     # Prefer explicit comparable_valuation (unambiguous). Fall back to midpoint for
