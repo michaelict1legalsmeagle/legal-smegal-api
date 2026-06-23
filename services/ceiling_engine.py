@@ -673,28 +673,137 @@ _TIME_COST_LOOKUP = (
      None),
 )
 
-def lookup_time_cost(title: str) -> dict:
-    """Returns {time_days, cost_gbp, methodology, outlier_note} for a flag
-    title. time_days/cost_gbp are each either a (low, high) tuple of real
-    researched figures, or TIME_COST_UNRESEARCHED if no entry matches.
-    methodology is always a real citation string (never blank) when figures
-    are present, satisfying the SRA "named, explained" requirement.
-    outlier_note is None unless the source data itself warned of skew —
-    never populated generically. Never returns an estimate."""
+import re
+
+# S33-DOCUMENT-STATED-FIGURE (2026-06-23): per explicit product correction —
+# "10 day completion time = 10 days" was sitting in the flag's own evidence
+# text the whole time, but the lookup only ever checked `title` against the
+# research table, so it fell through to UNRESEARCHED even though the real
+# answer was already extracted and present. Document-stated figures are MORE
+# defensible than third-party research, not less — they're literally what
+# the legal pack says about THIS property, not a general market range. This
+# tier runs FIRST, before the research lookup. It also fixes the second
+# point raised: time and cost do not have to both be known together — a
+# flag can be time-only (e.g. "phone call to confirm, 1 day, no cost") or
+# cost-only (e.g. "£1,500 plus VAT, due on completion, no wait"). Each field
+# resolves independently; one being found in the document text does not
+# require the other to also be found.
+
+_TIME_PATTERNS = (
+    # (regex, days extraction) — conservative: only matches explicit,
+    # unambiguous day/week counts already stated in the text. Never infers.
+    (re.compile(r'(\d+)\s*(?:business|working)\s*days?', re.I), lambda m: (int(m.group(1)), int(m.group(1)))),
+    (re.compile(r'(\d+)\s*calendar\s*days?', re.I), lambda m: (int(m.group(1)), int(m.group(1)))),
+    (re.compile(r'(\d+)\s*-\s*(\d+)\s*(?:business|working)\s*days?', re.I), lambda m: (int(m.group(1)), int(m.group(2)))),
+    (re.compile(r'within\s*(\d+)\s*(?:hours|hrs)', re.I), lambda m: (0, 1)),  # same-day class
+    (re.compile(r'(\d+)\s*weeks?', re.I), lambda m: (int(m.group(1)) * 5, int(m.group(1)) * 5)),  # 1 week = 5 working days
+)
+
+_COST_PATTERNS = (
+    # Conservative: only matches an explicit £ figure already stated.
+    # Does not attempt to parse "plus VAT" arithmetic — returns the stated
+    # figure as-is; VAT-inclusive wording is preserved in the source text
+    # the user already sees elsewhere on the card, not recalculated here.
+    (re.compile(r'£\s*([\d,]+(?:\.\d{2})?)\s*-\s*£\s*([\d,]+(?:\.\d{2})?)'), lambda m: (
+        float(m.group(1).replace(',', '')), float(m.group(2).replace(',', '')))),
+    (re.compile(r'£\s*([\d,]+(?:\.\d{2})?)'), lambda m: (
+        float(m.group(1).replace(',', '')), float(m.group(1).replace(',', '')))),
+)
+
+def _extract_stated_time(text: str):
+    """Returns (low, high) days if an explicit time figure is found in the
+    given text, else None. Conservative — only matches unambiguous,
+    already-stated numbers; never infers or estimates."""
+    if not text:
+        return None
+    for pattern, extractor in _TIME_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return extractor(m)
+    return None
+
+def _extract_stated_cost(text: str):
+    """Returns (low, high) £ if an explicit cost figure is found in the
+    given text, else None. Conservative — only matches unambiguous,
+    already-stated £ figures; never infers or estimates."""
+    if not text:
+        return None
+    for pattern, extractor in _COST_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return extractor(m)
+    return None
+
+def _flag_text_blob(flag: dict) -> str:
+    """Concatenates the fields where a document-stated figure is most
+    likely to already appear, in priority order. summation and implication
+    are investor-facing summaries most likely to carry the key figure;
+    evidence is the verbatim quote (max 30 words per the extraction prompt,
+    so may be truncated); title is checked last as the least specific."""
+    parts = [flag.get("summation"), flag.get("implication"), flag.get("evidence"), flag.get("title")]
+    return " | ".join(p for p in parts if p)
+
+
+def lookup_time_cost(flag) -> dict:
+    """Resolves time_days and cost_gbp INDEPENDENTLY, each through its own
+    three-tier order:
+      1. Document-stated figure (regex-extracted from this flag's own
+         summation/implication/evidence/title) — most defensible, since
+         it's literally what the legal pack says about this property.
+      2. Research lookup table (_TIME_COST_LOOKUP, matched on title)
+         — used only if tier 1 found nothing for that field.
+      3. TIME_COST_UNRESEARCHED — if neither tier found a real figure.
+    Accepts either a flag dict (preferred — enables tier 1) or a bare title
+    string (legacy call shape — tier 1 skipped, tier 2/3 only).
+    A flag can resolve time at tier 1 and cost at tier 3 (or any other
+    combination) — the two fields are never forced to match or to both be
+    unknown together."""
+    if isinstance(flag, dict):
+        title = flag.get("title")
+        text_blob = _flag_text_blob(flag)
+    else:
+        title = flag
+        text_blob = title or ""
+
     title_l = (title or "").lower()
-    for markers, time_days, cost_gbp, methodology, outlier_note in _TIME_COST_LOOKUP:
-        if any(m in title_l for m in markers):
-            return {
-                "time_days": time_days,
-                "cost_gbp": cost_gbp,
-                "methodology": methodology,
-                "outlier_note": outlier_note,
-            }
+
+    research_time, research_cost, methodology, outlier_note = (
+        TIME_COST_UNRESEARCHED, TIME_COST_UNRESEARCHED, None, None
+    )
+    for markers, t, c, m, o in _TIME_COST_LOOKUP:
+        if any(mk in title_l for mk in markers):
+            research_time, research_cost, methodology, outlier_note = t, c, m, o
+            break
+
+    stated_time = _extract_stated_time(text_blob)
+    stated_cost = _extract_stated_cost(text_blob)
+
+    if stated_time is not None:
+        final_time = stated_time
+        time_source = "document"
+    else:
+        final_time = research_time
+        time_source = "research" if research_time != TIME_COST_UNRESEARCHED else "unresearched"
+
+    if stated_cost is not None:
+        final_cost = stated_cost
+        cost_source = "document"
+    else:
+        final_cost = research_cost
+        cost_source = "research" if research_cost != TIME_COST_UNRESEARCHED else "unresearched"
+
+    show_methodology = (time_source == "research" or cost_source == "research")
+    show_document_note = (time_source == "document" or cost_source == "document")
+
     return {
-        "time_days": TIME_COST_UNRESEARCHED,
-        "cost_gbp": TIME_COST_UNRESEARCHED,
-        "methodology": None,
-        "outlier_note": None,
+        "time_days": final_time,
+        "cost_gbp": final_cost,
+        "time_source": time_source,
+        "cost_source": cost_source,
+        "methodology": methodology if show_methodology else (
+            "Stated directly in the legal pack for this property." if show_document_note else None
+        ),
+        "outlier_note": outlier_note if show_methodology else None,
     }
 
 def attach_time_cost(flags: list[dict]) -> list[dict]:
@@ -707,7 +816,7 @@ def attach_time_cost(flags: list[dict]) -> list[dict]:
     for f in flags:
         if not isinstance(f, dict):
             continue
-        result = lookup_time_cost(f.get("title"))
+        result = lookup_time_cost(f)
         f["time_days"] = result["time_days"]
         f["cost_gbp"] = result["cost_gbp"]
         f["time_cost_methodology"] = result["methodology"]
