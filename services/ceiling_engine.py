@@ -655,6 +655,49 @@ _TIME_COST_LOOKUP = (
     (("chancel repair",), (0, 1), (20, 30),
      "LegalSmegal Risk-Pricing Engine report, 2026: indemnity route, typically issued within 24h, often skipping the search entirely.",
      None),
+    # ── Specific covenant / adoption rows — MUST precede the generic
+    # "restrictive covenant" row below so specific markers win first
+    # (same specific-before-generic discipline as the EPC reorder). ──
+    (("road adoption", "hmpe"), (7, 10), (30, 90),
+     "Standalone CON29 highways / road-adoption search from the county "
+     "highway authority. £30-90 +VAT typical (Kent CC £30 +VAT; Hampshire "
+     "CC £85 +VAT standard; general band per Local Conveyancing Direct). "
+     "Turnaround ~10 working days (Kent CC, Via East Midlands targets). "
+     "HIGH confidence.",
+     "This figure confirms adoption STATUS only. Where a historic covenant "
+     "appears to conflict with HMPE status, interpreting whether the covenant "
+     "survives adoption is a solicitor-review item (case-by-case), not covered "
+     "by the search fee."),
+    (("common drains",), (2, 5), (500, 1500),
+     "Solicitor review of scope/enforceability of a positive drains-maintenance "
+     "contribution covenant. £500-1,500 +VAT for a discrete written "
+     "enforceability opinion (Go Legal; Lawhive). Routine flagging is usually "
+     "absorbed in the standard conveyancing fee. MEDIUM confidence.",
+     "Indemnity insurance does NOT fit here: this is a positive ongoing "
+     "obligation to pay a maintenance share, not a one-off breach risk, so a "
+     "policy would not cover the actual works (HomeOwners Alliance; Timms "
+     "Solicitors). Treated as solicitor-review only."),
+    (("tree and shrub", "tree/shrub"), (1, 2), (200, 2000),
+     "Restrictive covenant indemnity insurance route. £200-2,000 typical "
+     "premium (SAM Conveyancing; from £60 incl IPT floor per GCS), issued "
+     "24-48h, often within minutes (HomeOwners Alliance; Prosperity Insurance). "
+     "Solicitor-review alternative is £500-1,500 +VAT. MEDIUM confidence.",
+     "Applicability caveat: insurers usually decline cover where the benefiting "
+     "party is known/identifiable (Fladgate). A boundary-tree covenant tied to "
+     "a specific named neighbour's amenity is exactly that scenario — the "
+     "indemnity route may be unavailable, pushing this to the solicitor-review "
+     "cost instead."),
+    (("road making", "road-making"), (0, 1), (57, 180),
+     "Road Adoption legal indemnity policy (a distinct named product, not "
+     "generic covenant cover). From £57 incl IPT capped / £84 in perpetuity "
+     "(GCS published rates); real-world example £180 for a flat with no S38 "
+     "agreement (MoneySavingExpert). Issued minutes-to-24h. HIGH confidence "
+     "on premium.",
+     "Covers the buyer against a future highway-authority demand to contribute "
+     "to making-up / adoption costs (Highways Act 1980 private street works). "
+     "Distinct from recurring annual 'private road insurance' (~£175/yr public "
+     "liability) — do not conflate. Solicitor-review alternative £500-1,500 "
+     "+VAT."),
     (("restrictive covenant", "building line"), (0.5, 5), (200, 2000),
      "LegalSmegal Risk-Pricing Engine report, 2026: indemnity insurance route. "
      "Deed-of-release route is weeks-to-months with cost not researched — "
@@ -663,6 +706,15 @@ _TIME_COST_LOOKUP = (
     (("indemnity insurance",), (0, 1), (20, 500),
      "LegalSmegal Risk-Pricing Engine report, 2026: general indemnity premium range, same-day to 24h issue.",
      None),
+    (("no epc",), (1, 7), (65, 125),
+     "Commissioning a fresh EPC assessment, 2026: studio/1-bed £65-80, "
+     "2-3 bed £75-95, 4-bed+ £90-125+ (commercial £150-500+ excluded — "
+     "auction residential stock only); typical booking-to-issue 1-7 working "
+     "days. Range shown is the full studio-to-4-bed+ span, not adjusted to "
+     "this property's actual size.",
+     "This figure is the cost of producing a missing EPC, not the cost of "
+     "upgrading an existing low rating — see the separate EPC-rating row "
+     "for D-to-C upgrade costs. The two are different problems."),
     (("epc rating", "no insulation", "solid brick"), (7, 30), (1500, 5000),
      "LegalSmegal Risk-Pricing Engine report, 2026: D-to-C uplift cost range. "
      "Works-dependent; MEES 2030 secondary legislation not yet passed — "
