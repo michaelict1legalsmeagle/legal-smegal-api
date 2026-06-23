@@ -623,6 +623,11 @@ def _condition_risk_flags(flags: list[dict]) -> list[dict]:
 
 TIME_COST_UNDISCLOSED = "UNDISCLOSED"   # the legal pack itself withholds the figure
 TIME_COST_UNRESEARCHED = "UNRESEARCHED"  # not yet covered by researched data
+TIME_COST_NO_RESOLUTION = "NO_RESOLUTION"  # not a clearable defect — a disclosure/
+#   risk-awareness flag with no standard "commission a fix and get a number back"
+#   path (e.g. NSIP proximity). Distinct from UNRESEARCHED: the absence of a figure
+#   is the RESEARCHED answer here, not a gap. Carries a fixed disclosure message in
+#   `methodology`; the frontend renders that instead of Time/Cost rows.
 
 # S33-TIME-COST-INDICATIVE (2026-06-22): two SRA-bar gaps closed here.
 # (1) Every entry now carries an explicit `methodology` string — the
@@ -722,6 +727,16 @@ _TIME_COST_LOOKUP = (
      None),
     (("drainage", "water search", "con29dw"), (5, 10), (40, 100),
      "LegalSmegal Risk-Pricing Engine report, 2026: CON29DW standard turnaround.",
+     None),
+    (("nationally significant", "nsip"), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Risk-awareness flag — no standard resolution. NSIP proximity is not a "
+     "clearable title/search defect: major infrastructure is consented via a "
+     "Development Consent Order (Planning Act 2008), a multi-year process "
+     "outside the conveyancing timeline (DLUHC NSIP Action Plan, 2023). "
+     "Optional Energy & Infrastructure search ~£30-£79 can characterise the "
+     "proximity (SAM Conveyancing; Local Conveyancing Direct) but detects/"
+     "discloses only — it does not resolve. Impact is a valuation / risk-"
+     "acceptance judgement, not a cost to clear.",
      None),
 )
 
