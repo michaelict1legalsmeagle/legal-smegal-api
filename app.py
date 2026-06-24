@@ -9023,6 +9023,121 @@ def save_area(deal_id: str):
             return s
         return None
     _prop_type_code = _map_property_type_code(_prop_type)
+
+    # S34-SUBJECT-TYPE (2026-06-24): the LLM-extracted physical_type is NOT a
+    # reliable source for the subject's structural type — it misreads explicit
+    # listing text (live: 104 Village St "semi-detached" → stored "Terraced";
+    # 148 Barns Lane EPC=Semi but LLM stored "Terraced"). Property type is a
+    # FACT about a building, so it must come from data, not a guess. This resolver
+    # replaces the LLM type with EPC built_form (the MHCLG register, 5.19M rows,
+    # 94% built_form-populated), matched on the subject's own address where
+    # present, else the nearest same-street neighbours. The LLM value is demoted
+    # to a last-resort fallback used only when no EPC evidence exists at all.
+    #
+    # Measured on 11 live deals: exact-address EPC coverage ~45% (auction stock
+    # skews never-sold/no-EPC), so the neighbour fallback is the WORKHORSE, not a
+    # backstop — UK streets are typed-homogeneous (terraced rows are terraced),
+    # so nearest-neighbour built_form is reliable; the genuinely-mixed case
+    # (e.g. DE23 8DF: 98=Semi, 120=Detached) is resolved by nearest house number
+    # and flagged low-confidence.
+    #
+    # Flats: property_type='Flat'/'Maisonette' wins outright — built_form on a
+    # flat record describes the BLOCK's shape (e.g. "Mid-Terrace") and must be
+    # ignored, or a flat gets miscoded as a terrace.
+    def _epc_built_form_to_code(built_form: str, prop_type: str):
+        pt = (prop_type or "").strip().upper()
+        if pt in ("FLAT", "MAISONETTE"):
+            return "F"
+        bf = (built_form or "").strip().upper()
+        if not bf or bf == "NOT RECORDED":
+            return None
+        if "SEMI" in bf:
+            return "S"
+        if "TERRACE" in bf:   # End-Terrace, Mid-Terrace, Enclosed *-Terrace
+            return "T"
+        if "DETACH" in bf:    # after SEMI check (semi-detached contains detach)
+            return "D"
+        return None
+
+    def _resolve_subject_type_code(addr: str, pc_norm: str, llm_code):
+        """Deterministic subject-type resolution.
+        Returns (code, source, confidence) where source ∈
+        {epc_exact, epc_neighbour, llm_fallback, none}."""
+        import re as _re
+        _house = None
+        _m = _re.match(r"^\s*(\d+)", str(addr or ""))
+        if _m:
+            _house = _m.group(1)
+        try:
+            _rows = data_query(
+                """SELECT address1, property_type, built_form
+                   FROM public.epc_certificates
+                   WHERE replace(upper(postcode),' ','') = replace(upper(%s),' ','')
+                   AND built_form IS NOT NULL AND built_form <> 'Not Recorded'""",
+                (pc_norm,)
+            ) or []
+        except Exception as _e:
+            _rows = []
+        # Tier 1 — exact subject-address match by leading house number.
+        if _house and _rows:
+            for _r in _rows:
+                _a1 = str(_r.get("address1") or "")
+                _am = _re.match(r"^\s*(\d+)", _a1)
+                if _am and _am.group(1) == _house:
+                    _code = _epc_built_form_to_code(_r.get("built_form"), _r.get("property_type"))
+                    if _code:
+                        return (_code, "epc_exact", "high")
+        # Tier 2 — nearest same-street neighbours by house-number distance.
+        if _house and _rows:
+            _cands = []
+            for _r in _rows:
+                _a1 = str(_r.get("address1") or "")
+                _am = _re.match(r"^\s*(\d+)", _a1)
+                if not _am:
+                    continue
+                _code = _epc_built_form_to_code(_r.get("built_form"), _r.get("property_type"))
+                if _code:
+                    _cands.append((abs(int(_am.group(1)) - int(_house)), _code))
+            if _cands:
+                _cands.sort(key=lambda x: x[0])
+                _nearest = _cands[:5]
+                _codes = [c for _, c in _nearest]
+                _top = max(set(_codes), key=_codes.count)
+                _agree = _codes.count(_top) / len(_codes)
+                # On a mixed street, distance must beat majority: the single
+                # NEAREST house is a better signal than a tie-broken vote.
+                # (Live: 104 Village St neighbours 98=Semi@6 doors, 120=Det@16;
+                # a 1-1 vote wrongly tie-broke to Detached — nearest is 98=Semi.)
+                # Trust the majority only when it is a clear one (>=60% agree);
+                # otherwise defer to the nearest house and mark low confidence.
+                if _agree >= 0.6:
+                    _conf = "high" if _agree >= 0.8 else "medium"
+                    return (_top, "epc_neighbour", _conf)
+                else:
+                    _nearest_code = _nearest[0][1]
+                    return (_nearest_code, "epc_neighbour", "low")
+        # Tier 3 — no EPC evidence anywhere; fall back to the LLM read.
+        if llm_code:
+            return (llm_code, "llm_fallback", "low")
+        return (None, "none", "none")
+
+    _subj_addr = str(_prop.get("address") or "")
+    _pc_for_type = normalize_postcode(_postcode) if _postcode else _postcode
+    _resolved_code, _type_source, _type_conf = _resolve_subject_type_code(
+        _subj_addr, _pc_for_type, _prop_type_code
+    )
+    # Override the LLM-derived code with the resolved one. Log disagreements —
+    # the 148 Barns Lane class (EPC had truth, LLM was wrong, pipeline used LLM)
+    # must be visible, not silent.
+    if _resolved_code and _resolved_code != _prop_type_code:
+        app.logger.info(
+            f"[S34-SUBJECT-TYPE] {_subj_addr} ({_pc_for_type}): "
+            f"LLM={_prop_type_code} → resolved={_resolved_code} "
+            f"via {_type_source} ({_type_conf})"
+        )
+    if _resolved_code:
+        _prop_type_code = _resolved_code
+    _subject_type_meta = {"code": _resolved_code, "source": _type_source, "confidence": _type_conf}
     _raw_gp = _prop.get("guide_price_pence") or _prop.get("guide_price") or 0
     try:
         _gp_num = float(_raw_gp)
