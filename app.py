@@ -4808,16 +4808,37 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _audit["warnings"].append(f"hpi_latest_lookup_failed: {_e}")
 
         # ── STEP 1: PROPERTY TYPE FILTER ────────────────────────────────────
+        # S33-TYPE-MATCH (2026-06-23): prefer like-for-like (terraced↔terraced,
+        # semi↔semi, detached↔detached). Previously this required >=5 same-type
+        # comps or it ABANDONED type-matching entirely and used all types — the
+        # wrong instinct, because in mixed terrace/semi streets that silently
+        # valued a semi off cheaper terraces (live: 104 Village St DE23). New
+        # behaviour: (a) >=3 same-type → use them (matches COMPS_MIN_USEFUL);
+        # (b) 1-2 same-type → still PREFER them but flag thin evidence + degrade
+        # confidence rather than contaminating with the wrong type; (c) 0 same-
+        # type → genuinely no like-for-like available, fall back to all types
+        # with an explicit cross-type-contamination warning so the ceiling
+        # engine's audit cap applies. The honest ordering is: right type with
+        # few comps beats wrong type with many.
         pt_filter = (property_type or "").strip().upper()
         if pt_filter and pt_filter in ("D", "S", "T", "F", "O"):
             _pt_matched = [r for r in rows if str(r.get("property_type") or "").upper() == pt_filter]
-            if len(_pt_matched) >= 5:
+            _n_matched = len(_pt_matched)
+            if _n_matched >= 3:
                 rows = _pt_matched
-                _audit["filters_applied"].append(f"property_type={pt_filter}:{len(rows)}_comps")
-            else:
-                _audit["filters_skipped"].append(f"property_type={pt_filter}:only_{len(_pt_matched)}_matched")
+                _audit["filters_applied"].append(f"property_type={pt_filter}:{_n_matched}_comps")
+            elif _n_matched >= 1:
+                # Thin but real like-for-like evidence — use it, don't poison it
+                # with the wrong type. Flag degraded so confidence is capped.
+                rows = _pt_matched
+                _audit["filters_applied"].append(f"property_type={pt_filter}:{_n_matched}_comps_thin")
                 _audit["methodology_degraded"] = True
-                _audit["warnings"].append(f"Cross-type contamination: insufficient {pt_filter} comps ({len(_pt_matched)}), using all property types")
+                _audit["warnings"].append(f"Thin like-for-like evidence: only {_n_matched} {pt_filter}-type comp(s) in radius — confidence reduced")
+            else:
+                # No same-type comps at all — fall back to all types, but say so.
+                _audit["filters_skipped"].append(f"property_type={pt_filter}:0_matched")
+                _audit["methodology_degraded"] = True
+                _audit["warnings"].append(f"Cross-type contamination: no {pt_filter}-type comps in radius, using all property types")
 
         # ── STEP 2: EPC ENRICHMENT ───────────────────────────────────────────
         # Enrich comps with EPC data via UPRN (deterministic) then postcode fallback
@@ -8946,13 +8967,32 @@ def save_area(deal_id: str):
     _summary     = deal.data.get("summary_json") or {}
     _prop        = _summary.get("property") or {}
     _prop_type   = str(_prop.get("physical_type") or _prop.get("type") or "").strip().upper()
-    # Map common labels to Land Registry codes
-    _pt_map = {
-        "DETACHED": "D", "SEMI-DETACHED": "S", "SEMI DETACHED": "S",
-        "TERRACED": "T", "FLAT": "F", "MAISONETTE": "F", "APARTMENT": "F",
-        "D": "D", "S": "S", "T": "T", "F": "F"
-    }
-    _prop_type_code = _pt_map.get(_prop_type) or None
+    # S33-TYPE-MATCH (2026-06-23): the LLM extracts physical_type as free text
+    # from listing prose ("Traditional three bedroomed semi-detached property",
+    # "End-terrace house", "Link-detached bungalow"), so an exact-match dict
+    # silently missed almost everything → property_type=None → the comp query's
+    # type filter was skipped → a semi got valued off 100%-terrace comps (live:
+    # 104 Village St DE23, semi, valued off 5 terraces at £160k median; hammer
+    # £216k). Substring matching catches the wording variants. Order is load-
+    # bearing: SEMI is tested before DETACH because "semi-detached" contains
+    # "detach". Investment-strategy labels (BTL/HMO) fall through to None so they
+    # never falsely constrain the comp set.
+    def _map_property_type_code(s: str):
+        s = (s or "").strip().upper()
+        if not s:
+            return None
+        if "SEMI" in s:
+            return "S"
+        if "TERRAC" in s:  # terraced, end-terrace, mid-terrace
+            return "T"
+        if "DETACH" in s:  # detached, link-detached (after SEMI check above)
+            return "D"
+        if "FLAT" in s or "MAISONETTE" in s or "APARTMENT" in s:
+            return "F"
+        if s in ("D", "S", "T", "F", "O"):
+            return s
+        return None
+    _prop_type_code = _map_property_type_code(_prop_type)
     _raw_gp = _prop.get("guide_price_pence") or _prop.get("guide_price") or 0
     try:
         _gp_num = float(_raw_gp)
