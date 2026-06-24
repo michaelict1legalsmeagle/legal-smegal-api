@@ -4490,6 +4490,17 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         )
 
     payload = {"in_postcode": pc, "in_radius_miles": r_miles, "in_limit": lim}
+    # S33-TYPE-MATCH (2026-06-23): forward the subject property type to the RPC
+    # so like-for-like prioritisation happens server-side (same-type rows sorted
+    # to the top BEFORE in_limit truncates the window — otherwise recent sales of
+    # the wrong type crowd out same-type comps before app.py can filter them).
+    # Guarded: only added when a valid PPD code is present, so the payload still
+    # matches the pre-migration RPC signature when no type is known. REQUIRES the
+    # housing_comps_v1 + get_radius_comps migration adding in_property_type; until
+    # that is deployed this key will error, so it is also wrapped at call sites.
+    _pt_for_rpc = (property_type or "").strip().upper()
+    if _pt_for_rpc in ("D", "S", "T", "F", "O"):
+        payload["in_property_type"] = _pt_for_rpc
 
     try:
         # S33-RELIABILITY (2026-06-21): retry-with-verification wrapper around
@@ -4537,6 +4548,25 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                     f"get_housing_data: RPC call raised on attempt "
                     f"{_rpc_attempts}/{_rpc_max_attempts} for {pc}: {_rpc_e}"
                 )
+                # S33-TYPE-MATCH deploy-order safety: if the failure is because
+                # in_property_type isn't recognised (migration not yet live),
+                # strip it and retry WITHOUT type rather than breaking comps
+                # entirely. Degrades to "works, not type-prioritised" — the
+                # client-side filter in STEP 1 below still does like-for-like
+                # on whatever returns. Only triggers when the typed key is the
+                # plausible cause (param/signature/function-not-found errors).
+                if "in_property_type" in payload and (
+                    "in_property_type" in _rpc_last_error
+                    or "function" in _rpc_last_error.lower()
+                    or "does not exist" in _rpc_last_error.lower()
+                    or "argument" in _rpc_last_error.lower()
+                ):
+                    app.logger.warning(
+                        "get_housing_data: typed RPC failed — retrying without "
+                        "in_property_type (migration may not be deployed yet)"
+                    )
+                    payload.pop("in_property_type", None)
+                    _audit_pt_rpc_stripped = True
                 if _rpc_attempts < _rpc_max_attempts:
                     time.sleep(0.4 * _rpc_attempts)
 
