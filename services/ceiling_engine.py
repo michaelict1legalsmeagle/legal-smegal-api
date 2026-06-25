@@ -365,6 +365,42 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
     # ── Contamination / environmental ────────────────────────────────────────
     (["contamination", "environmental risk", "flood risk", "subsidence"],
      {"lender_certifiability_risk": 0.025, "residual_marketability_risk": 0.035}),
+
+    # ── S35-RISK-COVERAGE (2026-06-25): three new entries closing the fallback
+    # gap found this session (16 Penmanor: 12/17 substantive flags fell to the
+    # generic severity table). Each entry's fractions are COPIED VERBATIM from
+    # an existing, already-trusted rule for a structurally analogous defect —
+    # no new fraction values invented, per explicit instruction not to fabricate
+    # calibration data that doesn't exist.
+
+    # Unlettable-property defects (EPC G / no heating system) — ongoing,
+    # known, quantifiable defects requiring works before the property can be
+    # let, not just missing paperwork. Closest analogue: "Section 20 / major
+    # works notice" — a known, costed remediation requirement that delays
+    # completion confidence and dents resale appeal. Fractions copied exactly.
+    (["epc rating g", "epc rating f", "cannot be let", "no heating system",
+      "no central heating", "electric heaters only"],
+     {"delay_finance_drag": 0.015, "residual_marketability_risk": 0.020}),
+
+    # Missing standard disclosure/contract documents (TA6, draft contract,
+    # transfer deed, special conditions of sale) — unknown contractual terms
+    # or seller disclosures, same shape as a missing search: needs to be
+    # obtained before completion confidence, modest direct cost, real delay
+    # risk. Closest analogue: "Missing searches" rule. Fractions copied exactly.
+    (["ta6", "ta10", "draft contract", "transfer deed", "special conditions of sale",
+      "property information form"],
+     {"direct_cure_cost": 0.008, "delay_finance_drag": 0.012}),
+
+    # Title/ownership administrative defects not yet rising to a registered
+    # title DEFECT (e.g. multiple titles to transfer, estate/probate sale
+    # without an established title problem) — administrative complexity that
+    # could complicate completion but isn't itself a defect in the title.
+    # Closest analogue: "Management pack / service charge info missing" —
+    # administrative/process risk with modest cure cost, delay, and a small
+    # lender-certifiability component. Fractions copied exactly.
+    (["separate title", "dual title", "two titles", "probate", "estate sale",
+      "deceased proprietor"],
+     {"direct_cure_cost": 0.006, "delay_finance_drag": 0.010, "lender_certifiability_risk": 0.008}),
 ]
 
 # Severity zero-gate: "note" flags carry no market consequence.
@@ -380,6 +416,39 @@ _FALLBACK_RESIDUAL_FRACTION: dict[str, float] = {
     "low":      0.004,
     "missing":  0.010,
 }
+
+def _flag_routing_source(flag: dict) -> str:
+    """Report whether _flag_to_segments would match a _SEGMENT_RULES entry or
+    fall through to the generic severity-keyed fallback, WITHOUT duplicating
+    the pricing logic — re-runs the same match loop _flag_to_segments uses,
+    returns only which branch fired.
+
+    Added 2026-06-25 to make the fallback rate measurable. Found by direct
+    trace against a real deal's 25 legal-pack flags: 12 of 17 substantive
+    flags (71%) fell through to the 5-value severity table rather than a
+    defect-specific rule — e.g. "EPC Rating G — Property Cannot Be Let" and
+    "No Heating System" both reduce to the same generic number as "Missing
+    Chancel Repair Search", despite being different categories of risk.
+    This function turns that into something every deal reports on its own,
+    instead of something that has to be re-discovered by hand-testing flag
+    text, the way it was found this session.
+
+    Returns: "note" | "matched_rule" | "fallback"
+    """
+    sev = (flag.get("severity") or "note").lower().strip()
+    if sev in _SEVERITY_NOTE_ONLY:
+        return "note"
+    text = " ".join(filter(None, [
+        flag.get("title", ""),
+        flag.get("summation", ""),
+        flag.get("implication", ""),
+        flag.get("category", ""),
+    ])).lower()
+    for keywords, _fractions in _SEGMENT_RULES:
+        if any(kw in text for kw in keywords):
+            return "matched_rule"
+    return "fallback"
+
 
 def _flag_to_segments(flag: dict) -> dict[str, float]:
     """
@@ -1144,11 +1213,50 @@ def _assess_comp(
         comp_area  = float(comp_area)  if comp_area  else None
     except (TypeError, ValueError):
         subj_area = comp_area = None
+    # size_adj (the PRICE-rescaling multiplier feeding adjusted_value) must
+    # ONLY ever use the subject's REAL area. Never the comp-set fallback —
+    # rescaling a comp's price based on a comparison to a number that was
+    # never the subject's true size would fabricate a size-adjustment with
+    # no relationship to reality. If the real area is unknown, size_adj
+    # stays exactly 1.00 (no-op), full stop, regardless of any fallback.
     size_adj  = _size_adjustment(subj_area, comp_area)
-    size_ratio = (subj_area / comp_area) if (subj_area and comp_area and comp_area > 0) else None
+    # sz_score (relative WEIGHTING/confidence, never multiplies the price)
+    # may use the comp-set median fallback when the subject's real area is
+    # unknown — this only affects how much the weighted-median trusts this
+    # comp relative to others in the set, not what price it contributes.
+    _used_size_fallback = False
+    _scoring_area = subj_area
+    if subj_area is None and subject.get("_size_fallback_area"):
+        _scoring_area = float(subject["_size_fallback_area"])
+        _used_size_fallback = True
+    size_ratio = (_scoring_area / comp_area) if (_scoring_area and comp_area and comp_area > 0) else None
     sz_score  = _size_score(size_ratio)
+    # S35-COMP-SOURCE-DISCOUNT (2026-06-25): a comp's floor_area_source tag
+    # (set by resolve_comp_size() in app.py) distinguishes the comp's OWN EPC
+    # from a borrowed neighbour's ("comp_epc_postcode_any" — last-resort, any
+    # EPC at the postcode). That tag previously existed nowhere and every comp
+    # got equal size-trust regardless. This applies the SAME "unknown size"
+    # penalty _size_score already uses (0.80) as a cap on a postcode-any
+    # comp's score — not a new number, the existing scale's own floor applied
+    # to a case it didn't previously see. A comp scoring 1.00 on a borrowed
+    # neighbour's size is capped to 0.80; a comp already scoring below 0.80
+    # (e.g. a genuine size outlier) is left at its own lower score, since the
+    # discount should never make a bad match look better.
+    _comp_size_source = comp.get("floor_area_source")
+    if _comp_size_source == "comp_epc_postcode_any":
+        sz_score = min(sz_score, 0.80)
+        audit_warnings.append(
+            "comp floor_area is from the nearest postcode EPC, not its own — "
+            "size score capped at 0.80"
+        )
     if subj_area is None or comp_area is None:
-        audit_warnings.append("floor_area missing for size adjustment")
+        if _used_size_fallback and comp_area is not None:
+            audit_warnings.append(
+                "subject floor_area unknown — weighted against comp-set median for "
+                "ranking only; price NOT rescaled by size"
+            )
+        else:
+            audit_warnings.append("floor_area missing for size adjustment")
 
     # Recency
     months = comp.get("months_ago") or comp.get("age_months") or comp.get("age")
@@ -1498,12 +1606,35 @@ def _process_legal_risks(legal_flags: list[dict]) -> list[dict]:
             "value_adjustment": total_adj,
             "segments":         segs,
             "included":         True,
+            "_routing_source":  _flag_routing_source(flag),
             "reason": (
                 f"severity={sev}; market_consequence_segments={list(segs.keys())}; "
                 f"total_value_adjustment={total_adj}"
             ),
         })
     return risks
+
+
+def risk_routing_coverage(risks: list[dict]) -> dict:
+    """Summarise how many of a deal's risks matched a _SEGMENT_RULES entry
+    vs fell through to the generic severity fallback. Reads the
+    '_routing_source' tag _process_legal_risks already attaches to each risk
+    — call this once per deal (e.g. when assembling legal_pack_value_risks)
+    rather than re-deriving it by hand-testing flag text, which is how the
+    71% fallback rate on a real deal was found this session.
+    """
+    tally = {"matched_rule": 0, "fallback": 0, "note": 0}
+    for r in risks:
+        tally[r.get("_routing_source", "fallback")] += 1
+    substantive = tally["matched_rule"] + tally["fallback"]
+    return {
+        "matched_rule_count": tally["matched_rule"],
+        "fallback_count":     tally["fallback"],
+        "note_count":         tally["note"],
+        "fallback_rate_pct": (
+            round(100 * tally["fallback"] / substantive, 1) if substantive else None
+        ),
+    }
 
 def _legal_pack_adjustment_factor(risks: list[dict]) -> float:
     """
@@ -1728,6 +1859,7 @@ def calculate_workbench_ceiling(
             "adjustment_factor": risk_factor,
             "adjusted_value":    wb_risk_adjusted_value,  # = comparable_valuation × risk_factor
             "risks":             active_risks,
+            "routing_coverage":  risk_routing_coverage(active_risks),
         },
         "risk_discount_pct":   risk_discount_pct,
         # Market-consequence segment breakdown — canonical from engine, used by Verdict waterfall.
@@ -1864,6 +1996,54 @@ def calculate_ceiling(
 
     _hpi_used_count    = 0
     _hpi_missing_count = 0
+
+    # ── Size-fallback for ranking only (NOT a claim about the subject) ───────
+    # When subject.internal_area is genuinely unknown (resolve_subject_size()
+    # returned None — no EPC, no room schedule), every comp previously got
+    # size_adjustment=1.00 and size_score via _size_score(None)=0.80 flat,
+    # meaning a 59 m² comp and a 119 m² comp were weighted IDENTICALLY on
+    # size — the comp set's own size spread had zero influence on which
+    # comps the weighted-median trusted more. This does not invent a subject
+    # size: it uses the comp set's OWN median floor area purely so comps near
+    # that median score better than comps at the tails — comps closer to
+    # "what a typical comp in this set looks like" outrank outliers in either
+    # direction, instead of all being scored as equally (un)informative.
+    # subject["internal_area"] itself is left untouched — still None, still
+    # flows through to the user-facing "size normalisation unavailable"
+    # warning exactly as before. This only affects internal comp weighting.
+    _subj_area_known = bool(subject.get("internal_area") or subject.get("floor_area"))
+    _size_fallback_used = False
+    if not _subj_area_known:
+        _comp_areas = []
+        for _c in sold_comps:
+            _a = _c.get("internal_area") or _c.get("floor_area") or _c.get("total_floor_area")
+            try:
+                _a = float(_a) if _a else None
+            except (TypeError, ValueError):
+                _a = None
+            if _a and _a > 0:
+                _comp_areas.append(_a)
+        if len(_comp_areas) >= 3:
+            _comp_areas.sort()
+            _mid = len(_comp_areas) // 2
+            _comp_median_area = (
+                _comp_areas[_mid] if len(_comp_areas) % 2 == 1
+                else (_comp_areas[_mid - 1] + _comp_areas[_mid]) / 2
+            )
+            subject = dict(subject)  # don't mutate the caller's dict
+            subject["_size_fallback_area"] = _comp_median_area  # internal use only, see _assess_comp
+            _size_fallback_used = True
+            formula_trace.append(
+                f"step_1_size_fallback: subject area unknown — using comp-set "
+                f"median {_comp_median_area:.0f} m² (n={len(_comp_areas)}) for "
+                f"size SCORING ONLY, not as a claim about the subject"
+            )
+            warnings.append(
+                "size_fallback_used: subject floor area unknown — comps are "
+                "ranked against the comparable set's own median size as a "
+                "working estimate; the comparable valuation has not been "
+                "adjusted to the subject's actual size"
+            )
 
     for idx, comp in enumerate(sold_comps):
         addr = (comp.get("address") or "").strip().lower()
