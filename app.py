@@ -4441,6 +4441,23 @@ def _compute_gia_from_text(text: Optional[str]) -> Tuple[Optional[float], int, s
     label that precedes each pair), and applies a circulation/internal-wall
     allowance to approximate EPC GIA. Deterministic (regex + arithmetic — no LLM
     judgement). Returns (gia_m2, n_rooms, confidence).
+
+    S35-SIZE-MATCH bugfix (2026-06-25): the room-label lookback window used to
+    be a flat 70 characters with no boundary, so a measured room sitting right
+    after another room's closing sentence inherited that PRIOR room's label —
+    live: "...door to the rear to the sun room conservatory.\\nKitchen 3.15m x
+    2.31m..." wrongly excluded the Kitchen because "conservatory" (the
+    PREVIOUS room) fell inside the Kitchen's lookback window. Same mechanism
+    silently dropped the Wet Room via a nearby "porch"/"conservatory" mention.
+    Net effect on 104 Village St: GIA undercounted at 86 m² instead of the
+    correct 98 m² (hand-verified from the same particulars) — undercounting is
+    the opposite direction of risk from the neighbour-borrowing bug this
+    function was originally built to prevent, but equally a single-point-of-
+    failure on the whole valuation, so it gets the same fix discipline: anchor
+    the lookback to the nearest sentence/line boundary (., newline) so it can
+    never cross into a different room's text. Falls back to the full window
+    only when no boundary exists nearby (run-on text), matching prior
+    behaviour exactly in that case.
     """
     if not text:
         return None, 0, "none"
@@ -4449,13 +4466,23 @@ def _compute_gia_from_text(text: Optional[str]) -> Tuple[Optional[float], int, s
                 "summerhouse", "workshop", "stable", "porch", "loft", "cellar",
                 "basement")
     _pat = re.compile(r'(\d+\.\d+)\s*m?\s*[xX\u00d7]\s*(\d+\.\d+)\s*m', re.I)
+    _boundary_pat = re.compile(r'[.\n]')
     total = 0.0
     n = 0
     for m in _pat.finditer(text):
         l, w = float(m.group(1)), float(m.group(2))
         if not (1.0 <= l <= 30.0 and 1.0 <= w <= 30.0):   # plausible room metres
             continue
-        ctx = text[max(0, m.start() - 70):m.start()].lower()  # preceding room label
+        _window_start = max(0, m.start() - 70)
+        _raw_ctx = text[_window_start:m.start()]
+        # Anchor to the LAST sentence/line boundary inside the lookback window
+        # so the exclusion check only ever sees this room's own label, never
+        # bleed-through from the previous room's trailing description.
+        _boundaries = list(_boundary_pat.finditer(_raw_ctx))
+        if _boundaries:
+            ctx = _raw_ctx[_boundaries[-1].end():].lower()
+        else:
+            ctx = _raw_ctx.lower()   # no boundary nearby — same as prior behaviour
         if any(k in ctx for k in _EXCLUDE):
             continue
         total += l * w
@@ -4522,7 +4549,7 @@ def _density_tier_radius(pc: str) -> Optional[float]:
     return None
 
 
-def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None, subject_tenure_hint: Optional[str] = None, subject_address: Optional[str] = None, subject_internal_area: Optional[float] = None) -> Dict[str, Any]:
+def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None, subject_tenure_hint: Optional[str] = None, subject_address: Optional[str] = None, subject_internal_area: Optional[float] = None, subject_type_confidence: Optional[str] = None, subject_area_confidence: Optional[str] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
 
@@ -4799,6 +4826,26 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "insufficient_evidence": False,
             "warnings": [],
         }
+
+        # S35-CONFIDENCE-SURFACE (2026-06-25): the subject-type and subject-
+        # area resolvers (_resolve_subject_type_code, _compute_gia_from_text)
+        # compute a confidence label that previously went nowhere — assigned
+        # to a local variable, never read again. Surface it here the same way
+        # every other degraded-evidence signal in this function is surfaced,
+        # so a low-confidence subject resolution shows up alongside thin
+        # comp evidence and outlier warnings rather than disappearing.
+        if subject_type_confidence == "low":
+            _audit["warnings"].append(
+                "subject_type_low_confidence: subject property-type resolution "
+                "was a low-agreement neighbour tiebreak — verify against the listing"
+            )
+            _audit["methodology_degraded"] = True
+        if subject_area_confidence == "low":
+            _audit["warnings"].append(
+                "subject_area_low_confidence: subject floor area was derived from "
+                "1-2 room dimensions only — size normalisation may be unreliable"
+            )
+            _audit["methodology_degraded"] = True
 
         # ── SUBJECT PROPERTY DATA COLLECTION ────────────────────────────────
         _pc_norm = normalize_postcode(postcode)
@@ -9234,6 +9281,7 @@ def save_area(deal_id: str):
     # summary_json.property.internal_area so every downstream consumer (verdict,
     # workbench, recompute) reads one authoritative value.
     _subject_gia_listing = None
+    _gia_conf = None
     if not _prop.get("internal_area"):
         try:
             _docs = supabase.table("documents") \
@@ -9258,6 +9306,11 @@ def save_area(deal_id: str):
             print(f"[S35-GIA error] {deal_id}: {_ge}")
     else:
         _subject_gia_listing = safe_float(_prop.get("internal_area"))
+        # Pick up a previously-persisted confidence value (set on an earlier
+        # run of this same branch) so it isn't lost on cache-hit requests —
+        # without this, only the FIRST request after S35 shipped would ever
+        # surface the confidence; every later request would silently drop it.
+        _gia_conf = _prop.get("internal_area_confidence")
 
     _prop_type   = str(_prop.get("physical_type") or _prop.get("type") or "").strip().upper()
     # S33-TYPE-MATCH (2026-06-23): the LLM extracts physical_type as free text
@@ -9378,6 +9431,28 @@ def save_area(deal_id: str):
                     return (_top, "epc_neighbour", _conf)
                 else:
                     _nearest_code = _nearest[0][1]
+                    # S35-LOW-CONF-CROSSCHECK (2026-06-25): a low-confidence
+                    # neighbour tiebreak used to be returned and trusted as-is —
+                    # the listing text's own read of the subject (llm_code,
+                    # already in scope as a parameter) was sitting right here
+                    # unused. Live case: 10 Lid Lane split 50/50 Semi/Terrace,
+                    # tie-broke to Terrace by nearest-house distance — but the
+                    # auction listing itself said "semi detached" and was never
+                    # consulted. Cross-check now: if the listing read agrees
+                    # with the neighbour guess, that's corroboration (upgrade
+                    # confidence). If it disagrees, the listing text is a more
+                    # direct signal about THIS property than an inferred
+                    # neighbour, so prefer it and log the override so the
+                    # disagreement stays visible rather than silent.
+                    if llm_code and llm_code == _nearest_code:
+                        return (_nearest_code, "epc_neighbour", "medium")
+                    if llm_code and llm_code != _nearest_code:
+                        app.logger.info(
+                            f"[S35-LOW-CONF-CROSSCHECK] {addr} ({pc_norm}): "
+                            f"neighbour-tiebreak={_nearest_code} disagreed with "
+                            f"listing-text={llm_code} — preferring listing text"
+                        )
+                        return (llm_code, "llm_crosscheck_override", "medium")
                     return (_nearest_code, "epc_neighbour", "low")
         # Tier 3 — no EPC evidence anywhere; fall back to the LLM read.
         if llm_code:
@@ -9428,7 +9503,7 @@ def save_area(deal_id: str):
                 "lat":          lat,
                 "lng":          lng,
                 "area_code":    area_code,
-                "housing":      get_housing_data(_postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp, subject_tenure_hint=_prop.get("tenure"), subject_address=_prop.get("address"), subject_internal_area=_subject_gia_listing or safe_float(_prop.get("internal_area"))),
+                "housing":      get_housing_data(_postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp, subject_tenure_hint=_prop.get("tenure"), subject_address=_prop.get("address"), subject_internal_area=_subject_gia_listing or safe_float(_prop.get("internal_area")), subject_type_confidence=_type_conf, subject_area_confidence=_gia_conf),
                 "crime":        get_crime_data(lat, lng),
                 "transport":    get_transport_data(lat, lng),
                 "amenities":    get_amenities_data(lat, lng),
