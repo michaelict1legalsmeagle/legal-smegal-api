@@ -4424,6 +4424,85 @@ def _median_int(values: List[int]) -> Optional[int]:
     return int((vs[mid - 1] + vs[mid]) / 2)
 
 
+def resolve_comp_size(comp_paon_or_address, candidate_epc_rows: list) -> dict:
+    """Resolve a SOLD COMPARABLE's floor area from EPC rows at its postcode.
+
+    Extracted 2026-06-25 from inline logic in get_housing_data (unchanged
+    tier order/behaviour) so it is unit-testable in isolation, the same way
+    _compute_gia_from_text and _extract_epc_floor_area_from_text already are.
+
+    Gap closed by extraction: the three tiers below already existed, but
+    fired with NO source tag — a comp using its own exact EPC and a comp
+    using "any EPC at the postcode" (tier 3, last resort) were indistinguishable
+    downstream. Both fed _size_score/_size_adjustment in ceiling_engine.py
+    with equal trust. Tier 3 is the same neighbour-borrowing pattern the
+    subject side is explicitly protected against (S35-SIZE-MATCH) — comps
+    didn't have that protection. This function doesn't remove tier 3 (a
+    comp with NO size data at all is worse for scoring than a postcode-any
+    estimate), it makes the tier visible so a future confidence discount in
+    ceiling_engine.py has something real to read.
+
+    Tiers (unchanged order — exact house-number match is the comp's OWN EPC,
+    nearest house-number is the closest neighbour, postcode-any is last resort):
+      1. comp_epc_exact     — exact house-number match on the same postcode.
+      2. comp_epc_nearest   — nearest house number at the same postcode.
+      3. comp_epc_postcode_any — any EPC row at the postcode (last resort).
+      4. none               — no EPC rows at all for this postcode.
+
+    Returns: {"floor_area": float|None, "habitable_rooms": int|None,
+              "construction_age_band": str|None, "energy_rating": str|None,
+              "source": str}
+    """
+    _none_result = {
+        "floor_area": None, "habitable_rooms": None,
+        "construction_age_band": None, "energy_rating": None,
+        "source": "none",
+    }
+    if not candidate_epc_rows:
+        return _none_result
+
+    def _lead_num(_s):
+        _m = re.match(r"^\s*(\d+)", str(_s or ""))
+        return _m.group(1) if _m else None
+
+    _comp_house = _lead_num(comp_paon_or_address)
+    _chosen, _source = None, "none"
+
+    if _comp_house:
+        for _er in candidate_epc_rows:
+            if _lead_num(_er.get("address1")) == _comp_house:
+                _chosen, _source = _er, "comp_epc_exact"
+                break
+
+    if _chosen is None and _comp_house:
+        _best = None
+        for _er in candidate_epc_rows:
+            _hn = _lead_num(_er.get("address1"))
+            if _hn is None:
+                continue
+            _dist = abs(int(_hn) - int(_comp_house))
+            if _best is None or _dist < _best[0]:
+                _best = (_dist, _er)
+        if _best:
+            _chosen, _source = _best[1], "comp_epc_nearest"
+
+    if _chosen is None:
+        _chosen, _source = candidate_epc_rows[0], "comp_epc_postcode_any"
+
+    if not _chosen:
+        return _none_result
+
+    return {
+        "floor_area": float(_chosen.get("total_floor_area") or 0) or None,
+        "habitable_rooms": _chosen.get("number_habitable_rooms"),
+        "construction_age_band": (
+            str(_chosen.get("construction_age_band") or "").strip().upper() or None
+        ),
+        "energy_rating": _chosen.get("current_energy_rating"),
+        "source": _source,
+    }
+
+
 def _extract_epc_floor_area_from_text(text: Optional[str]) -> Optional[float]:
     """Extract 'Total floor area' from EPC-certificate document text.
 
@@ -5053,13 +5132,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # postcode fallback last. ONE batched Hetzner query for all comp postcodes
         # (scalable — not one query per comp). Each comp gets its real floor area
         # → real size_adj → genuine £/sqft like-for-like.
-        import re as _re_epc
         _band_order = ["A","B","C","D","E","F","G","H","I","J","K","L"]
         _epc_matched_count = 0
-
-        def _lead_num(_s):
-            _m = _re_epc.match(r"^\s*(\d+)", str(_s or ""))
-            return _m.group(1) if _m else None
 
         _comp_pcs = sorted({
             normalize_postcode(str(_r.get("postcode") or "")).replace(" ", "").upper()
@@ -5090,34 +5164,13 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             _cand = _epc_by_pc.get(_comp_pc_key) or []
             if not _cand:
                 continue
-            _comp_house = _lead_num(_r.get("paon") or _r.get("address"))
-            _chosen = None
-            # Tier 1: exact house-number match — the comp's OWN EPC.
-            if _comp_house:
-                for _er in _cand:
-                    if _lead_num(_er.get("address1")) == _comp_house:
-                        _chosen = _er
-                        break
-            # Tier 2: nearest house number on the same postcode.
-            if _chosen is None and _comp_house:
-                _best = None
-                for _er in _cand:
-                    _hn = _lead_num(_er.get("address1"))
-                    if _hn is None:
-                        continue
-                    _dist = abs(int(_hn) - int(_comp_house))
-                    if _best is None or _dist < _best[0]:
-                        _best = (_dist, _er)
-                if _best:
-                    _chosen = _best[1]
-            # Tier 3: any EPC at the postcode (last resort).
-            if _chosen is None:
-                _chosen = _cand[0]
-            if _chosen:
-                _r["habitable_rooms"]       = _chosen.get("number_habitable_rooms")
-                _r["floor_area"]            = float(_chosen.get("total_floor_area") or 0) or None
-                _r["construction_age_band"] = str(_chosen.get("construction_age_band") or "").strip().upper() or None
-                _r["energy_rating"]         = _chosen.get("current_energy_rating")
+            _resolved = resolve_comp_size(_r.get("paon") or _r.get("address"), _cand)
+            if _resolved["floor_area"] is not None:
+                _r["habitable_rooms"]       = _resolved["habitable_rooms"]
+                _r["floor_area"]            = _resolved["floor_area"]
+                _r["construction_age_band"] = _resolved["construction_age_band"]
+                _r["energy_rating"]         = _resolved["energy_rating"]
+                _r["floor_area_source"]     = _resolved["source"]
                 _epc_matched_count += 1
         _uprn_enriched_count = _epc_matched_count  # downstream audit var name retained
 
