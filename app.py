@@ -4424,6 +4424,43 @@ def _median_int(values: List[int]) -> Optional[int]:
     return int((vs[mid - 1] + vs[mid]) / 2)
 
 
+def _extract_epc_floor_area_from_text(text: Optional[str]) -> Optional[float]:
+    """Extract 'Total floor area' from EPC-certificate document text.
+
+    Gap found 2026-06-25, verified on a live deal: 12 Northgate Street's own
+    EPC certificate was uploaded into the deal's documents ("Energy
+    performance certificate (EPC)... Total floor area\n81 square metres"),
+    address-matched to the subject, but summary_json.property.internal_area
+    stayed null because no function in this file looked for this phrasing —
+    _compute_gia_from_text only recognises 'N.NNm x N.NNm' room-dimension
+    schedules, a completely different text format. Separately confirmed on
+    Hetzner that this property has no row in the bulk epc_certificates table,
+    so the uploaded certificate text was the ONLY place this number existed.
+
+    Matches the standard gov.uk EPC certificate phrasing:
+      "Total floor area\n81 square metres"
+      "Total floor area: 81 square metres"
+      "Total floor area 81 square metres"
+    Returns the floor area in m², or None if no match.
+    """
+    if not text:
+        return None
+    _pat = re.compile(
+        r'total\s+floor\s+area\s*[:\n]?\s*(\d+(?:\.\d+)?)\s*square\s*met',
+        re.I
+    )
+    m = _pat.search(text)
+    if not m:
+        return None
+    try:
+        area = float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    if not (10.0 <= area <= 2000.0):   # plausible residential floor area
+        return None
+    return area
+
+
 def _compute_gia_from_text(text: Optional[str]) -> Tuple[Optional[float], int, str]:
     """Deterministic gross internal area (m²) from auction-particulars room
     dimensions — the production-grade subject-size source.
@@ -4449,13 +4486,20 @@ def _compute_gia_from_text(text: Optional[str]) -> Tuple[Optional[float], int, s
                 "summerhouse", "workshop", "stable", "porch", "loft", "cellar",
                 "basement")
     _pat = re.compile(r'(\d+\.\d+)\s*m?\s*[xX\u00d7]\s*(\d+\.\d+)\s*m', re.I)
+    _boundary_pat = re.compile(r'[.\n]')
     total = 0.0
     n = 0
     for m in _pat.finditer(text):
         l, w = float(m.group(1)), float(m.group(2))
         if not (1.0 <= l <= 30.0 and 1.0 <= w <= 30.0):   # plausible room metres
             continue
-        ctx = text[max(0, m.start() - 70):m.start()].lower()  # preceding room label
+        _window_start = max(0, m.start() - 70)
+        _raw_ctx = text[_window_start:m.start()]
+        _boundaries = list(_boundary_pat.finditer(_raw_ctx))
+        if _boundaries:
+            ctx = _raw_ctx[_boundaries[-1].end():].lower()
+        else:
+            ctx = _raw_ctx.lower()
         if any(k in ctx for k in _EXCLUDE):
             continue
         total += l * w
@@ -9240,20 +9284,35 @@ def save_area(deal_id: str):
                 .select("extracted_text") \
                 .eq("deal_id", deal_id).eq("user_id", request.user_id).execute()
             _pack_text = "\n".join((d.get("extracted_text") or "") for d in (_docs.data or []))
-            _gia, _gia_rooms, _gia_conf = _compute_gia_from_text(_pack_text)
-            if _gia:
-                _subject_gia_listing = _gia
-                _prop["internal_area"] = _gia
-                _prop["internal_area_source"] = "listing_gia"
-                _prop["internal_area_confidence"] = _gia_conf
+            _epc_text_area = _extract_epc_floor_area_from_text(_pack_text)
+            if _epc_text_area:
+                _subject_gia_listing = _epc_text_area
+                _prop["internal_area"] = _epc_text_area
+                _prop["internal_area_source"] = "epc_certificate_text"
+                _prop["internal_area_confidence"] = "high"
                 _summary["property"] = _prop
                 try:
                     supabase.table("deals").update({"summary_json": _summary}) \
                         .eq("id", deal_id).eq("user_id", request.user_id).execute()
                 except Exception as _pe:
                     print(f"[S35-GIA persist warn] {deal_id}: {_pe}")
-                print(f"[S35-GIA] {deal_id}: listing GIA {_gia} m² "
-                      f"({_gia_rooms} rooms, {_gia_conf})")
+                print(f"[S35-GIA] {deal_id}: EPC certificate floor area "
+                      f"{_epc_text_area} m² (epc_certificate_text)")
+            else:
+                _gia, _gia_rooms, _gia_conf = _compute_gia_from_text(_pack_text)
+                if _gia:
+                    _subject_gia_listing = _gia
+                    _prop["internal_area"] = _gia
+                    _prop["internal_area_source"] = "listing_gia"
+                    _prop["internal_area_confidence"] = _gia_conf
+                    _summary["property"] = _prop
+                    try:
+                        supabase.table("deals").update({"summary_json": _summary}) \
+                            .eq("id", deal_id).eq("user_id", request.user_id).execute()
+                    except Exception as _pe:
+                        print(f"[S35-GIA persist warn] {deal_id}: {_pe}")
+                    print(f"[S35-GIA] {deal_id}: listing GIA {_gia} m² "
+                          f"({_gia_rooms} rooms, {_gia_conf})")
         except Exception as _ge:
             print(f"[S35-GIA error] {deal_id}: {_ge}")
     else:
@@ -9378,6 +9437,18 @@ def save_area(deal_id: str):
                     return (_top, "epc_neighbour", _conf)
                 else:
                     _nearest_code = _nearest[0][1]
+                    # S35-LOW-CONF-CROSSCHECK: a low-confidence neighbour
+                    # tiebreak used to be returned and trusted as-is — the
+                    # listing text's own read of the subject (llm_code,
+                    # already in scope) was unused. Live case: 10 Lid Lane
+                    # split 50/50 Semi/Terrace, tie-broke to Terrace by
+                    # distance, but the listing said "semi detached" and was
+                    # never consulted. Cross-check now: agreement upgrades
+                    # confidence; disagreement prefers the listing read.
+                    if llm_code and llm_code == _nearest_code:
+                        return (_nearest_code, "epc_neighbour", "medium")
+                    if llm_code and llm_code != _nearest_code:
+                        return (llm_code, "llm_crosscheck_override", "medium")
                     return (_nearest_code, "epc_neighbour", "low")
         # Tier 3 — no EPC evidence anywhere; fall back to the LLM read.
         if llm_code:
