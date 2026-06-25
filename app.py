@@ -4424,6 +4424,49 @@ def _median_int(values: List[int]) -> Optional[int]:
     return int((vs[mid - 1] + vs[mid]) / 2)
 
 
+def _compute_gia_from_text(text: Optional[str]) -> Tuple[Optional[float], int, str]:
+    """Deterministic gross internal area (m²) from auction-particulars room
+    dimensions — the production-grade subject-size source.
+
+    S35-SIZE-MATCH (2026-06-25): the subject's floor area is a single point of
+    failure that scales the WHOLE valuation, so it must come from the subject's
+    OWN data, never a neighbour. Neighbour-fallback is safe for *type* (UK streets
+    are type-homogeneous) but unsafe for *size* (adjacent houses differ — live:
+    104 Village St is ~98 m² from its own particulars, but its neighbour 98
+    Village St is 127 m²; borrowing 98's size inflated 104's base ~30%).
+
+    Auction legal packs almost always carry a dimensioned room schedule, so this
+    parses every metric 'N.NNm x N.NNm' pair, sums HABITABLE rooms (excludes
+    conservatory / garage / car port / outbuilding / store / porch via the room
+    label that precedes each pair), and applies a circulation/internal-wall
+    allowance to approximate EPC GIA. Deterministic (regex + arithmetic — no LLM
+    judgement). Returns (gia_m2, n_rooms, confidence).
+    """
+    if not text:
+        return None, 0, "none"
+    _EXCLUDE = ("conservatory", "garage", "car port", "carport", "car-port",
+                "outbuilding", "out building", "store", "shed", "summer house",
+                "summerhouse", "workshop", "stable", "porch", "loft", "cellar",
+                "basement")
+    _pat = re.compile(r'(\d+\.\d+)\s*m?\s*[xX\u00d7]\s*(\d+\.\d+)\s*m', re.I)
+    total = 0.0
+    n = 0
+    for m in _pat.finditer(text):
+        l, w = float(m.group(1)), float(m.group(2))
+        if not (1.0 <= l <= 30.0 and 1.0 <= w <= 30.0):   # plausible room metres
+            continue
+        ctx = text[max(0, m.start() - 70):m.start()].lower()  # preceding room label
+        if any(k in ctx for k in _EXCLUDE):
+            continue
+        total += l * w
+        n += 1
+    if n == 0:
+        return None, 0, "none"
+    gia = round(total * 1.15)   # circulation + internal walls → ~EPC GIA basis
+    conf = "high" if n >= 4 else ("medium" if n >= 2 else "low")
+    return float(gia), n, conf
+
+
 def _robust_comp_base(prices) -> Optional[float]:
     """Outlier-robust central estimate for comparable sold prices.
 
@@ -4479,7 +4522,7 @@ def _density_tier_radius(pc: str) -> Optional[float]:
     return None
 
 
-def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None, subject_tenure_hint: Optional[str] = None, subject_address: Optional[str] = None) -> Dict[str, Any]:
+def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None, subject_tenure_hint: Optional[str] = None, subject_address: Optional[str] = None, subject_internal_area: Optional[float] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
 
@@ -4782,17 +4825,19 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                    ORDER BY lodgement_date DESC""",
                 (_pc_norm,)
             ) or []
+            _exact = None
+            _nearest = None
             if _sepc_rows:
-                _pick = None
-                # Tier 1: exact house-number match.
+                # Exact subject-address match (authoritative for the subject).
                 if _subj_house:
                     for _er in _sepc_rows:
                         _m = _re_sepc.match(r"^\s*(\d+)", str(_er.get("address1") or ""))
                         if _m and _m.group(1) == _subj_house:
-                            _pick = _er
+                            _exact = _er
                             break
-                # Tier 2: nearest house number.
-                if _pick is None and _subj_house:
+                # Nearest neighbour — used ONLY for construction age band, which
+                # IS street-homogeneous (houses on a street were built together).
+                if _subj_house:
                     _best = None
                     for _er in _sepc_rows:
                         _m = _re_sepc.match(r"^\s*(\d+)", str(_er.get("address1") or ""))
@@ -4802,18 +4847,36 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                         if _best is None or _d < _best[0]:
                             _best = (_d, _er)
                     if _best:
-                        _pick = _best[1]
-                # Tier 3: most recent EPC at postcode (old behaviour).
-                if _pick is None:
-                    _pick = _sepc_rows[0]
-                _subject_epc = _pick
+                        _nearest = _best[1]
+                if _nearest is None:
+                    _nearest = _sepc_rows[0]
+            _subject_epc = _exact or {}
+            _subject_epc_exact = bool(_exact)
+            _subject_epc_neighbour = _nearest or {}
         except Exception as _e:
             _audit["warnings"].append(f"subject_epc_lookup_failed: {_e}")
+            _subject_epc_exact = False
+            _subject_epc_neighbour = {}
 
-        _subject_rooms      = int(_subject_epc.get("number_habitable_rooms") or 0) or None
-        _subject_area       = float(_subject_epc.get("total_floor_area") or 0) or None
-        _subject_band       = str(_subject_epc.get("construction_age_band") or "").strip().upper() or None
-        _subject_uprn       = str(_subject_epc.get("uprn") or "").strip() or None
+        # SIZE: subject's OWN data only — exact EPC, else listing-derived GIA,
+        # else None. NEVER a neighbour's floor area (adjacent houses differ in
+        # size even when same type → a neighbour size scales the whole valuation
+        # wrongly; live: 104 Village St ~98 m² vs neighbour 98 Village St 127 m²).
+        if _subject_epc_exact:
+            _subject_rooms = int(_subject_epc.get("number_habitable_rooms") or 0) or None
+            _subject_area  = float(_subject_epc.get("total_floor_area") or 0) or None
+            _subject_area_source = "epc_exact"
+        else:
+            _subject_rooms = None  # no exact EPC → don't filter comps on a neighbour's room count
+            _subject_area  = float(subject_internal_area) if subject_internal_area else None
+            _subject_area_source = "listing_gia" if _subject_area else "none"
+        # AGE BAND: street-homogeneous, so a neighbour is acceptable here.
+        _subject_band = (
+            str(_subject_epc.get("construction_age_band")
+                or _subject_epc_neighbour.get("construction_age_band") or "").strip().upper()
+            or None
+        )
+        _subject_uprn = str(_subject_epc.get("uprn") or "").strip() or None if _subject_epc_exact else None
 
         # ── I-1: Subject tenure resolution (authoritative hierarchy) ────────
         # Resolution precedence:
@@ -9161,6 +9224,41 @@ def save_area(deal_id: str):
     # but investment strategy labels (BTL/HMO) map to None via the pt_map miss.
     _summary     = deal.data.get("summary_json") or {}
     _prop        = _summary.get("property") or {}
+
+    # S35-SIZE-MATCH (2026-06-25): resolve the subject's OWN floor area from its
+    # legal-pack particulars (deterministic GIA from the room schedule). This is
+    # the production subject-size source — exact-EPC match (handled downstream in
+    # get_housing_data) takes precedence, but for auction stock without its own
+    # EPC the listing dimensions are the reliable, subject-specific signal (never
+    # a neighbour's size). Computed once here and persisted to
+    # summary_json.property.internal_area so every downstream consumer (verdict,
+    # workbench, recompute) reads one authoritative value.
+    _subject_gia_listing = None
+    if not _prop.get("internal_area"):
+        try:
+            _docs = supabase.table("documents") \
+                .select("extracted_text") \
+                .eq("deal_id", deal_id).eq("user_id", request.user_id).execute()
+            _pack_text = "\n".join((d.get("extracted_text") or "") for d in (_docs.data or []))
+            _gia, _gia_rooms, _gia_conf = _compute_gia_from_text(_pack_text)
+            if _gia:
+                _subject_gia_listing = _gia
+                _prop["internal_area"] = _gia
+                _prop["internal_area_source"] = "listing_gia"
+                _prop["internal_area_confidence"] = _gia_conf
+                _summary["property"] = _prop
+                try:
+                    supabase.table("deals").update({"summary_json": _summary}) \
+                        .eq("id", deal_id).eq("user_id", request.user_id).execute()
+                except Exception as _pe:
+                    print(f"[S35-GIA persist warn] {deal_id}: {_pe}")
+                print(f"[S35-GIA] {deal_id}: listing GIA {_gia} m² "
+                      f"({_gia_rooms} rooms, {_gia_conf})")
+        except Exception as _ge:
+            print(f"[S35-GIA error] {deal_id}: {_ge}")
+    else:
+        _subject_gia_listing = safe_float(_prop.get("internal_area"))
+
     _prop_type   = str(_prop.get("physical_type") or _prop.get("type") or "").strip().upper()
     # S33-TYPE-MATCH (2026-06-23): the LLM extracts physical_type as free text
     # from listing prose ("Traditional three bedroomed semi-detached property",
@@ -9330,7 +9428,7 @@ def save_area(deal_id: str):
                 "lat":          lat,
                 "lng":          lng,
                 "area_code":    area_code,
-                "housing":      get_housing_data(_postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp, subject_tenure_hint=_prop.get("tenure"), subject_address=_prop.get("address")),
+                "housing":      get_housing_data(_postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp, subject_tenure_hint=_prop.get("tenure"), subject_address=_prop.get("address"), subject_internal_area=_subject_gia_listing or safe_float(_prop.get("internal_area"))),
                 "crime":        get_crime_data(lat, lng),
                 "transport":    get_transport_data(lat, lng),
                 "amenities":    get_amenities_data(lat, lng),
