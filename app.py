@@ -10872,7 +10872,104 @@ def auction_triangulation():
 # Purpose: runtime evidence only. No business logic. No side effects. No masking.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-@app.route("/api/diag/runtime-health", methods=["GET", "OPTIONS"])
+@app.route("/api/diag/comps-exact-test", methods=["GET", "OPTIONS"])
+@require_auth
+def diag_comps_exact_test():
+    """
+    TEMPORARY — H1 debugging only. Runs the EXACT same SQL string and
+    parameter binding as get_housing_data's main comp query, with no
+    simplification, to isolate whether the 5-parameter production query
+    behaves differently from the 1-parameter runtime-health probe.
+    Query param: ?postcode=NR5+0QG (defaults to NR5 0QG if omitted)
+    Remove once H1 comps regression is resolved.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    raw_pc = request.args.get("postcode", "NR5 0QG")
+    pc = normalize_postcode(raw_pc)
+    hetzner_pcd_nospace = re.sub(r"\s+", "", pc.upper())
+    radius_m = 3 * 1609.344
+    pt_param = None
+    lim = 100
+
+    exact_sql = """
+        WITH subject AS (
+            SELECT lat, lng
+            FROM public.nspl_postcodes
+            WHERE pcd_nospace = %s
+            LIMIT 1
+        )
+        SELECT
+            p.date_of_transfer,
+            p.price,
+            p.property_type,
+            p.postcode,
+            p.town_city,
+            ROUND(
+                ST_Distance(
+                    ST_MakePoint(s.lng, s.lat)::geography,
+                    ST_MakePoint(n.lng, n.lat)::geography
+                )
+            )::int AS meters,
+            p.duration,
+            p.ppd_category_type,
+            p.old_new,
+            p.paon,
+            p.street
+        FROM public.price_paid_raw_2025 p
+        JOIN public.nspl_postcodes n ON n.pcd_nospace = p.postcode_nospace
+        CROSS JOIN subject s
+        WHERE n.lat IS NOT NULL
+          AND p.date_of_transfer >= (CURRENT_DATE - INTERVAL '18 months')::date
+          AND p.ppd_category_type != 'B'
+          AND ST_DWithin(
+                ST_MakePoint(s.lng, s.lat)::geography,
+                ST_MakePoint(n.lng, n.lat)::geography,
+                %s
+              )
+        ORDER BY
+            (%s IS NOT NULL AND UPPER(p.property_type) = UPPER(%s)) DESC,
+            p.date_of_transfer DESC,
+            meters ASC
+        LIMIT %s;
+    """
+    params = (hetzner_pcd_nospace, radius_m, pt_param, pt_param, lim)
+
+    error_detail = None
+    rows = []
+    try:
+        with psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(exact_sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        error_detail = f"{type(e).__name__}: {e}"
+
+    # Also run via the shared data_query() helper for direct comparison
+    dq_rows = data_query(exact_sql, params)
+
+    return jsonify({
+        "ok": True,
+        "input_postcode": raw_pc,
+        "normalized_postcode": pc,
+        "hetzner_pcd_nospace": hetzner_pcd_nospace,
+        "radius_m": radius_m,
+        "pt_param": pt_param,
+        "limit": lim,
+        "direct_connection_test": {
+            "error": error_detail,
+            "rows_returned": len(rows),
+            "sample": rows[:3],
+        },
+        "data_query_helper_test": {
+            "rows_returned": len(dq_rows) if isinstance(dq_rows, list) else None,
+            "sample": dq_rows[:3] if dq_rows else [],
+        },
+    }), 200
+
+
+
 @require_auth
 def diag_runtime_health():
     """
