@@ -4737,7 +4737,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 %s
               )
         ORDER BY
-            (%s IS NOT NULL AND UPPER(p.property_type) = UPPER(%s)) DESC,
+            (%s::text IS NOT NULL AND UPPER(p.property_type) = UPPER(%s::text)) DESC,
             p.date_of_transfer DESC,
             meters ASC
         LIMIT %s;
@@ -10929,7 +10929,7 @@ def diag_comps_exact_test():
                 %s
               )
         ORDER BY
-            (%s IS NOT NULL AND UPPER(p.property_type) = UPPER(%s)) DESC,
+            (%s::text IS NOT NULL AND UPPER(p.property_type) = UPPER(%s::text)) DESC,
             p.date_of_transfer DESC,
             meters ASC
         LIMIT %s;
