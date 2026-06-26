@@ -4651,7 +4651,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
     sources = [
         {"label": "HM Land Registry (Price Paid)", "url": "https://www.gov.uk/government/collections/price-paid-data"},
-        {"label": "Supabase (Postgres)", "url": f"{SUPABASE_URL}" if SUPABASE_URL else "https://supabase.com/"},
+        {"label": "Hetzner (internal Postgres — price_paid_raw_2025)", "url": "https://www.gov.uk/government/statistical-data-sets/price-paid-data-downloads"},
     ]
 
     if not pc:
@@ -4685,128 +4685,123 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
         )
 
-    payload = {"in_postcode": pc, "in_radius_miles": r_miles, "in_limit": lim}
-    # S33-TYPE-MATCH (2026-06-23): forward the subject property type to the RPC
-    # so like-for-like prioritisation happens server-side (same-type rows sorted
-    # to the top BEFORE in_limit truncates the window — otherwise recent sales of
-    # the wrong type crowd out same-type comps before app.py can filter them).
-    # Guarded: only added when a valid PPD code is present, so the payload still
-    # matches the pre-migration RPC signature when no type is known. REQUIRES the
-    # housing_comps_v1 + get_radius_comps migration adding in_property_type; until
-    # that is deployed this key will error, so it is also wrapped at call sites.
-    _pt_for_rpc = (property_type or "").strip().upper()
-    if _pt_for_rpc in ("D", "S", "T", "F", "O"):
-        payload["in_property_type"] = _pt_for_rpc
+    # H1-HETZNER (2026-06-26): comps now come directly from Hetzner
+    # (price_paid_raw_2025 + nspl_postcodes via data_query()), not the
+    # Supabase RPC / price_paid_geo materialized view. Root cause fixed:
+    # price_paid_geo was a matview defined against the retired Supabase
+    # table price_paid_raw_2025_orphaned_20260620, with no automated
+    # refresh — confirmed stuck at 2026-02-27 while live Hetzner data
+    # reached 2026-05-01. Querying Hetzner directly removes the matview
+    # and its staleness failure mode entirely. Radius/distance now use
+    # PostGIS (installed on Hetzner: postgis 3.4.2) via ST_DWithin /
+    # ST_Distance on geography points, in place of Supabase's earthdistance
+    # functions — not a precision-matched port, a direct, verified-working
+    # replacement (tested live against DE23 8DF, 2026-06-26, see audit log).
+    _pt_for_query = (property_type or "").strip().upper()
+    _pt_param = _pt_for_query if _pt_for_query in ("D", "S", "T", "F", "O") else None
+    _radius_m = r_miles * 1609.344
+
+    _HETZNER_COMPS_SQL = """
+        WITH subject AS (
+            SELECT lat, lng
+            FROM public.nspl_postcodes
+            WHERE pcd_nospace = %s
+            LIMIT 1
+        )
+        SELECT
+            p.date_of_transfer,
+            p.price,
+            p.property_type,
+            p.postcode,
+            p.town_city,
+            ROUND(
+                ST_Distance(
+                    ST_MakePoint(s.lng, s.lat)::geography,
+                    ST_MakePoint(n.lng, n.lat)::geography
+                )
+            )::int AS meters,
+            p.duration,
+            p.ppd_category_type,
+            p.old_new,
+            p.paon,
+            p.street
+        FROM public.price_paid_raw_2025 p
+        JOIN public.nspl_postcodes n ON n.pcd_nospace = p.postcode_nospace
+        CROSS JOIN subject s
+        WHERE n.lat IS NOT NULL
+          AND p.date_of_transfer >= (CURRENT_DATE - INTERVAL '18 months')::date
+          AND p.ppd_category_type != 'B'
+          AND ST_DWithin(
+                ST_MakePoint(s.lng, s.lat)::geography,
+                ST_MakePoint(n.lng, n.lat)::geography,
+                %s
+              )
+        ORDER BY
+            (%s IS NOT NULL AND UPPER(p.property_type) = UPPER(%s)) DESC,
+            p.date_of_transfer DESC,
+            meters ASC
+        LIMIT %s;
+    """
+    _hetzner_pcd_nospace = re.sub(r"\s+", "", pc.upper())
 
     try:
-        # S33-RELIABILITY (2026-06-21): retry-with-verification wrapper around
-        # the RPC call. Found live: deal aa0bb620 (12 Northgate Street, DE7
-        # 8FR) persisted a null ceiling with sold_comps_count=0, despite the
-        # same postcode independently returning 50-200+ real comps when the
-        # RPC was queried directly minutes later. With 8M+ real Price Paid
-        # transactions underlying this data, a confirmed-zero result for a
-        # normal UK residential postcode should be rare — most empty results
-        # are a transient API/connection issue, not genuine data absence.
-        # Never accept a zero-row response on the first attempt without
-        # corroboration: retry the same RPC call up to 3 times with backoff,
-        # and if still empty, run an independent verification COUNT against
-        # the same radius before concluding the postcode truly has no comps.
-        # This trades a few hundred ms of extra latency on the rare empty
-        # case for the guarantee that "no comps found" only ever means that
-        # when it's actually true — never when it's an artifact of a flaky
-        # call. metrics.rpc_retry_count and metrics.rpc_verified_empty are
-        # surfaced below so this is auditable, not silent, either way.
+        # H1-RELIABILITY: retry-with-verification, carried over unchanged in
+        # spirit from S33-RELIABILITY (2026-06-21) — the same justification
+        # applies regardless of which database serves the query: tonight's
+        # own audit proved a Hetzner connection can fail silently (stale
+        # DATA_DATABASE_URL password, fixed 2026-06-26), so an empty result
+        # is still not trusted on a single attempt. data_query() catches its
+        # own exceptions and returns [] rather than raising, so unlike the
+        # old Supabase branch there is no separate exception path to retry
+        # differently — every empty result, whatever the cause, is retried
+        # the same way, then independently re-verified at a wider radius
+        # before "no comps" is accepted as genuine.
         _rpc_attempts = 0
         _rpc_max_attempts = 3
         rows = None
         _rpc_last_error = None
         while _rpc_attempts < _rpc_max_attempts:
             _rpc_attempts += 1
-            try:
-                res = supabase.rpc(HOUSING_RPC_NAME, payload).execute()
-                rows = res.data if hasattr(res, "data") else None
-                if not isinstance(rows, list):
-                    rows = []
-                if rows:
-                    break  # got real data — done, no need to retry
-                # Empty result — could be genuine, could be a transient hiccup.
-                # Retry before accepting it, unless this was already the last attempt.
-                if _rpc_attempts < _rpc_max_attempts:
-                    app.logger.warning(
-                        f"get_housing_data: RPC returned 0 rows for {pc} "
-                        f"(attempt {_rpc_attempts}/{_rpc_max_attempts}) — retrying"
-                    )
-                    time.sleep(0.4 * _rpc_attempts)  # gentle backoff: 0.4s, 0.8s
-            except Exception as _rpc_e:
-                _rpc_last_error = str(_rpc_e)
+            rows = data_query(
+                _HETZNER_COMPS_SQL,
+                (_hetzner_pcd_nospace, _radius_m, _pt_param, _pt_param, lim),
+            )
+            if not isinstance(rows, list):
                 rows = []
+            if rows:
+                break  # got real data — done, no need to retry
+            if _rpc_attempts < _rpc_max_attempts:
                 app.logger.warning(
-                    f"get_housing_data: RPC call raised on attempt "
-                    f"{_rpc_attempts}/{_rpc_max_attempts} for {pc}: {_rpc_e}"
+                    f"get_housing_data: Hetzner query returned 0 rows for {pc} "
+                    f"(attempt {_rpc_attempts}/{_rpc_max_attempts}) — retrying"
                 )
-                # S33-TYPE-MATCH deploy-order safety: if the failure is because
-                # in_property_type isn't recognised (migration not yet live),
-                # strip it and retry WITHOUT type rather than breaking comps
-                # entirely. Degrades to "works, not type-prioritised" — the
-                # client-side filter in STEP 1 below still does like-for-like
-                # on whatever returns. Only triggers when the typed key is the
-                # plausible cause (param/signature/function-not-found errors).
-                if "in_property_type" in payload and (
-                    "in_property_type" in _rpc_last_error
-                    or "function" in _rpc_last_error.lower()
-                    or "does not exist" in _rpc_last_error.lower()
-                    or "argument" in _rpc_last_error.lower()
-                ):
-                    app.logger.warning(
-                        "get_housing_data: typed RPC failed — retrying without "
-                        "in_property_type (migration may not be deployed yet)"
-                    )
-                    payload.pop("in_property_type", None)
-                    _audit_pt_rpc_stripped = True
-                if _rpc_attempts < _rpc_max_attempts:
-                    time.sleep(0.4 * _rpc_attempts)
+                time.sleep(0.4 * _rpc_attempts)  # gentle backoff: 0.4s, 0.8s
 
         _rpc_verified_empty = False
         if not rows:
-            # Still empty after retries. Before accepting "no comps for this
-            # postcode" as true, run one independent verification query —
-            # a direct COUNT against the same underlying function with a
-            # generous limit, as a second, differently-shaped call. If THIS
-            # also returns zero, the empty result is corroborated and we can
-            # trust it. If it returns rows, the original calls were failing
-            # for some other reason (e.g. a payload/parameter quirk) and we
-            # use this verification result instead of discarding real data.
-            try:
-                _verify_res = supabase.rpc(
-                    HOUSING_RPC_NAME,
-                    {"in_postcode": pc, "in_radius_miles": min(r_miles * 1.5, 10.0), "in_limit": 50},
-                ).execute()
-                _verify_rows = _verify_res.data if hasattr(_verify_res, "data") else None
-                if isinstance(_verify_rows, list) and _verify_rows:
-                    app.logger.warning(
-                        f"get_housing_data: VERIFICATION QUERY recovered "
-                        f"{len(_verify_rows)} comps for {pc} after {_rpc_max_attempts} "
-                        f"empty attempts at the original radius — original attempts "
-                        f"were a transient failure, not genuine data absence. "
-                        f"Using verification result."
-                    )
-                    rows = _verify_rows
-                else:
-                    _rpc_verified_empty = True
-                    app.logger.info(
-                        f"get_housing_data: confirmed empty for {pc} — "
-                        f"{_rpc_max_attempts} attempts plus an independent "
-                        f"wider-radius verification query all returned 0 rows. "
-                        f"Genuine data absence, not a retry artefact."
-                    )
-            except Exception as _verify_e:
-                app.logger.error(
-                    f"get_housing_data: verification query itself failed for "
-                    f"{pc}: {_verify_e}. Cannot distinguish transient failure "
-                    f"from genuine absence — treating as unresolved, not "
-                    f"confirmed-empty."
+            # Still empty after retries. Independent verification at a wider
+            # radius before accepting "no comps for this postcode" as true.
+            _verify_rows = data_query(
+                _HETZNER_COMPS_SQL,
+                (_hetzner_pcd_nospace, min(r_miles * 1.5, 10.0) * 1609.344, _pt_param, _pt_param, 50),
+            )
+            if isinstance(_verify_rows, list) and _verify_rows:
+                app.logger.warning(
+                    f"get_housing_data: VERIFICATION QUERY recovered "
+                    f"{len(_verify_rows)} comps for {pc} after {_rpc_max_attempts} "
+                    f"empty attempts at the original radius — original attempts "
+                    f"were a transient failure, not genuine data absence. "
+                    f"Using verification result."
                 )
-                _rpc_last_error = _rpc_last_error or str(_verify_e)
+                rows = _verify_rows
+            else:
+                _rpc_verified_empty = True
+                app.logger.info(
+                    f"get_housing_data: confirmed empty for {pc} — "
+                    f"{_rpc_max_attempts} attempts plus an independent "
+                    f"wider-radius verification query all returned 0 rows. "
+                    f"Genuine data absence, not a retry artefact."
+                )
 
         if not isinstance(rows, list):
             rows = []
@@ -4864,13 +4859,13 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 sources,
                 retrieved,
                 extra_metrics={
-                    "postcode": pc, "radius_miles": r_miles, "limit": lim, "rpc": HOUSING_RPC_NAME,
+                    "postcode": pc, "radius_miles": r_miles, "limit": lim, "source": "hetzner_direct",
                     "rpc_retry_attempts": _rpc_attempts,
                     "rpc_verified_empty": _rpc_verified_empty,
                     "rpc_last_error": _rpc_last_error,
                 },
             )
-            out["metrics"]["payload"] = payload
+            out["metrics"]["query"] = {"postcode": pc, "radius_m": _radius_m, "property_type": _pt_param, "limit": lim}
             return out
 
         # ══════════════════════════════════════════════════════════════════════
@@ -4882,14 +4877,14 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # + explicit uncertainty disclosure
         #
         # All dimensions derived from verified data sources:
-        #   property_type   → price_paid_raw_2025.property_type
+        #   property_type   → price_paid_raw_2025.property_type (Hetzner)
         #   floor_area      → epc_certificates.total_floor_area
         #   habitable_rooms → epc_certificates.number_habitable_rooms
-        #   tenure          → price_paid_raw_2025.duration
-        #   old_new         → price_paid_raw_2025.old_new
+        #   tenure          → price_paid_raw_2025.duration (Hetzner)
+        #   old_new         → price_paid_raw_2025.old_new (Hetzner)
         #   age_band        → epc_certificates.construction_age_band
         #   HPI multiplier  → uk_hpi_monthly.annual_change (LAD level)
-        #   miles           → housing_comps_v1 RPC (haversine from subject)
+        #   miles           → ST_Distance, computed directly in SQL on Hetzner (H1-HETZNER, 2026-06-26)
         # ══════════════════════════════════════════════════════════════════════
 
         import datetime as _dt
@@ -5699,8 +5694,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
         out = metric_ok(summary, rows, sources, retrieved, HOUSING_CONFIDENCE_VALUE)
         out["metrics"] = {
-            "provider":                    "supabase_rpc",
-            "rpc":                         HOUSING_RPC_NAME,
+            "provider":                    "hetzner_direct",
+            "source":                      "price_paid_raw_2025 (Hetzner, H1-HETZNER 2026-06-26)",
             "postcode":                    pc,
             "radius_miles":                r_miles,
             "limit":                       lim,
@@ -5729,7 +5724,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "max_miles":                   max_m,
             "property_type_counts":        ptypes,
             "latlngEnrichment":            enrich_meta,
-            "payload":                     payload,
+            "query":                       {"radius_m": _radius_m, "property_type": _pt_param, "limit": lim},
         }
 
         charts = build_housing_charts_from_rows(rows)
@@ -5835,13 +5830,12 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
     except Exception as e:
         msg = str(e) or "Unknown error"
         out = metric_missing_provider(
-            f"Housing RPC not available. Create Supabase function '{HOUSING_RPC_NAME}' then retry. Error: {msg}",
+            f"Comparable housing data unavailable — Hetzner query failed. Error: {msg}",
             sources,
             retrieved,
-            extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim, "rpc": HOUSING_RPC_NAME},
+            extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim, "source": "hetzner_direct"},
         )
-        out["metrics"]["housingRpcError"] = msg
-        out["metrics"]["payload"] = payload
+        out["metrics"]["housingQueryError"] = msg
         return out
 
 
@@ -10967,23 +10961,26 @@ def diag_runtime_health():
         except Exception as _e:
             out["tables"][_tbl] = {"database": "supabase", "exists": False, "row_count": None, "error": str(_e)}
 
-    # ── CRITICAL CHECK: does price_paid_raw_2025 exist on Supabase? ───────
-    # If not, housing_comps_v1 will always return [].
-    if supabase:
-        try:
-            _pp_sb = supabase.table("price_paid_raw_2025").select("paon").limit(1).execute()
-            _found = len(_pp_sb.data or []) > 0
-            out["tables"]["price_paid_raw_2025_on_supabase"] = {
-                "database": "supabase", "sample_row_found": _found,
-                "error": None,
-                "diagnosis": "OK — housing_comps_v1 has data" if _found else "0 rows — housing_comps_v1 always returns []",
-            }
-        except Exception as _e:
-            out["tables"]["price_paid_raw_2025_on_supabase"] = {
-                "database": "supabase", "sample_row_found": False,
-                "error": str(_e),
-                "diagnosis": "Not accessible on Supabase — housing_comps_v1 has no data source",
-            }
+    # ── CRITICAL CHECK: does price_paid_raw_2025 have data on Hetzner? ─────
+    # H1-HETZNER (2026-06-26): get_housing_data queries Hetzner directly now,
+    # not the Supabase RPC. Was checking Supabase's price_paid_raw_2025,
+    # which has been a renamed, retired table since 2026-06-20
+    # (price_paid_raw_2025_orphaned_20260620) — that check was testing the
+    # wrong database for a function (housing_comps_v1) nothing calls anymore.
+    try:
+        _pp_hz = data_query("SELECT paon FROM public.price_paid_raw_2025 LIMIT 1")
+        _found = isinstance(_pp_hz, list) and len(_pp_hz) > 0
+        out["tables"]["price_paid_raw_2025_on_hetzner"] = {
+            "database": "hetzner", "sample_row_found": _found,
+            "error": None,
+            "diagnosis": "OK — get_housing_data has data" if _found else "0 rows or unreachable — get_housing_data will fail",
+        }
+    except Exception as _e:
+        out["tables"]["price_paid_raw_2025_on_hetzner"] = {
+            "database": "hetzner", "sample_row_found": False,
+            "error": str(_e),
+            "diagnosis": "Not accessible on Hetzner — get_housing_data has no data source",
+        }
 
     # ── HPI ENGLAND SPOT CHECK ────────────────────────────────────────────
     try:
@@ -10997,30 +10994,49 @@ def diag_runtime_health():
     except Exception as _e:
         out["tables"]["uk_hpi_monthly_england_spot"] = {"area_code": "E92000001", "value": None, "queryable": False, "error": str(_e)}
 
-    # ── HOUSING_COMPS_V1 LIVE PROBE ───────────────────────────────────────
-    if supabase:
-        _t0 = time.time()
-        try:
-            _rpc_res = supabase.rpc(HOUSING_RPC_NAME, {"in_postcode": "DL3 0PL", "in_radius_miles": 3.0, "in_limit": 5}).execute()
-            _rows = _rpc_res.data if hasattr(_rpc_res, "data") and isinstance(_rpc_res.data, list) else None
-            out["rpc"][HOUSING_RPC_NAME] = {
-                "test_postcode": "DL3 0PL", "latency_ms": round((time.time()-_t0)*1000,1),
-                "rows_returned": len(_rows) if _rows is not None else None,
-                "sample": (_rows[:2] if _rows else []),
-                "diagnosis": (
-                    "RPC returned rows — price_paid present on Supabase" if _rows
-                    else "RPC returned 0 rows — price_paid absent on Supabase" if _rows is not None
-                    else "RPC returned unexpected non-list result"
-                ),
-            }
-        except Exception as _e:
-            out["rpc"][HOUSING_RPC_NAME] = {
-                "test_postcode": "DL3 0PL", "latency_ms": round((time.time()-_t0)*1000,1),
-                "rows_returned": None, "sample": [], "error": str(_e),
-                "diagnosis": f"RPC threw exception: {_e}",
-            }
-    else:
-        out["rpc"][HOUSING_RPC_NAME] = {"rows_returned": None, "error": "Supabase client not initialised"}
+    # ── HETZNER COMPS LIVE PROBE (H1-HETZNER, 2026-06-26) ──────────────────
+    # Was: HOUSING_COMPS_V1 LIVE PROBE, testing the Supabase RPC →
+    # price_paid_geo matview → retired price_paid_raw_2025_orphaned_20260620.
+    # That chain is no longer what serves live comps (see get_housing_data).
+    # Probing it would report on dead infrastructure, not actual comp health.
+    # This now runs the same Hetzner query get_housing_data uses, so this
+    # diagnostic actually reflects whether the live comp path is healthy.
+    _t0 = time.time()
+    try:
+        _hetzner_probe_sql = """
+            WITH subject AS (
+                SELECT lat, lng FROM public.nspl_postcodes
+                WHERE pcd_nospace = %s LIMIT 1
+            )
+            SELECT p.date_of_transfer, p.price, p.property_type, p.postcode
+            FROM public.price_paid_raw_2025 p
+            JOIN public.nspl_postcodes n ON n.pcd_nospace = p.postcode_nospace
+            CROSS JOIN subject s
+            WHERE n.lat IS NOT NULL
+              AND p.ppd_category_type != 'B'
+              AND ST_DWithin(
+                    ST_MakePoint(s.lng, s.lat)::geography,
+                    ST_MakePoint(n.lng, n.lat)::geography,
+                    4828
+                  )
+            LIMIT 5;
+        """
+        _rows = data_query(_hetzner_probe_sql, ("DL30PL",))
+        out["rpc"]["hetzner_comps"] = {
+            "test_postcode": "DL3 0PL", "latency_ms": round((time.time()-_t0)*1000,1),
+            "rows_returned": len(_rows) if isinstance(_rows, list) else None,
+            "sample": (_rows[:2] if _rows else []),
+            "diagnosis": (
+                "Query returned rows — price_paid_raw_2025 reachable on Hetzner" if _rows
+                else "Query returned 0 rows — check Hetzner connectivity or test postcode"
+            ),
+        }
+    except Exception as _e:
+        out["rpc"]["hetzner_comps"] = {
+            "test_postcode": "DL3 0PL", "latency_ms": round((time.time()-_t0)*1000,1),
+            "rows_returned": None, "sample": [], "error": str(_e),
+            "diagnosis": f"Hetzner probe threw exception: {_e}",
+        }
 
     return jsonify({"ok": True, "diag": out, "generated_at": now_iso()}), 200
 
@@ -11110,7 +11126,7 @@ def diag_deal_trace(deal_id: str):
     out["ceiling_trace"]["step_0_sold_comps"] = {
         "comp_count": len(comps), "usable_prices": len(_cprices), "value": _base, "fired": _base is not None,
         "failure_reason": None if _base else (
-            "soldComps empty — housing_comps_v1 returned 0 rows" if not comps else "no valid prices in comps"
+            "soldComps empty — get_housing_data (Hetzner) returned 0 rows" if not comps else "no valid prices in comps"
         ),
     }
 
@@ -11220,32 +11236,51 @@ def diag_deal_trace(deal_id: str):
         "failure_reason": None if _base else "All fallbacks exhausted — no base valuation",
     }
 
-    # ── LIVE COMPARABLES PROBE ────────────────────────────────────────────
+    # ── LIVE COMPARABLES PROBE (H1-HETZNER, 2026-06-26) ────────────────────
+    # Was: supabase.rpc(HOUSING_RPC_NAME, ...) → price_paid_geo matview →
+    # retired Supabase table. Repointed to the same Hetzner query
+    # get_housing_data actually uses, so this trace reflects real comp health.
     _pc = d.get("postcode") or ""
-    if supabase and _pc:
+    if _pc:
         _t0 = time.time()
         try:
-            _rr = supabase.rpc(HOUSING_RPC_NAME, {"in_postcode": _pc, "in_radius_miles": 3.0, "in_limit": 10}).execute()
-            _rows = _rr.data if hasattr(_rr, "data") and isinstance(_rr.data, list) else None
+            _probe_sql = """
+                WITH subject AS (
+                    SELECT lat, lng FROM public.nspl_postcodes
+                    WHERE pcd_nospace = %s LIMIT 1
+                )
+                SELECT p.date_of_transfer, p.price, p.property_type, p.postcode
+                FROM public.price_paid_raw_2025 p
+                JOIN public.nspl_postcodes n ON n.pcd_nospace = p.postcode_nospace
+                CROSS JOIN subject s
+                WHERE n.lat IS NOT NULL
+                  AND p.ppd_category_type != 'B'
+                  AND ST_DWithin(
+                        ST_MakePoint(s.lng, s.lat)::geography,
+                        ST_MakePoint(n.lng, n.lat)::geography,
+                        4828
+                      )
+                LIMIT 10;
+            """
+            _rows = data_query(_probe_sql, (re.sub(r"\s+", "", _pc.upper()),))
             _rprices = [safe_float(r.get("price")) for r in (_rows or []) if safe_float(r.get("price")) and safe_float(r.get("price")) > 5000]  # type: ignore
             out["comparables"] = {
-                "rpc": HOUSING_RPC_NAME, "postcode": _pc, "radius_miles": 3.0,
+                "source": "hetzner_direct", "postcode": _pc, "radius_miles": 3.0,
                 "latency_ms": round((time.time()-_t0)*1000,1),
-                "rows_returned": len(_rows) if _rows is not None else None,
+                "rows_returned": len(_rows) if isinstance(_rows, list) else None,
                 "prices_found": len(_rprices),
                 "median_price": sorted(_rprices)[len(_rprices)//2] if _rprices else None,
                 "avg_price": round(sum(_rprices)/len(_rprices)) if _rprices else None,
                 "sample": (_rows[:3] if _rows else []),
                 "diagnosis": (
                     f"{len(_rows)} rows — comparables available" if _rows
-                    else "0 rows — price_paid absent on Supabase" if _rows is not None
-                    else "unexpected result"
+                    else "0 rows — check Hetzner connectivity or genuinely sparse postcode"
                 ),
             }
         except Exception as _e:
-            out["comparables"] = {"rpc": HOUSING_RPC_NAME, "postcode": _pc, "error": str(_e)}
+            out["comparables"] = {"source": "hetzner_direct", "postcode": _pc, "error": str(_e)}
     else:
-        out["comparables"] = {"rpc": HOUSING_RPC_NAME, "error": "No postcode on deal or Supabase not available"}
+        out["comparables"] = {"source": "hetzner_direct", "error": "No postcode on deal"}
 
     # ── HPI BENCHMARKS: stored vs live ────────────────────────────────────
     _lad = str(area.get("area_code") or "").strip()
@@ -11300,8 +11335,8 @@ def diag_deal_trace(deal_id: str):
     # ── ARCHITECTURAL FINDINGS ─────────────────────────────────────────────
     findings = []
     if out["comparables"].get("rows_returned") == 0:
-        findings.append({"severity": "CRITICAL", "component": "housing_comps_v1",
-            "finding": "RPC returned 0 rows — price_paid_raw_2025 absent on Supabase",
+        findings.append({"severity": "CRITICAL", "component": "get_housing_data (Hetzner direct)",
+            "finding": "Hetzner comp query returned 0 rows for this postcode",
             "impact": "Ceiling Fallbacks 0+1 permanently fail. All comp-backed valuation impossible."})
     if not b_price.get("regional") and not b_price.get("national"):
         findings.append({"severity": "HIGH", "component": "inference.benchmarks.price",
