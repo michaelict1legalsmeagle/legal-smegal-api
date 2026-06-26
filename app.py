@@ -4768,6 +4768,20 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             )
             if not isinstance(rows, list):
                 rows = []
+            # H1-DATEFIX (2026-06-26): psycopg's dict_row returns native
+            # datetime.date objects for DATE columns. The old Supabase RPC
+            # went through PostgREST, which auto-serialises dates to ISO
+            # strings — direct Hetzner queries do not get that for free.
+            # Without this, area_data (which embeds these rows) fails
+            # JSON serialisation at the Supabase write with "Object of
+            # type date is not JSON serializable", silently corrupting
+            # every area_json save regardless of postcode. Confirmed via
+            # deals.area_json.fetch_error on a live failed deal.
+            for _r in rows:
+                if isinstance(_r, dict) and "date_of_transfer" in _r:
+                    _dt_val = _r["date_of_transfer"]
+                    if hasattr(_dt_val, "isoformat"):
+                        _r["date_of_transfer"] = _dt_val.isoformat()
             if rows:
                 break  # got real data — done, no need to retry
             if _rpc_attempts < _rpc_max_attempts:
@@ -4785,6 +4799,14 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _HETZNER_COMPS_SQL,
                 (_hetzner_pcd_nospace, min(r_miles * 1.5, 10.0) * 1609.344, _pt_param, _pt_param, 50),
             )
+            # H1-DATEFIX: same date_of_transfer serialisation fix as the
+            # main query loop above — this path also hits raw Hetzner rows.
+            if isinstance(_verify_rows, list):
+                for _r in _verify_rows:
+                    if isinstance(_r, dict) and "date_of_transfer" in _r:
+                        _dt_val = _r["date_of_transfer"]
+                        if hasattr(_dt_val, "isoformat"):
+                            _r["date_of_transfer"] = _dt_val.isoformat()
             if isinstance(_verify_rows, list) and _verify_rows:
                 app.logger.warning(
                     f"get_housing_data: VERIFICATION QUERY recovered "
