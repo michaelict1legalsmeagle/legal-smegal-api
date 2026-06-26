@@ -4720,6 +4720,12 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                     ST_MakePoint(n.lng, n.lat)::geography
                 )
             )::int AS meters,
+            (
+                ST_Distance(
+                    ST_MakePoint(s.lng, s.lat)::geography,
+                    ST_MakePoint(n.lng, n.lat)::geography
+                ) / 1609.344
+            ) AS miles,
             p.duration,
             p.ppd_category_type,
             p.old_new,
