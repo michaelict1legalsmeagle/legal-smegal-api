@@ -87,7 +87,16 @@ EXCLUDED_TYPES = (
 
 
 def fetch_supabase_register(supabase) -> list[dict]:
-    """Pull the full open, English, mainstream-adjacent school register."""
+    """Pull the full open, English, mainstream-adjacent school register.
+
+    H4-FIX (2026-06-27): first run of this script stopped after exactly 999
+    rows because the original loop treated "got fewer rows than page_size"
+    as "no more data" — but Supabase/PostgREST applies its own server-side
+    row cap per request (independent of the .range() bounds requested),
+    so a short page does NOT mean the table is exhausted. The only safe
+    stop condition is a genuinely EMPTY page. Confirmed bug: schools_clean_v2
+    has ~24,563 matching rows; first run produced only 999.
+    """
     print("Fetching schools_clean_v2 from Supabase (paginated)...")
     all_rows: list[dict] = []
     page_size = 1000
@@ -103,12 +112,11 @@ def fetch_supabase_register(supabase) -> list[dict]:
         )
         rows = res.data if hasattr(res, "data") else []
         if not rows:
-            break
+            break  # genuinely empty page — this IS the end of the data
         all_rows.extend(rows)
-        offset += page_size
+        offset += len(rows)  # advance by ACTUAL rows returned, not page_size —
+                              # a short page (server-side cap) is not the end
         print(f"  ...{len(all_rows)} rows so far")
-        if len(rows) < page_size:
-            break
     print(f"Fetched {len(all_rows)} rows from schools_clean_v2.")
     return all_rows
 
@@ -151,6 +159,22 @@ def main():
 
     with psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row) as conn:
         register_rows = fetch_supabase_register(supabase)
+
+        # H4-SANITY (2026-06-27): the audit confirmed ~24,563 rows match this
+        # filter. A first run silently produced only 999 due to a pagination
+        # bug (since fixed) and reported "DONE" without any warning. Refuse
+        # to proceed if the count is far below the audited expectation —
+        # better to stop loudly than build a table that's 96% incomplete.
+        EXPECTED_MIN_ROWS = 20000
+        if len(register_rows) < EXPECTED_MIN_ROWS:
+            print("=" * 70)
+            print(f"ABORTING: only fetched {len(register_rows)} rows from "
+                  f"schools_clean_v2, expected >= {EXPECTED_MIN_ROWS} "
+                  f"(audited count was ~24,563). This looks like a partial "
+                  f"fetch, not the real dataset. public.schools was NOT "
+                  f"created or modified.")
+            print("=" * 70)
+            sys.exit(1)
         ofsted_by_urn = fetch_hetzner_ofsted(conn)
 
         print("Geocoding register rows via nspl_postcodes (this may take a while)...")
