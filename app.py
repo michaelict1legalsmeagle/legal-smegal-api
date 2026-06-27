@@ -2932,8 +2932,14 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
         )
 
     # ── Hetzner path (primary) ────────────────────────────────────────────────
-    # schools_ofsted table on Hetzner: 9,781 rows, England only
-    # Columns: urn, school_name, postcode, ofsted_rating, school_type, phase, la_name
+    # H4-SCHOOLSMERGE (2026-06-27): public.schools is the unified, merged
+    # table built by build_schools_table.py — LEFT JOIN of the full open
+    # English school register (ex-Supabase schools_clean_v2) with Ofsted
+    # ratings (ex-Hetzner schools_ofsted), geocoded via nspl_postcodes.
+    # Replaces two previously-separate, schema-incomplete tables that the
+    # old code below incorrectly assumed were one combined source — see
+    # 2026-06-27 audit. Columns: urn, school_name, postcode, lat, lng,
+    # ofsted_rating, ofsted_label, phase, establishment_type, local_authority.
     try:
         lat_lng_rows = data_query(
             "SELECT lat, lng FROM public.nspl_postcodes WHERE pcd_nospace = %s LIMIT 1",
@@ -2949,20 +2955,21 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             school_rows = data_query(
                 """
                 SELECT s.urn, s.school_name, s.postcode, s.ofsted_rating,
-                       s.phase, s.school_type,
-                       s.la_name,
+                       s.ofsted_label, s.phase, s.establishment_type,
+                       s.local_authority,
                        ROUND(
                          ST_Distance(
-                           ST_MakePoint(n.lng, n.lat)::geography,
+                           ST_MakePoint(s.lng, s.lat)::geography,
                            ST_MakePoint(%s, %s)::geography
                          ) / 1609.34, 2
                        ) AS miles
-                FROM public.schools_ofsted s
-                JOIN public.nspl_postcodes n ON n.pcd_nospace = REPLACE(s.postcode, ' ', '')
-                WHERE ST_Distance(
-                    ST_MakePoint(n.lng, n.lat)::geography,
-                    ST_MakePoint(%s, %s)::geography
-                ) <= 4828
+                FROM public.schools s
+                WHERE s.lat IS NOT NULL AND s.lng IS NOT NULL
+                  AND ST_DWithin(
+                    ST_MakePoint(s.lng, s.lat)::geography,
+                    ST_MakePoint(%s, %s)::geography,
+                    4828
+                  )
                 ORDER BY miles ASC
                 LIMIT 10
                 """,
@@ -2970,22 +2977,21 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
             )
         else:
             school_rows = data_query(
-                """SELECT urn, school_name, postcode, ofsted_rating, phase, school_type, la_name
-                   FROM public.schools_ofsted
+                """SELECT urn, school_name, postcode, ofsted_rating, ofsted_label,
+                          phase, establishment_type, local_authority
+                   FROM public.schools
                    WHERE postcode ILIKE %s
                    LIMIT 10""",
                 (f"{district}%",)
             )
 
         if school_rows:
-            # Normalise numeric Ofsted codes to text — applies to both Hetzner and Supabase paths
-            _OFSTED_NORM = {"1": "Outstanding", "2": "Good",
-                            "3": "Requires Improvement", "4": "Inadequate"}
+            # ofsted_label already carries the text rating ("Outstanding" etc.)
+            # — no manual numeric->text mapping needed (confirmed against live
+            # data 2026-06-27: ofsted_rating/ofsted_label pairs are a fixed,
+            # exhaustive 1:1 map). ofsted_rating stays as the raw numeric code
+            # for any caller that wants it; ofsted_label is the display value.
             for _sr in school_rows:
-                _raw_rating = str(_sr.get("ofsted_rating") or "").strip()
-                if _raw_rating in _OFSTED_NORM:
-                    _sr["ofsted_rating"] = _OFSTED_NORM[_raw_rating]
-                # Sanitise school name — replace numeric URN with "School"
                 _sn = str(_sr.get("school_name") or "").strip()
                 if not _sn or _sn.isdigit():
                     _sr["school_name"] = "School"
@@ -2994,61 +3000,10 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
                 f"{len(school_rows)} schools within 3mi of {pc}.",
                 school_rows, sources, retrieved, 0.85,
             )
-            out["metrics"] = {"provider": "hetzner", "count": len(school_rows)}
+            out["metrics"] = {"provider": "hetzner_schools_merged", "count": len(school_rows)}
             return out
     except Exception as _se:
-        print(f"[WARN] Schools Hetzner query failed: {_se}")
-
-    # ── Supabase auto-fallback: schools_clean_v2 (no env var required) ──────
-    # schools_clean_v2 schema is unknown — SELECT * and map whatever columns exist
-    _OFSTED_CODE_MAP = {"1": "Outstanding", "2": "Good",
-                        "3": "Requires Improvement", "4": "Inadequate"}
-    if supabase:
-        # Always use SELECT * — the table schema may differ from expected columns
-        # (e.g. --schools job never run, or table created with different schema)
-        for _cols in [
-            "*",  # always try * first — handles any schema
-            "urn,school_name,postcode,ofsted_rating",
-            "urn,name,postcode,ofsted_rating",
-            "urn,postcode",
-        ]:
-            try:
-                _q = supabase.table("schools_clean_v2").select(_cols)
-                # Try postcode ilike first; fallback to postcode_district eq
-                try:
-                    res_sb = _q.ilike("postcode", f"{district}%").limit(SCHOOLS_MAX_RESULTS).execute()
-                except Exception:
-                    res_sb = supabase.table("schools_clean_v2").select(_cols).eq("postcode_district", district).limit(SCHOOLS_MAX_RESULTS).execute()
-                sb_rows = res_sb.data if hasattr(res_sb, "data") and isinstance(res_sb.data, list) else []
-                if not sb_rows:
-                    break  # Table empty — no point trying other column sets
-                for r in sb_rows:
-                    # Normalise name variants to school_name
-                    if "name" in r and "school_name" not in r:
-                        r["school_name"] = r["name"]
-                    elif "EstablishmentName" in r and "school_name" not in r:
-                        r["school_name"] = r["EstablishmentName"]
-                    # Use "School" not URN as name fallback — URNs are meaningless to investors
-                    _raw_name = r.get("school_name") or r.get("name") or r.get("EstablishmentName")
-                    if not _raw_name or str(_raw_name).strip().isdigit():
-                        r["school_name"] = "School"
-                    else:
-                        r["school_name"] = str(_raw_name).strip()
-                    r.setdefault("miles", None)
-                    # Normalise numeric Ofsted codes to text
-                    raw_r = str(r.get("ofsted_rating") or "").strip()
-                    if raw_r in _OFSTED_CODE_MAP:
-                        r["ofsted_rating"] = _OFSTED_CODE_MAP[raw_r]
-                sources_sb = [{"label": "Ofsted / DfE", "url": "https://reports.ofsted.gov.uk/"}]
-                out_sb = metric_ok(
-                    f"{len(sb_rows)} schools found for district {district}.",
-                    sb_rows, sources_sb, retrieved, SCHOOLS_CONFIDENCE_VALUE,
-                )
-                out_sb["metrics"] = {"provider": "supabase_schools_clean_v2", "district": district, "count": len(sb_rows)}
-                return out_sb
-            except Exception as _sb_se:
-                print(f"[WARN] Schools Supabase fallback ({_cols}): {_sb_se}")
-                continue
+        print(f"[WARN] Schools query (public.schools) failed: {_se}")
 
     if SCHOOLS_PROVIDER == "supabase":
         if not supabase:
