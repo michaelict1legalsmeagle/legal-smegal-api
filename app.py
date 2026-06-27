@@ -9558,6 +9558,7 @@ def save_area(deal_id: str):
 
     def _fetch_and_store():
         try:
+            _t_start = time.time()
             lsoa_gss, lsoa_meta = resolve_lsoa_gss_from_postcode(_postcode)
             lat       = safe_float((lsoa_meta or {}).get("lat"))
             lng       = safe_float((lsoa_meta or {}).get("lng"))
@@ -9568,26 +9569,42 @@ def save_area(deal_id: str):
             if lat is None or lng is None:
                 lat, lng, _ = geocode_postcode(_postcode)
 
+            # H2-TIMING (2026-06-27): instrumenting each call in the area-fetch
+            # chain to find which one(s) dominate total load time, before
+            # deciding whether/how to parallelise. Purely additive — logs
+            # only, no behaviour change. Remove once timing data is captured
+            # and the real fix (parallelise independent calls, or not) is built.
+            _timings = {"_lsoa_lookup": round(time.time() - _t_start, 2)}
+
+            def _timed(label, fn, *args, **kwargs):
+                _t0 = time.time()
+                _result = fn(*args, **kwargs)
+                _timings[label] = round(time.time() - _t0, 2)
+                return _result
+
             area_data = {
                 "postcode":     _postcode,
                 "lsoa_gss":     lsoa_gss,
                 "lat":          lat,
                 "lng":          lng,
                 "area_code":    area_code,
-                "housing":      get_housing_data(_postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp, subject_tenure_hint=_prop.get("tenure"), subject_address=_prop.get("address"), subject_internal_area=_subject_gia_listing or safe_float(_prop.get("internal_area"))),
-                "crime":        get_crime_data(lat, lng),
-                "transport":    get_transport_data(lat, lng),
-                "amenities":    get_amenities_data(lat, lng),
-                "schools":      get_schools_data(_postcode),
-                "broadband":    get_broadband_data(_postcode),
-                "gp":           get_gp_data(_postcode),
-                "flood":        get_flood_risk(lat, lng, _postcode),
-                "epc":          get_epc_data(_postcode),
-                "planning":     get_planning_data(lat, lng, _postcode),
-                "trends":       build_trends_from_uk_hpi(_postcode, area_code, 24),
+                "housing":      _timed("housing", get_housing_data, _postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp, subject_tenure_hint=_prop.get("tenure"), subject_address=_prop.get("address"), subject_internal_area=_subject_gia_listing or safe_float(_prop.get("internal_area"))),
+                "crime":        _timed("crime", get_crime_data, lat, lng),
+                "transport":    _timed("transport", get_transport_data, lat, lng),
+                "amenities":    _timed("amenities", get_amenities_data, lat, lng),
+                "schools":      _timed("schools", get_schools_data, _postcode),
+                "broadband":    _timed("broadband", get_broadband_data, _postcode),
+                "gp":           _timed("gp", get_gp_data, _postcode),
+                "flood":        _timed("flood", get_flood_risk, lat, lng, _postcode),
+                "epc":          _timed("epc", get_epc_data, _postcode),
+                "planning":     _timed("planning", get_planning_data, lat, lng, _postcode),
+                "trends":       _timed("trends", build_trends_from_uk_hpi, _postcode, area_code, 24),
                 "fetched_at":   now_iso(),
                 "fetch_status": "complete",
             }
+            _timings["_total"] = round(time.time() - _t_start, 2)
+            print(f"⏱️ [H2-TIMING] area-fetch breakdown for {_deal_id} ({_postcode}): {_timings}")
+
 
             # ── INFERENCE ENGINE ─────────────────────────────────
             inference_result = build_area_inference(area_data, _postcode)
