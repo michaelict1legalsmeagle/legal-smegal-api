@@ -69,10 +69,12 @@ DATA_DATABASE_URL = os.environ.get("DATA_DATABASE_URL")
 if not DATA_DATABASE_URL:
     raise RuntimeError("DATA_DATABASE_URL is required (Hetzner connection string).")
 
+# Matches the exact env var names app.py already uses (confirmed 2026-06-27):
+# SUPABASE_SERVICE_ROLE_KEY preferred, SUPABASE_KEY as fallback.
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-    raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY are required.")
+    raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) are required.")
 
 from supabase import create_client  # noqa: E402
 
