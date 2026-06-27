@@ -7034,12 +7034,20 @@ def upload_document():
     except Exception:
         return jsonify({"error": "Deal verification failed"}), 403
 
+    # H3-TIMING (2026-06-27): instrumenting each stage of document upload to
+    # measure where time actually goes (file read, extraction/OCR, type
+    # detection, storage, DB insert) before any redesign work. Purely
+    # additive — logs only, no behaviour change.
+    _t_upload_start = time.time()
+
     # Read file bytes — Flask has already enforced MAX_CONTENT_LENGTH above
     try:
+        _t0 = time.time()
         file_bytes = file.read()
         file_size = len(file_bytes)
         if not file_bytes.startswith(b"%PDF"):
             return jsonify({"error": "File does not appear to be a valid PDF"}), 400
+        _t_file_read = round(time.time() - _t0, 2)
     except Exception as e:
         app.logger.warning("File read failed: %s", e); return jsonify({"error": "File could not be read"}), 400
 
@@ -7050,32 +7058,41 @@ def upload_document():
 
     # Extract text — catch any OOM / crash gracefully
     try:
+        _t0 = time.time()
         extracted_text, page_count = extract_pdf_text(file_bytes)
+        _t_extract = round(time.time() - _t0, 2)
     except Exception as e:
         app.logger.warning(f"PDF extraction failed: {e} — storing without text")
         extracted_text, page_count = "", 0
+        _t_extract = round(time.time() - _t0, 2)
     extraction_status = "complete" if extracted_text else "empty"
 
     # Detect document type
+    _t0 = time.time()
     doc_type = detect_document_type(filename, extracted_text)
+    _t_classify = round(time.time() - _t0, 2)
 
     # Store in Supabase Storage — non-fatal if this fails
     storage_path = f"{request.user_id}/{deal_id}/{filename}"
     try:
+        _t0 = time.time()
         supabase.storage.from_("legal-packs").upload(
             path=storage_path,
             file=file_bytes,
             file_options={"content-type": "application/pdf", "upsert": "true"}
         )
+        _t_storage = round(time.time() - _t0, 2)
     except Exception as e:
         app.logger.warning(f"Storage upload failed: {e} — continuing without storage")
         storage_path = f"upload_failed/{filename}"
+        _t_storage = round(time.time() - _t0, 2)
 
     # Free memory before the DB write
     del file_bytes
 
     # Create document record in database
     try:
+        _t0 = time.time()
         doc_result = supabase.table("documents").insert({
             "deal_id":           deal_id,
             "user_id":           request.user_id,
@@ -7087,12 +7104,22 @@ def upload_document():
             "extracted_text":    extracted_text[:500000] if extracted_text else None,
             "extraction_status": extraction_status,
         }).execute()
+        _t_db_insert = round(time.time() - _t0, 2)
 
         document_id = doc_result.data[0]["id"]
+
+        _t_total = round(time.time() - _t_upload_start, 2)
+        print(
+            f"⏱️ [H3-TIMING] upload breakdown for {filename!r} "
+            f"({file_size} bytes, {page_count} pages, extraction={extraction_status}): "
+            f"file_read={_t_file_read}s extract={_t_extract}s classify={_t_classify}s "
+            f"storage={_t_storage}s db_insert={_t_db_insert}s TOTAL={_t_total}s"
+        )
 
         return jsonify({
             "ok":                True,
             "document_id":       document_id,
+
             "doc_type":          doc_type,
             "page_count":        page_count,
             "file_size_bytes":   file_size,
@@ -7830,8 +7857,11 @@ def analyse_deal(deal_id: str):
 
     # Fetch documents
     try:
+        _t_analyse_start = time.time()
+        _t0 = time.time()
         docs = supabase.table("documents")             .select("doc_type, file_name, extracted_text, page_count")             .eq("deal_id", deal_id)             .eq("user_id", request.user_id)             .execute()
         documents = docs.data or []
+        _t_fetch_docs = round(time.time() - _t0, 2)
     except Exception as e:
         app.logger.error("Could not fetch documents: %s", e, exc_info=True); return jsonify({"error": "Could not fetch documents"}), 500
 
@@ -7839,6 +7869,7 @@ def analyse_deal(deal_id: str):
         return jsonify({"error": "No documents found for this deal"}), 400
 
     # Build combined text
+    _t0 = time.time()
     try:
         from legal_analysis import _build_combined_text, DOC_TYPE_LABELS
         combined = _build_combined_text(documents)
@@ -7860,13 +7891,26 @@ def analyse_deal(deal_id: str):
         truncated = combined[:70000] + "\n\n[...truncated...]\n\n" + combined[-20000:]
     else:
         truncated = combined
+    _t_build_text = round(time.time() - _t0, 2)
 
     # Run LLM
     try:
+        _t0 = time.time()
         result = _llm_json_anthropic(
             system=FULL_ANALYSIS_SYSTEM,
             prompt="Analyse these auction documents and return the full analysis JSON:\n\n" + truncated,
             temperature=0.1,
+        )
+        _t_llm = round(time.time() - _t0, 2)
+        # H3-TIMING (2026-06-27): purely additive — logs only, no behaviour
+        # change. Measures the single full-analysis LLM call against
+        # document-fetch and text-assembly time, before any redesign work.
+        print(
+            f"⏱️ [H3-TIMING] analyse_deal breakdown for {deal_id} "
+            f"({len(documents)} docs, {len(combined)} combined chars, "
+            f"{len(truncated)} sent to LLM): fetch_docs={_t_fetch_docs}s "
+            f"build_text={_t_build_text}s llm_call={_t_llm}s "
+            f"TOTAL={round(time.time() - _t_analyse_start, 2)}s"
         )
     except Exception as e:
         app.logger.exception("Full analysis LLM failed")
