@@ -6958,7 +6958,31 @@ def upload_options():
 def upload_document():
     """Upload a PDF legal pack document.
     Multipart form: file (PDF), deal_id (required).
-    Returns: { document_id, doc_type, page_count, extraction_status }"""
+    Returns: { document_id, doc_type, page_count, extraction_status }
+
+    H4-ASYNC-OCR (2026-06-27): real H3-TIMING data from a 16-document live
+    upload showed OCR-bound documents (image-only PDFs routed to Document
+    AI's batchProcess flow, ~65-90s synchronous round-trip each) accounted
+    for 467 of 471.67 total seconds — 99.0% of all upload time — across
+    exactly 7 of 16 documents. The other 9 (fast pymupdf/pdfplumber path)
+    completed in under 1.2s each, totalling 4.6s combined. The fix is not
+    "make everything concurrent" or "make everything async" — it is to stop
+    blocking the HTTP response on the specific 99%-of-time operation while
+    leaving the already-fast 9-in-16 path untouched.
+
+    is_image_only_pdf() is itself fast (pure pymupdf, no network call), so
+    the OCR-needed decision is made inline. If OCR is needed, the document
+    row is inserted immediately with extraction_status='processing' and
+    extracted_text=None, the response returns right away, and the actual
+    Document AI call runs in a background daemon thread that PATCHes the
+    row to 'complete'/'empty' when done. Multiple documents' OCR calls can
+    now run concurrently by construction, because no request thread holds
+    them serialized anymore — concurrency is a consequence of removing the
+    block, not a separate mechanism. extraction_status already existed as
+    a column with 'complete'/'empty' values; 'processing' is the only
+    addition, and GET /api/documents/<deal_id> (already implemented below)
+    is what the frontend polls — no new endpoint needed.
+    """
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
 
@@ -6991,8 +7015,8 @@ def upload_document():
 
     # H3-TIMING (2026-06-27): instrumenting each stage of document upload to
     # measure where time actually goes (file read, extraction/OCR, type
-    # detection, storage, DB insert) before any redesign work. Purely
-    # additive — logs only, no behaviour change.
+    # detection, storage, DB insert) before any redesign work. Retained
+    # (still additive logging) after the H4-ASYNC-OCR split above.
     _t_upload_start = time.time()
 
     # Read file bytes — Flask has already enforced MAX_CONTENT_LENGTH above
@@ -7011,23 +7035,132 @@ def upload_document():
     if file_size > MAX_SIZE:
         return jsonify({"error": "File exceeds 20MB limit. Split your legal pack into smaller documents."}), 413
 
-    # Extract text — catch any OOM / crash gracefully
-    try:
-        _t0 = time.time()
-        extracted_text, page_count = extract_pdf_text(file_bytes)
-        _t_extract = round(time.time() - _t0, 2)
-    except Exception as e:
-        app.logger.warning(f"PDF extraction failed: {e} — storing without text")
-        extracted_text, page_count = "", 0
-        _t_extract = round(time.time() - _t0, 2)
-    extraction_status = "complete" if extracted_text else "empty"
-
-    # Detect document type
+    # ── H4-ASYNC-OCR: decide OCR-needed inline (fast, no network call) ──
+    # H4-OOM-SAFETY (2026-06-27): if is_image_only_pdf() itself throws, this
+    # MUST default to needs_ocr=True, not False. A prior incident (confirmed
+    # via direct memory measurement) showed a genuinely scanned 32-page PDF
+    # caused pdfplumber's double-pass retry to consume 1.29GB against this
+    # container's 512MB ceiling — an OOM crash, not a timeout. The fast path
+    # below has NO memory safeguard against that; only the OCR/background
+    # path does (Document AI, not local CPU/memory). Defaulting to False on
+    # a detection failure would route straight back into the exact mechanism
+    # that caused the original crash. Failing toward OCR is always the safe
+    # direction — OCR being slow or retried is recoverable; an OOM kill is not.
     _t0 = time.time()
-    doc_type = detect_document_type(filename, extracted_text)
-    _t_classify = round(time.time() - _t0, 2)
+    needs_ocr = True  # safe default — only set False on a CONFIRMED negative result
+    if docai_ocr is not None:
+        try:
+            needs_ocr = docai_ocr.is_image_only_pdf(file_bytes)
+        except Exception as e:
+            app.logger.warning(f"is_image_only_pdf check failed: {e} — "
+                                f"defaulting to needs_ocr=True (fail-safe; "
+                                f"see H4-OOM-SAFETY) rather than risking the "
+                                f"fast path's unguarded pdfplumber retry")
+            needs_ocr = True
+    else:
+        # H4-OOM-RISK-ACKNOWLEDGED (2026-06-27): docai_ocr module failed to
+        # import entirely (should not happen in normal operation — both
+        # google-cloud-documentai and google-cloud-storage are pinned in
+        # requirements.txt — but this branch exists as a defensive
+        # fallback for a broken deploy/dependency). In this specific case
+        # there is NO safe routing available: the background-OCR path
+        # cannot run without docai_ocr, and extract_pdf_text() itself
+        # falls through to the SAME unguarded pdfplumber double-pass retry
+        # either way (confirmed by direct code inspection — see the
+        # "Both extraction methods failed" fallback inside extract_pdf_text).
+        # This is a PRE-EXISTING risk this change does not worsen, but does
+        # not close either — if docai_ocr is genuinely unavailable AND a
+        # truly scanned, many-page PDF is uploaded, the OOM risk from the
+        # documented 2026-06-20 incident (1.29GB on a 32-page scan vs a
+        # 512MB ceiling) remains real. Logged loudly so this is never
+        # silently masked.
+        app.logger.error(
+            "docai_ocr module is unavailable — OCR fallback cannot run. "
+            "Scanned/image-only PDFs will fall through to pdfplumber's "
+            "double-pass retry with NO memory safeguard (see 2026-06-20 "
+            "OOM incident). This indicates a broken deploy/dependency, "
+            "not normal operation."
+        )
+        needs_ocr = False  # no OCR path exists to send it to either — see above
+    _t_classify_ocr_need = round(time.time() - _t0, 2)
 
-    # Store in Supabase Storage — non-fatal if this fails
+    if not needs_ocr:
+        # ── Fast path — UNCHANGED from before. Confirmed sub-second for
+        # 9 of 16 documents in the real test batch; no reason to make
+        # this path async. ──
+        try:
+            _t0 = time.time()
+            extracted_text, page_count = extract_pdf_text(file_bytes)
+            _t_extract = round(time.time() - _t0, 2)
+        except Exception as e:
+            app.logger.warning(f"PDF extraction failed: {e} — storing without text")
+            extracted_text, page_count = "", 0
+            _t_extract = round(time.time() - _t0, 2)
+        extraction_status = "complete" if extracted_text else "empty"
+
+        _t0 = time.time()
+        doc_type = detect_document_type(filename, extracted_text)
+        _t_classify = round(time.time() - _t0, 2)
+
+        storage_path = f"{request.user_id}/{deal_id}/{filename}"
+        try:
+            _t0 = time.time()
+            supabase.storage.from_("legal-packs").upload(
+                path=storage_path,
+                file=file_bytes,
+                file_options={"content-type": "application/pdf", "upsert": "true"}
+            )
+            _t_storage = round(time.time() - _t0, 2)
+        except Exception as e:
+            app.logger.warning(f"Storage upload failed: {e} — continuing without storage")
+            storage_path = f"upload_failed/{filename}"
+            _t_storage = round(time.time() - _t0, 2)
+
+        del file_bytes
+
+        try:
+            _t0 = time.time()
+            doc_result = supabase.table("documents").insert({
+                "deal_id":           deal_id,
+                "user_id":           request.user_id,
+                "doc_type":          doc_type,
+                "file_name":         filename,
+                "storage_path":      storage_path,
+                "file_size_bytes":   file_size,
+                "page_count":        page_count,
+                "extracted_text":    extracted_text[:500000] if extracted_text else None,
+                "extraction_status": extraction_status,
+            }).execute()
+            _t_db_insert = round(time.time() - _t0, 2)
+
+            document_id = doc_result.data[0]["id"]
+
+            _t_total = round(time.time() - _t_upload_start, 2)
+            print(
+                f"⏱️ [H3-TIMING] upload breakdown for {filename!r} "
+                f"({file_size} bytes, {page_count} pages, extraction={extraction_status}, ocr=no): "
+                f"file_read={_t_file_read}s classify_ocr_need={_t_classify_ocr_need}s "
+                f"extract={_t_extract}s classify={_t_classify}s "
+                f"storage={_t_storage}s db_insert={_t_db_insert}s TOTAL={_t_total}s"
+            )
+
+            return jsonify({
+                "ok":                True,
+                "document_id":       document_id,
+                "doc_type":          doc_type,
+                "page_count":        page_count,
+                "file_size_bytes":   file_size,
+                "extraction_status": extraction_status,
+                "has_text":          bool(extracted_text),
+            }), 201
+
+        except Exception as e:
+            app.logger.exception("document insert failed")
+            app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
+
+    # ── OCR-needed path — insert immediately as 'processing', return now,
+    # run the actual ~65-90s Document AI call in a background thread. ──
+    doc_type = detect_document_type(filename, "")  # filename-only detection — no text yet
     storage_path = f"{request.user_id}/{deal_id}/{filename}"
     try:
         _t0 = time.time()
@@ -7042,10 +7175,6 @@ def upload_document():
         storage_path = f"upload_failed/{filename}"
         _t_storage = round(time.time() - _t0, 2)
 
-    # Free memory before the DB write
-    del file_bytes
-
-    # Create document record in database
     try:
         _t0 = time.time()
         doc_result = supabase.table("documents").insert({
@@ -7055,36 +7184,121 @@ def upload_document():
             "file_name":         filename,
             "storage_path":      storage_path,
             "file_size_bytes":   file_size,
-            "page_count":        page_count,
-            "extracted_text":    extracted_text[:500000] if extracted_text else None,
-            "extraction_status": extraction_status,
+            "page_count":         0,
+            "extracted_text":    None,
+            "extraction_status": "processing",
         }).execute()
         _t_db_insert = round(time.time() - _t0, 2)
-
         document_id = doc_result.data[0]["id"]
-
-        _t_total = round(time.time() - _t_upload_start, 2)
-        print(
-            f"⏱️ [H3-TIMING] upload breakdown for {filename!r} "
-            f"({file_size} bytes, {page_count} pages, extraction={extraction_status}): "
-            f"file_read={_t_file_read}s extract={_t_extract}s classify={_t_classify}s "
-            f"storage={_t_storage}s db_insert={_t_db_insert}s TOTAL={_t_total}s"
-        )
-
-        return jsonify({
-            "ok":                True,
-            "document_id":       document_id,
-
-            "doc_type":          doc_type,
-            "page_count":        page_count,
-            "file_size_bytes":   file_size,
-            "extraction_status": extraction_status,
-            "has_text":          bool(extracted_text),
-        }), 201
-
     except Exception as e:
-        app.logger.exception("document insert failed")
+        app.logger.exception("document insert failed (OCR path)")
         app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
+
+    _t_total = round(time.time() - _t_upload_start, 2)
+    print(
+        f"⏱️ [H3-TIMING] upload breakdown for {filename!r} "
+        f"({file_size} bytes, extraction=processing, ocr=yes — backgrounded): "
+        f"file_read={_t_file_read}s classify_ocr_need={_t_classify_ocr_need}s "
+        f"storage={_t_storage}s db_insert={_t_db_insert}s "
+        f"REQUEST_TOTAL={_t_total}s (OCR continues in background)"
+    )
+
+    def _run_ocr_background(_file_bytes: bytes, _document_id: str, _filename: str):
+        _bg_t0 = time.time()
+        # H4-RETRY (2026-06-27): up to 3 attempts with backoff before giving
+        # up. docai_ocr.extract_text_via_docai() itself is completely
+        # unchanged (same Document AI call, same 90s internal ceiling per
+        # attempt, same accuracy) — this only adds resilience against a
+        # transient failure (network blip, quota hiccup) on attempt 1,
+        # which previously had zero retry and went straight to 'empty'.
+        # Bounded at 3 attempts so worst case is known (~3 x 90s ceiling +
+        # backoff, not unbounded retrying) rather than open-ended.
+        _MAX_ATTEMPTS = 3
+        _BACKOFF_SECONDS = [5, 15]  # between attempt 1->2 and 2->3
+        ocr_text = None
+        _last_error = None
+        for _attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                ocr_text = docai_ocr.extract_text_via_docai(_file_bytes)
+                _last_error = None
+                break
+            except Exception as e:
+                _last_error = e
+                app.logger.warning(
+                    f"Background OCR attempt {_attempt}/{_MAX_ATTEMPTS} failed "
+                    f"for {_filename!r} (document_id={_document_id}): {e}"
+                )
+                if _attempt < _MAX_ATTEMPTS:
+                    time.sleep(_BACKOFF_SECONDS[_attempt - 1])
+
+        if _last_error is not None:
+            # All attempts exhausted — degrade gracefully, same end state
+            # as the pre-retry behaviour, just reached only after genuinely
+            # trying multiple times rather than failing on the first blip.
+            app.logger.warning(
+                f"Background OCR exhausted all {_MAX_ATTEMPTS} attempts for "
+                f"{_filename!r} (document_id={_document_id}): {_last_error}"
+            )
+            try:
+                supabase.table("documents").update({
+                    "extraction_status": "empty",
+                }).eq("id", _document_id).execute()
+            except Exception as e2:
+                app.logger.warning(f"Failed to mark document {_document_id} "
+                                    f"as 'empty' after exhausted OCR retries: {e2}")
+            return
+
+        try:
+            _page_count = 0
+            try:
+                import fitz  # pymupdf — just for an accurate page count
+                _doc = fitz.open(stream=_file_bytes, filetype="pdf")
+                _page_count = len(_doc)
+                _doc.close()
+            except Exception:
+                pass
+            _status = "complete" if ocr_text.strip() else "empty"
+            _doc_type = detect_document_type(_filename, ocr_text) if ocr_text.strip() else None
+            _update = {
+                "extracted_text":    ocr_text[:500000] if ocr_text else None,
+                "extraction_status": _status,
+                "page_count":        _page_count,
+            }
+            if _doc_type:
+                _update["doc_type"] = _doc_type
+            supabase.table("documents").update(_update).eq("id", _document_id).execute()
+            print(
+                f"⏱️ [H3-TIMING] background OCR complete for {_filename!r} "
+                f"(document_id={_document_id}): status={_status} "
+                f"TOTAL={round(time.time() - _bg_t0, 2)}s"
+            )
+        except Exception as e:
+            app.logger.warning(f"Background OCR post-processing failed for "
+                                f"{_filename!r} (document_id={_document_id}): {e}")
+            try:
+                supabase.table("documents").update({
+                    "extraction_status": "empty",
+                }).eq("id", _document_id).execute()
+            except Exception as e2:
+                app.logger.warning(f"Failed to mark document {_document_id} "
+                                    f"as 'empty' after OCR post-processing failure: {e2}")
+
+    t = threading.Thread(
+        target=_run_ocr_background,
+        args=(file_bytes, document_id, filename),
+        daemon=True,
+    )
+    t.start()
+
+    return jsonify({
+        "ok":                True,
+        "document_id":       document_id,
+        "doc_type":          doc_type,
+        "page_count":        0,
+        "file_size_bytes":   file_size,
+        "extraction_status": "processing",
+        "has_text":          False,
+    }), 202
 
 
 @app.route("/api/documents/<deal_id>", methods=["GET"])
@@ -7225,6 +7439,19 @@ def summarise_deal(deal_id: str):
 
     if not documents:
         return jsonify({"error": "No documents found for this deal"}), 400
+
+    # H4-ASYNC-OCR (2026-06-27): same guard as analyse_deal — documents
+    # routed to background OCR (extraction_status='processing') haven't
+    # finished extraction yet. This is the endpoint the frontend's
+    # processing.html actually calls (runAnalysis() -> POST .../summarise),
+    # so the guard belongs here, not just on the separate analyse_deal
+    # endpoint. Frontend retries on 409 — see legalsmegal-processing.html.
+    _still_processing = [d.get("file_name") for d in documents if d.get("extraction_status") == "processing"]
+    if _still_processing:
+        return jsonify({
+            "error": "Some documents are still being processed (OCR in progress). Please try again shortly.",
+            "processing_files": _still_processing,
+        }), 409
 
     # Single combined LLM call — fast path
     try:
@@ -7814,7 +8041,7 @@ def analyse_deal(deal_id: str):
     try:
         _t_analyse_start = time.time()
         _t0 = time.time()
-        docs = supabase.table("documents")             .select("doc_type, file_name, extracted_text, page_count")             .eq("deal_id", deal_id)             .eq("user_id", request.user_id)             .execute()
+        docs = supabase.table("documents")             .select("doc_type, file_name, extracted_text, page_count, extraction_status")             .eq("deal_id", deal_id)             .eq("user_id", request.user_id)             .execute()
         documents = docs.data or []
         _t_fetch_docs = round(time.time() - _t0, 2)
     except Exception as e:
@@ -7822,6 +8049,20 @@ def analyse_deal(deal_id: str):
 
     if not documents:
         return jsonify({"error": "No documents found for this deal"}), 400
+
+    # H4-ASYNC-OCR (2026-06-27): documents routed to background OCR
+    # (extraction_status='processing') haven't finished extraction yet —
+    # without this guard, analysis would silently run on partial text the
+    # moment async OCR was introduced, which is worse than the old
+    # synchronous-but-slow behaviour it replaced. Caller should retry
+    # shortly; frontend already has GET /api/documents/<deal_id> to poll
+    # per-document status.
+    _still_processing = [d.get("file_name") for d in documents if d.get("extraction_status") == "processing"]
+    if _still_processing:
+        return jsonify({
+            "error": "Some documents are still being processed (OCR in progress). Please try again shortly.",
+            "processing_files": _still_processing,
+        }), 409
 
     # Build combined text
     _t0 = time.time()
