@@ -6468,124 +6468,54 @@ def detect_document_type(filename: str, text: str) -> str:
 def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     """Extract text from PDF bytes. Returns (text, page_count).
 
-    S-FIX2 (2026-06-28): the first version of this S-MIGRATE change routed
-    EVERY call through the Hetzner extraction service first, unconditionally.
-    That was over-scoped. The original danger (1.29GB pdfplumber double-pass
-    OOM, 2026-06-20) only ever applied to the rare case where a genuinely
-    scanned PDF got misclassified as needs_ocr=False and fell into this
-    function's old pdfplumber fallback. The common case -- a normal text
-    PDF where pymupdf succeeds immediately -- was already safe, fast, and
-    local; this function's own caller comment confirms it: "Fast path —
-    UNCHANGED from before. Confirmed sub-second for 9 of 16 documents...
-    no reason to make this path async." Routing that common case through a
-    synchronous Hetzner network call anyway turned a sub-second local
-    operation into a network-bound one, running directly inside the
-    gunicorn worker handling the HTTP request (this call site is NOT
-    backgrounded — see app.py's "fast path" comment above its call site).
-    With 2 sync workers total, that's a direct, plausible contributor to
-    both request queueing (manifesting as the CORS-looking failures seen
-    throughout 2026-06-28) and OOM (workers held open longer, increasing
-    overlap when multiple documents upload close together).
+    S-CLEANUP (2026-06-28): restored to the original architecture --
+    thread+timeout wrapper, pymupdf attempt, Document AI fallback for the
+    low-yield case -- after a same-day sequence of incremental patches
+    (Hetzner migration -> fast-path regression -> local-first fix ->
+    dropped-timeout fix) accumulated into something more complex than the
+    actual problem warranted. The real, confirmed root cause of every OOM
+    incident (2026-06-20 original; 2026-06-28 recurrences) was
+    is_image_only_pdf() in docai_ocr.py swallowing its own exceptions and
+    defaulting to the wrong (risky) direction -- fixed there, at the
+    source, earlier today. That fix removes the actual reason this
+    function ever needed a last-resort pdfplumber fallback: a correctly-
+    classified scan now reaches Document AI via the upload endpoint's own
+    async OCR path before this function is ever called on it at all.
 
-    Fixed: try the cheap local pymupdf pass first, exactly as before this
-    migration ever happened. Only fall through to Hetzner -- where the
-    full pymupdf -> Document AI -> pdfplumber pipeline runs safely on
-    Hetzner's RAM headroom -- for the low-yield/ambiguous case that was
-    the actual original danger. The common case now has IDENTICAL
-    performance characteristics to the pre-migration code: zero network
-    calls, zero added latency, zero regression.
+    pdfplumber's double-pass retry has been removed entirely, not migrated
+    anywhere -- it doesn't need a safer place to run, it needs to not run.
+    If pymupdf yields nothing and a document still somehow reaches this
+    function, Document AI is the existing, already-safe (cloud-side, no
+    local memory cost) fallback. If that also comes up empty, the document
+    is stored with extraction_status="empty" -- the same degrade-gracefully
+    outcome this system has always had for a genuinely text-free PDF, not
+    a new failure mode.
     """
-    page_count = 0
-    try:
-        import fitz  # pymupdf
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        page_count = len(doc)
-        text_parts = []
-        for page in doc:
-            text = page.get_text("text", flags=fitz.TEXT_PRESERVE_WHITESPACE)
-            if text and text.strip():
-                text_parts.append(text)
-        doc.close()
-        combined = "\n\n".join(text_parts)
-        if combined.strip() and len(combined) > page_count * 50:
-            app.logger.info(f"extract_pdf_text: pymupdf (local, fast path) extracted {len(combined):,} chars from {page_count} pages")
-            return combined, page_count
-        app.logger.info(f"extract_pdf_text: pymupdf low yield ({len(combined)} chars) -- ambiguous/possibly-scanned, escalating to Hetzner")
-    except ImportError:
-        app.logger.info("extract_pdf_text: pymupdf not available -- escalating to Hetzner")
-    except Exception as e:
-        app.logger.warning(f"extract_pdf_text: pymupdf failed: {e} -- escalating to Hetzner")
-
-    # ── Only reached for the rare ambiguous/low-yield case. This is the
-    # ONLY path that should ever cost a network round-trip. ──
-    ext_url    = (os.getenv("EXTRACTION_SERVICE_URL") or "").strip()
-    ext_secret = (os.getenv("EXTRACTION_SECRET") or "").strip()
-
-    if ext_url:
-        try:
-            import base64
-            resp = requests.post(
-                ext_url,
-                headers={"X-Extraction-Secret": ext_secret, "Content-Type": "application/json"},
-                json={"file_b64": base64.b64encode(file_bytes).decode()},
-                timeout=110,
-            )
-            if resp.status_code == 200:
-                d = resp.json()
-                app.logger.info(
-                    f"extract_pdf_text: Hetzner returned {len(d.get('text',''))} chars "
-                    f"via method={d.get('method')}"
-                )
-                return d.get("text", ""), d.get("pages", page_count)
-            app.logger.warning(
-                f"extract_pdf_text: Hetzner extraction {resp.status_code}: "
-                f"{resp.text[:200]} -- falling back to safe local degrade"
-            )
-        except Exception as e:
-            app.logger.warning(
-                f"extract_pdf_text: Hetzner extraction call failed: {e} -- "
-                f"falling back to safe local degrade"
-            )
-    else:
-        app.logger.warning(
-            "extract_pdf_text: EXTRACTION_SERVICE_URL not configured -- "
-            "using safe local degrade (Document AI only)"
-        )
-
-    result = {"text": "", "pages": page_count}
-    t = threading.Thread(
-        target=_safe_local_fallback_extraction_impl,
-        args=(file_bytes, result),
-        daemon=True,
-    )
+    result = {"text": "", "pages": 0}
+    t = threading.Thread(target=_extract_pdf_text_impl, args=(file_bytes, result), daemon=True)
     t.start()
     t.join(timeout=_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS)
     if t.is_alive():
         app.logger.warning(
-            f"extract_pdf_text: local fallback TIMEOUT after "
-            f"{_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS}s -- returning empty text"
+            f"extract_pdf_text: TIMEOUT after {_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS}s "
+            f"(thread abandoned as daemon) -- returning empty text"
         )
-        return "", page_count
+        return "", 0
     return result["text"], result["pages"]
 
 
 _EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 100
-# Kept from the pre-migration version -- still needed for the local fallback
-# path's single pymupdf pass, which has no internal timeout and has hung
-# before on pathological PDFs (confirmed live, 2026-06-20, 17+ seconds).
-# Not needed for the Hetzner call itself, which has its own requests.timeout.
+# pymupdf/fitz has no internal timeout and has hung before on a pathological
+# PDF (confirmed live, 2026-06-20, 17+ seconds, container restarted) -- this
+# is why the whole extraction attempt runs in a daemon thread with a bound,
+# not called directly.
 
 
-def _safe_local_fallback_extraction_impl(file_bytes: bytes, _result: dict) -> None:
-    """The ONLY extraction allowed to run locally on Render. Single cheap
-    pymupdf pass, then Document AI directly if that's insufficient. Does
-    NOT include pdfplumber's double-pass retry -- that code does not exist
-    in this function. See extract_pdf_text() docstring for why.
-
-    Only reached if EXTRACTION_SERVICE_URL is unset or the Hetzner call
-    failed -- existing degrade-gracefully behaviour for empty text already
-    applies (extraction_status="empty", doc_type via filename fallback,
-    upload still succeeds)."""
+def _extract_pdf_text_impl(file_bytes: bytes, _result: dict) -> None:
+    """pymupdf first, Document AI directly if that's insufficient. No
+    pdfplumber double-pass retry -- removed 2026-06-28, see
+    extract_pdf_text()'s docstring for why it's no longer needed rather
+    than just guarded against more carefully."""
     page_count = 0
     try:
         import fitz  # pymupdf
@@ -6599,15 +6529,15 @@ def _safe_local_fallback_extraction_impl(file_bytes: bytes, _result: dict) -> No
         doc.close()
         combined = "\n\n".join(text_parts)
         if combined.strip() and len(combined) > page_count * 50:
-            app.logger.info(f"local fallback: pymupdf extracted {len(combined):,} chars from {page_count} pages")
+            app.logger.info(f"extract_pdf_text: pymupdf extracted {len(combined):,} chars from {page_count} pages")
             _result["text"]  = combined
             _result["pages"] = page_count
             return
-        app.logger.info(f"local fallback: pymupdf low yield ({len(combined)} chars) -- trying Document AI directly")
+        app.logger.info(f"extract_pdf_text: pymupdf low yield ({len(combined)} chars) -- trying Document AI")
     except ImportError:
-        app.logger.info("local fallback: pymupdf not available -- trying Document AI directly")
+        app.logger.info("extract_pdf_text: pymupdf not available -- trying Document AI")
     except Exception as e:
-        app.logger.warning(f"local fallback: pymupdf failed: {e} -- trying Document AI directly")
+        app.logger.warning(f"extract_pdf_text: pymupdf failed: {e} -- trying Document AI")
 
     if docai_ocr is not None:
         try:
@@ -6616,14 +6546,13 @@ def _safe_local_fallback_extraction_impl(file_bytes: bytes, _result: dict) -> No
                 _result["text"]  = ocr_text
                 _result["pages"] = page_count
                 return
-            app.logger.warning("local fallback: Document AI OCR returned no text")
+            app.logger.warning("extract_pdf_text: Document AI OCR returned no text")
         except Exception as e:
-            app.logger.warning(f"local fallback: Document AI OCR failed: {e}")
+            app.logger.warning(f"extract_pdf_text: Document AI OCR failed: {e}")
 
     app.logger.warning(
-        "local fallback: all safe methods exhausted (Hetzner unreachable, "
-        "pymupdf insufficient, Document AI unavailable/failed) -- "
-        "returning empty text rather than risking pdfplumber's retry loop locally"
+        "extract_pdf_text: pymupdf insufficient and Document AI "
+        "unavailable/failed -- returning empty text"
     )
     _result["text"]  = ""
     _result["pages"] = page_count
@@ -7043,12 +6972,18 @@ def upload_document():
     # MUST default to needs_ocr=True, not False. A prior incident (confirmed
     # via direct memory measurement) showed a genuinely scanned 32-page PDF
     # caused pdfplumber's double-pass retry to consume 1.29GB against this
-    # container's 512MB ceiling — an OOM crash, not a timeout. The fast path
-    # below has NO memory safeguard against that; only the OCR/background
-    # path does (Document AI, not local CPU/memory). Defaulting to False on
-    # a detection failure would route straight back into the exact mechanism
-    # that caused the original crash. Failing toward OCR is always the safe
-    # direction — OCR being slow or retried is recoverable; an OOM kill is not.
+    # container's 512MB ceiling — an OOM crash, not a timeout. Defaulting to
+    # False on a detection failure would route straight back toward that
+    # mechanism. Failing toward OCR is always the safe direction.
+    #
+    # S-CLEANUP (2026-06-28): is_image_only_pdf() itself now re-raises
+    # instead of swallowing its own exceptions (fixed at the source in
+    # docai_ocr.py earlier today) -- this except block can now actually
+    # catch what it was always meant to catch. A separate thread+timeout
+    # wrapper was added here mid-incident today and is removed again: this
+    # call only checks page block types (no full extraction), was never
+    # implicated in any confirmed hang, and the original architecture
+    # never wrapped it. Restored to match.
     _t0 = time.time()
     needs_ocr = True  # safe default — only set False on a CONFIRMED negative result
     if docai_ocr is not None:
@@ -7057,8 +6992,7 @@ def upload_document():
         except Exception as e:
             app.logger.warning(f"is_image_only_pdf check failed: {e} — "
                                 f"defaulting to needs_ocr=True (fail-safe; "
-                                f"see H4-OOM-SAFETY) rather than risking the "
-                                f"fast path's unguarded pdfplumber retry")
+                                f"see H4-OOM-SAFETY)")
             needs_ocr = True
     else:
         # H4-OOM-RISK-ACKNOWLEDGED (2026-06-27): docai_ocr module failed to
