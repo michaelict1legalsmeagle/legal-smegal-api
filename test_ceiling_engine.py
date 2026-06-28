@@ -426,14 +426,52 @@ def test_uncertainty_band_deterministic():
     band1  = _uncertainty_band(1, [])
     assert band1 == 0.13, f"1 comp, no caps → 0.13; got {band1}"
 
-    # capped at 0.20
+    # capped at 0.20 -- using the real `category` field, not synthetic
+    # reason strings. (Prior version of this test used reason strings like
+    # "legal_pack_gaps" that happened to contain the literal substring the
+    # old code checked for -- but the REAL cap sites never wrote that exact
+    # substring, see test_uncertainty_band_category_golden below.)
     band_hi = _uncertainty_band(0, [
-        {"reason": "tenure_uncertainty"},
-        {"reason": "lease_uncertainty"},
-        {"reason": "legal_pack_gaps"},
-        {"reason": "evidence_quality"},
+        {"category": "tenure"},
+        {"category": "lease"},
+        {"category": "evidence_tier"},
     ])
-    assert band_hi <= 0.20
+    assert band_hi == 0.20, f"0 comps + tenure + lease + evidence_tier → clamp at 0.20; got {band_hi}"
+
+
+def test_uncertainty_band_category_golden():
+    """
+    S-FIX (2026-06-28) regression anchor: _uncertainty_band moved from
+    substring-matching cap['reason'] prose to switching on an explicit
+    cap['category'] field. These values are golden -- captured from the
+    live function BEFORE the refactor, against the real reason strings
+    every call site actually writes -- and must not change without a
+    deliberate decision, not an accidental refactor side-effect.
+
+    Confirmed at refactor time: 'unquantified_risk' and 'condition_risk'
+    currently add 0.0, NOT because that's clearly correct, but because the
+    pre-refactor reason text used "legal-pack" / "legal pack" (hyphen /
+    space), never the literal substring "legal_pack" the old code checked
+    for -- so they were silently inert even though their names suggest they
+    were meant to add uncertainty. Preserved as historical behaviour here.
+    If this ever changes, it must be a deliberate edit to this test, not a
+    silent side-effect of something else.
+    """
+    golden = {
+        "comp_count":        0.05,  # base only -- comp count already handled via valid_count
+        "tenure":            0.09,  # 0.05 + 0.04
+        "lease":             0.10,  # 0.05 + 0.05
+        "unquantified_risk": 0.05,  # 0.05 + 0.0 -- inert, see docstring
+        "condition_risk":    0.05,  # 0.05 + 0.0 -- inert, see docstring
+        "evidence_tier":     0.09,  # 0.05 + 0.04
+    }
+    for category, expected in golden.items():
+        actual = _uncertainty_band(5, [{"category": category}])
+        assert actual == expected, f"category={category!r}: expected {expected}, got {actual}"
+
+    # All six together at valid_count=1 -> clamps at the 0.20 ceiling
+    all_caps = [{"category": c} for c in golden]
+    assert _uncertainty_band(1, all_caps) == 0.20
 
 
 def test_distance_score_deterministic():

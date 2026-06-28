@@ -10,6 +10,7 @@ import random
 import csv
 import logging
 import threading
+import multiprocessing as mp
 import uuid
 
 # S29 — Root logger configuration. Without this, neither app.logger (Flask's
@@ -4624,18 +4625,18 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
     lim = max(1, min(int(lim), HOUSING_MAX_LIMIT))
     r_miles = max(0.25, min(float(r_miles), 10.0))
 
-    if HOUSING_PROVIDER != "supabase_rpc":
+    if HOUSING_PROVIDER not in ("supabase_rpc", "hetzner_direct"):
         return metric_missing_provider(
-            "Housing provider not configured. Set HOUSING_PROVIDER=supabase_rpc.",
+            "Housing provider not configured. Set HOUSING_PROVIDER=hetzner_direct.",
             sources,
             retrieved,
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
         )
 
-    if not supabase:
+    if not DATA_DATABASE_URL:
         return metric_unavailable(
-            "Housing provider set to supabase_rpc but Supabase is not configured on server.",
-            [{"label": "Supabase", "url": "https://supabase.com/"}],
+            "Housing provider configured but Hetzner DATA_DATABASE_URL is not set on server.",
+            [{"label": "Hetzner data DB", "url": "https://159.69.27.104/"}],
             retrieved,
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
         )
@@ -6470,49 +6471,87 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
 
     Strategy:
     1. pymupdf (fitz) — best on complex layouts, tables, multi-column
-    2. pdfplumber — fallback, good on standard text PDFs
+    2. Document AI OCR — only if pymupdf yields nothing AND the PDF is
+       confirmed image-only (no text layer at all anywhere)
     3. Empty string — if both fail (scanned/image PDFs)
 
-    Checks text density per page — if very low, likely scanned.
+    S-CLEANUP (2026-06-28): pdfplumber's double-pass retry has been
+    removed entirely, not migrated anywhere -- it doesn't need a safer
+    place to run, it needs to not run. On a genuinely scanned PDF it has
+    no more chance of extracting text than pymupdf does, but it WILL
+    burn ~30-40MB of memory per page trying — on a 32-page document that
+    crosses this container's 512MB ceiling. This was the confirmed root
+    cause of the original 2026-06-20 OOM incident. Document AI is the
+    existing, already-safe (cloud-side, no local memory cost) fallback
+    for that exact case.
 
-    S32 — Hard timeout, same pattern as guest_routes.py's _extract_text.
-    pymupdf/pdfplumber have no internal timeout and can hang indefinitely on
-    certain malformed/pathological PDFs. Observed live on 2026-06-20: a
-    pymupdf low-yield fallback into pdfplumber hung for 17+ seconds and the
-    container restarted — worse than the guest pipeline's worker-timeout
-    failure, because this took the whole instance down, not just one worker.
-    Runs the real extraction (_extract_pdf_text_impl) in a daemon thread with
-    a join timeout; if it doesn't finish in time, gives up and returns empty
-    text rather than hanging/crashing. The existing call site already treats
-    empty extracted_text as a valid, non-fatal outcome (extraction_status
-    becomes "empty", doc_type falls back via detect_document_type on
-    filename alone, upload still succeeds) — so this degrades exactly the
-    same way a genuinely scanned/image PDF already does today.
+    H-KILL (2026-06-29): the real extraction work runs in a separate
+    CHILD PROCESS (not a thread) with a hard timeout. Previously this
+    ran in a daemon thread with `t.join(timeout=...)` — but Python
+    cannot force-terminate a thread. If pymupdf hung on a pathological
+    PDF (no internal timeout of its own — observed live 2026-06-20, a
+    low-yield pymupdf call hanging 17+ seconds), the outer wrapper gave
+    up *waiting*, returned empty text, and moved on — but the hung
+    thread kept running in the background, in the same worker process,
+    holding the full file_bytes and whatever pymupdf/MuPDF allocated at
+    the C level, for as long as it took to either finish or never
+    finish. No single request ever errored from this. Across a
+    multi-hour session with many uploads, each hang left one more
+    orphaned thread running — this is the confirmed mechanism behind
+    every "Instance failed" event recorded on 2026-06-28/29, matching
+    the gradual-climb-then-crash shape on Render's own memory graph,
+    present identically in every code version deployed that day,
+    including states with none of that day's other changes.
+
+    A process can be forcibly terminated (SIGTERM, then SIGKILL if
+    needed) regardless of what it's doing internally — the kernel
+    reclaims it outright, unlike a thread. This also closes a second,
+    separate risk for free: if pymupdf ever segfaults on a malformed
+    PDF (a real, known risk in native PDF-parsing libraries), only the
+    child process dies — the gunicorn worker itself is unaffected. Under
+    the old thread-based design, a native crash in the extraction call
+    would have taken the entire worker process down with it.
     """
-    result = {"text": "", "pages": 0}
-    t = threading.Thread(
-        target=_extract_pdf_text_impl,
-        args=(file_bytes, result),
-        daemon=True,
-    )
-    t.start()
-    t.join(timeout=_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS)
-    if t.is_alive():
-        # Extraction is still running in the background thread (daemon, so
-        # it will not block process/worker shutdown). Give up waiting and
-        # return empty text so this request can complete normally instead
-        # of hanging the worker / risking another container restart.
+    ctx = mp.get_context("fork")
+    q = ctx.Queue()
+    p = ctx.Process(target=_extract_pdf_text_worker, args=(file_bytes, q), daemon=True)
+    p.start()
+    p.join(timeout=_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS)
+
+    if p.is_alive():
         app.logger.warning(
             f"extract_pdf_text: TIMEOUT after {_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS}s "
-            f"— returning empty text, doc will fall through to scanned-PDF handling."
+            f"— terminating extraction process (genuinely hung, not just slow)."
+        )
+        p.terminate()
+        p.join(timeout=5)
+        if p.is_alive():
+            app.logger.warning(
+                "extract_pdf_text: process did not respond to SIGTERM "
+                "within 5s — sending SIGKILL."
+            )
+            p.kill()
+            p.join(timeout=5)
+        return "", 0
+
+    try:
+        return q.get_nowait()
+    except Exception:
+        # Process exited (e.g. a native crash/segfault in pymupdf) without
+        # ever putting a result on the queue. Degrade the same way a
+        # genuinely unreadable PDF already does, rather than raising here
+        # — the gunicorn worker itself was never at risk either way.
+        app.logger.warning(
+            "extract_pdf_text: worker process exited without a result "
+            "(likely a native crash in the extraction library) — "
+            "returning empty text."
         )
         return "", 0
-    return result["text"], result["pages"]
 
 
 _EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 100
 # S33 — raised from 25s. The previous value was sized only for local
-# pymupdf/pdfplumber hangs. Now that image-only PDFs route to Document AI's
+# pymupdf hangs. Now that image-only PDFs route to Document AI's
 # batchProcess OCR flow (docai_ocr.py, internal ceiling 90s — a network
 # round-trip: upload to GCS, batch job, poll, download results), the outer
 # timeout must comfortably exceed that internal one. 25s would cut off an
@@ -6522,12 +6561,15 @@ _EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 100
 # worker timeout (180s, see gunicorn.conf.py) can absorb.
 
 
-def _extract_pdf_text_impl(file_bytes: bytes, _result: dict) -> None:
-    """The actual extraction work, unchanged from the original function body.
-    Runs inside a daemon thread — see extract_pdf_text() above for the
-    timeout wrapper. Writes into _result instead of returning, since a
-    thread's return value isn't otherwise retrievable."""
-    # ── Attempt 1: pymupdf ──
+def _extract_pdf_text_worker(file_bytes: bytes, _q) -> None:
+    """Runs in a separate child process — see extract_pdf_text() above for
+    the timeout/kill-switch wrapper. pymupdf first, Document AI directly
+    if that's insufficient. No pdfplumber double-pass retry (removed
+    2026-06-28, S-CLEANUP — see extract_pdf_text()'s docstring).
+
+    Uses the module-level `docai_ocr` global directly rather than
+    re-importing — this process was created via fork(), so it already
+    has its own copy of everything the parent had already imported."""
     page_count = 0
     try:
         import fitz  # pymupdf
@@ -6540,91 +6582,30 @@ def _extract_pdf_text_impl(file_bytes: bytes, _result: dict) -> None:
                 text_parts.append(text)
         doc.close()
         combined = "\n\n".join(text_parts)
-        # Check text density — if meaningful text extracted, use it
         if combined.strip() and len(combined) > page_count * 50:
-            app.logger.info(f"pymupdf extracted {len(combined):,} chars from {page_count} pages")
-            _result["text"]  = combined
-            _result["pages"] = page_count
+            print(f"⏱️ [extract_pdf_text] pymupdf extracted {len(combined):,} chars from {page_count} pages")
+            _q.put((combined, page_count))
             return
-        app.logger.info(f"pymupdf low yield ({len(combined)} chars) — trying pdfplumber")
+        print(f"⏱️ [extract_pdf_text] pymupdf low yield ({len(combined)} chars) -- trying Document AI")
     except ImportError:
-        app.logger.info("pymupdf not available — trying pdfplumber")
+        print("⏱️ [extract_pdf_text] pymupdf not available -- trying Document AI")
     except Exception as e:
-        app.logger.warning(f"pymupdf failed: {e} — trying pdfplumber")
+        print(f"⏱️ [extract_pdf_text] pymupdf failed: {e} -- trying Document AI")
 
-    # ── S33 — Image-only PDF circuit breaker ──
-    # Before falling into pdfplumber's double-pass retry loop, check
-    # whether this PDF actually has any text layer at all. If pymupdf
-    # found zero text-type blocks across every page (confirmed via
-    # page.get_text('dict') block types — 0 = text, 1 = image), this is a
-    # genuinely scanned/flattened document, not a font-encoding quirk.
-    # pdfplumber has no more chance of extracting text from a JPEG than
-    # pymupdf does, but it WILL burn ~30-40MB of memory per page trying —
-    # on a 32-page document that crosses this container's 512MB ceiling
-    # at roughly the same moment the 25s timeout would otherwise fire,
-    # a race the timeout can lose once real process overhead is added.
-    # Route straight to Document AI OCR instead — buyer-liability
-    # documents like Local Authority Searches must be read, not skipped.
     if docai_ocr is not None:
         try:
             if docai_ocr.is_image_only_pdf(file_bytes):
-                app.logger.info(
-                    "extract_pdf_text: detected image-only PDF (no text "
-                    "blocks found) — routing to Document AI OCR instead "
-                    "of pdfplumber retry loop"
-                )
+                print("⏱️ [extract_pdf_text] detected image-only PDF -- routing to Document AI OCR")
                 ocr_text = docai_ocr.extract_text_via_docai(file_bytes)
                 if ocr_text.strip():
-                    _result["text"]  = ocr_text
-                    _result["pages"] = page_count
+                    _q.put((ocr_text, page_count))
                     return
-                app.logger.warning(
-                    "extract_pdf_text: Document AI OCR returned no text — "
-                    "falling through to scanned-PDF handling"
-                )
-                _result["text"]  = ""
-                _result["pages"] = page_count
-                return
+                print("⏱️ [extract_pdf_text] Document AI OCR returned no text")
         except Exception as e:
-            app.logger.warning(
-                f"extract_pdf_text: Document AI OCR failed ({e}) — "
-                f"falling through to pdfplumber as last resort"
-            )
-            # Deliberately falls through to the pdfplumber attempt below
-            # rather than returning empty here — if OCR itself is down
-            # (credentials, quota, network), pdfplumber is still worth a
-            # try in case this document isn't actually image-only after
-            # all (is_image_only_pdf already returned True, but err on
-            # the side of attempting extraction rather than giving up).
+            print(f"⏱️ [extract_pdf_text] Document AI OCR failed: {e}")
 
-    # ── Attempt 2: pdfplumber ──
-    if pdfplumber is not None:
-        try:
-            text_parts = []
-            page_count = 0
-            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-                page_count = len(pdf.pages)
-                for page in pdf.pages:
-                    # Try standard extraction first
-                    page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
-                    if not page_text:
-                        # Try with looser tolerances for complex layouts
-                        page_text = page.extract_text(x_tolerance=8, y_tolerance=8)
-                    if page_text and page_text.strip():
-                        text_parts.append(page_text)
-            combined = "\n\n".join(text_parts)
-            if combined.strip():
-                app.logger.info(f"pdfplumber extracted {len(combined):,} chars from {page_count} pages")
-                _result["text"]  = combined
-                _result["pages"] = page_count
-                return
-        except Exception as e:
-            app.logger.warning(f"pdfplumber failed: {e}")
-
-    # ── Both failed — likely scanned PDF ──
-    app.logger.warning("Both extraction methods failed — PDF may be scanned/image-based")
-    _result["text"]  = ""
-    _result["pages"] = page_count
+    print("⏱️ [extract_pdf_text] pymupdf insufficient and Document AI unavailable/failed -- returning empty text")
+    _q.put(("", page_count))
 
 
 
