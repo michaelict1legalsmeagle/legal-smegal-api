@@ -128,33 +128,26 @@ def is_image_only_pdf(file_bytes: bytes) -> bool:
     OCR instead of ever entering the pdfplumber double-pass retry loop —
     see the module docstring for why that distinction matters for the
     512MB OOM issue.
-
-    S-FIX (2026-06-28): previously caught its own internal exceptions and
-    returned False -- the RISKY direction (routes to the unguarded
-    pdfplumber retry loop) -- which silently defeated every caller's
-    documented fail-safe of "default to needs_ocr=True if this raises".
-    No caller could ever receive that exception, because this function
-    never let it leave. Fixed by re-raising instead: a detection failure
-    is genuinely uncertain, not a confident negative, and the caller is
-    where the safe-default decision belongs -- not buried in a swallowed
-    exception here. Callers MUST wrap this in their own try/except and
-    default to the safe (OCR) direction on failure; app.py's upload
-    endpoint already does this correctly (H4-OOM-SAFETY) and was simply
-    never able to exercise that path until now.
     """
-    import fitz  # pymupdf
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
     try:
-        for page in doc:
-            d = page.get_text("dict")
-            if any(b.get("type") == 0 for b in d.get("blocks", [])):
-                # Found at least one real text block somewhere — this
-                # is not a pure scanned document, so let the normal
-                # pymupdf/pdfplumber flow continue to handle it.
-                return False
-        return True
-    finally:
-        doc.close()
+        import fitz  # pymupdf
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        try:
+            for page in doc:
+                d = page.get_text("dict")
+                if any(b.get("type") == 0 for b in d.get("blocks", [])):
+                    # Found at least one real text block somewhere — this
+                    # is not a pure scanned document, so let the normal
+                    # pymupdf/pdfplumber flow continue to handle it.
+                    return False
+            return True
+        finally:
+            doc.close()
+    except Exception as e:
+        logger.warning(f"is_image_only_pdf: detection failed ({e}) — "
+                        f"assuming not image-only, falling through to "
+                        f"normal extraction path")
+        return False
 
 
 def extract_text_via_docai(file_bytes: bytes) -> str:
