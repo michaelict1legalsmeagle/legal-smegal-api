@@ -1079,7 +1079,7 @@ _TIME_COST_LOOKUP = (
     (('forfeiture', 'breach of lease'), (1, 30), (500, 2000),
      'Forfeiture/breach handling: remedy the breach (cost = the specific remedy) and/or apply for relief from forfeiture (County Court). Solicitor cost for relief typically low thousands. LOW confidence — quantum is breach-specific.',
      'MAJOR PENDING LEGAL CHANGE — the draft Commonhold and Leasehold Reform Bill (27 Jan 2026) proposes to ABOLISH forfeiture, replacing it with a proportionate enforcement scheme (GOV.UK; CMS; Hogan Lovells). Not yet in force, but the current forfeiture threat may diminish.'),
-    (('sitting tenant', 'tenant in occupation', 'occupier remains', 'no vacant possession', 'not vacant possession', 'regulated tenancy', 'section 8 ground', 'section 21 notice', 'ast expiry', 'assured tenancy'), (90, 182), (404, 2000),
+    (('sitting tenant', 'tenant in occupation', 'occupier remains', 'occupier in possession', 'tenant remains in', 'regulated tenancy', 'section 8 ground', 'section 21 notice', 'ast expiry', 'assured tenancy'), (90, 182), (404, 2000),
      "Possession with a tenant in occupation: from 1 May 2026 a Section 8 ground is required (Section 21 abolished). Notice-court-bailiff typically 3-6 months; court/warrant fees (£404 historic accelerated; £148 warrant, GOV.UK) + solicitor fees + lost rent. Source: GOV.UK Renters' Rights Act 2025 guidance; MHCLG Policy Paper (13 Nov 2025). HIGH on process, MEDIUM on total cost.",
      "MAJOR CHANGE — the Renters' Rights Bill received Royal Assent 27 October 2025; tenancy reforms commenced 1 May 2026, abolishing Section 21, last date to issue on a pre-commencement s.21 notice 31 July 2026. Section 8 sale/move-in grounds need 4 months' notice and cannot be used in the first 12 months. Almost every eviction now needs a hearing — court-backlog risk can push the timeline well beyond 6 months. A regulated (pre-1989) tenancy is a permanent value discount, not a clearable cost."),
     (("buyer's premium", 'buyers premium', 'buyer premium', "buyer's fee", 'reservation fee', 'non-refundable deposit', "buyer's administration"), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
@@ -1162,7 +1162,7 @@ _TIME_COST_LOOKUP = (
     (('designated primarily residential', 'primarily residential', 'h14/h17', 'h14', 'h17'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
      'Confirmed/neutral: a residential planning designation is the expected, normal position for a home — not a defect or a cost. Noted for completeness.',
      None),
-    (('furniture and effects may remain', 'furniture/effects may remain', 'furniture and effects', 'effects may remain'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
+    (('furniture and effects may remain', 'furniture/effects may remain', 'furniture and effects', 'effects may remain', 'furniture/fittings may remain', 'furniture/fittings', 'fittings may remain', 'furniture may remain'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
      'Neutral: the seller noting that furniture/effects may remain is not grounds to delay completion and carries no buyer cost — at most the buyer arranges removal of any unwanted items (a personal/logistics cost, not a legal defect). Not a sitting-tenant or possession issue.',
      None),
     (('21-day completion', '21 day completion', 'non-standard 21-day', '21-day completion period'), (21, 21), TIME_COST_NO_RESOLUTION,
@@ -1192,7 +1192,7 @@ _TIME_COST_LOOKUP = (
     (('special conditions of sale not present', 'special conditions not present', 'special conditions missing'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
      "Request-it — no resolution cost, but a genuine gap to close BEFORE bidding. The Special Conditions of Sale govern the auction contract (deposit, completion period, costs, extra obligations) and must be obtained and read; bidding without them is bidding blind. Handling = request from the auctioneer/seller's solicitor at no charge.",
      None),
-    (('conveyance document incomplete', 'lease document incomplete', 'transfer document incomplete', 'document incomplete', 'incomplete without preceding'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+    (('conveyance document incomplete', 'lease document incomplete', 'transfer document incomplete', 'incomplete transfer document', 'incomplete conveyance', 'incomplete lease document', 'document incomplete', 'incomplete without preceding', 'transferee name blank', 'name blank in tr1', 'blank in tr1', 'consideration amount blank', 'tr1 form', 'blank in transfer'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
      "Request-it — generally no resolution cost. An incomplete/abbreviated conveyance, lease or transfer in the pack should be completed by obtaining the full official copy from HM Land Registry (a few pounds per document) or the missing pages from the seller's solicitor. Handling = request the complete document; only an unregistered lost deed needing reconstitution is more involved (and is a separate, rarer case).",
      None),
     (('overhanging structure', 'overhang', 'eavesdrop', 'trespass to air', 'encroachment over neighbour'), (0, 1), (50, 300),
@@ -1213,6 +1213,38 @@ _TIME_COST_LOOKUP = (
     (('no buildings insurance details', 'buildings insurance details', 'no buildings insurance'), (1, 7), (150, 600),
      'Missing buildings insurance details: for a freehold, the buyer simply arranges their own buildings policy (~£150-600/yr typical, property-dependent), in force from exchange. For a leasehold, the freeholder/managing agent insures and the details should be requested via the management pack. MEDIUM confidence — premium varies with property and rebuild cost.',
      "On a leasehold, 'no details provided' is a request-it gap (chase the managing agent), not a cost the buyer bears directly — the premium is recovered through the service charge. On a freehold, arranging cover from exchange is the action; being uninsured in the exchange-to-completion gap is the real risk (see 'risk from exchange')."),
+    # S33-LIVE-DEAL (2026-06-28): two entries from live deal e541a62e.
+    (('deemed to have full', 'deemed knowledge', 'deemed to have knowledge',
+      'full planning knowledge', 'planning history unknown — buyer deemed',
+      'buyer deemed', 'deemed full knowledge'),
+     TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'No resolution cost — a deemed-knowledge clause shifts the onus onto the '
+     'buyer (the contract treats you as knowing the planning/title position '
+     'whether or not you actually checked). There is nothing to "clear": the '
+     'handling is to do the due diligence yourself BEFORE bidding (planning '
+     'register check, searches), since you cannot rely on the seller having '
+     'disclosed it. The cost is your own pre-bid diligence time, not a fix to '
+     'a defect. Same family as the seller-silence / no-enquiries flags.',
+     None),
+    (('title covers three properties', 'part-title', 'part title risk',
+      'multiple properties one title', 'title covers multiple',
+      'transfer of part', 'title split', 'split the title', 'part-title risk'),
+     (20, 56), (200, 1000),
+     'Part-title / title-split (transfer of part): where one registered title '
+     'covers multiple properties and you may be buying only part, a transfer '
+     'of part / title split is needed. Solicitor conveyancing £100-500 + Land '
+     'Registry registration fee £20-125 + ~£8 ID check + £3 official copy; '
+     'total commonly up to ~£1,000, simpler garden-style splits ~a couple of '
+     'hundred pounds (SAM Conveyancing; Checkatrade; Propertyze, 2026). '
+     'Land Registry turnaround ~4-8 weeks for electronic transfers (Property '
+     'Passport, 2026). MEDIUM confidence — cost scales with complexity.',
+     'This prices the PROCESS, not the tax: splitting a title can create new '
+     'value and trigger Stamp Duty Land Tax, and possibly CGT on a transfer '
+     'of equity — confirm with an accountant/solicitor (Propertyze; SAM '
+     'Conveyancing). Also confirm whether a split is actually required: if '
+     'the buyer intends to hold all parts, a single title with one mortgage '
+     'may avoid an unnecessary SDLT charge. The figure assumes a genuine '
+     'split is needed.'),
     (("nationally significant", "nsip"), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
      "Risk-awareness flag — no standard resolution. NSIP proximity is not a "
      "clearable title/search defect: major infrastructure is consented via a "
