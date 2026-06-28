@@ -1485,12 +1485,27 @@ def _uncertainty_band(valid_count: int, caps: list[dict]) -> float:
         u += 0.08
     elif valid_count <= 4:
         u += 0.03
+    # S-FIX (2026-06-28): category-keyed, not substring-matched against the
+    # human-readable `reason` prose (was: "tenure"/"lease"/"legal_pack"/
+    # "evidence" in r). Increments below are golden-tested to reproduce the
+    # prior implementation's output exactly -- including that
+    # "unquantified_risk" and "condition_risk" currently add 0.0. Their old
+    # reason text used "legal-pack" / "legal pack", never the literal
+    # substring "legal_pack" the old code checked for, so those two caps
+    # were silently contributing nothing despite apparently being designed
+    # to. Preserved as-is here rather than silently corrected -- flagged
+    # separately as its own decision, since turning it on changes real
+    # confidence labels on real deals.
+    INCREMENTS = {
+        "tenure":           0.04,
+        "lease":            0.05,
+        "evidence_tier":    0.04,
+        "comp_count":       0.0,
+        "unquantified_risk":0.0,   # see note above -- was inert before too
+        "condition_risk":   0.0,   # see note above -- was inert before too
+    }
     for cap in caps:
-        r = cap.get("reason", "")
-        if "tenure" in r:    u += 0.04
-        if "lease" in r:     u += 0.05
-        if "legal_pack" in r:u += 0.04
-        if "evidence" in r:  u += 0.04
+        u += INCREMENTS.get(cap.get("category"), 0.0)
     return max(UNCERTAINTY_CAP_LO, min(UNCERTAINTY_CAP_HI, round(u, 4)))
 
 # =============================================================================
@@ -2001,27 +2016,27 @@ def _calculate_confidence(
 
     if n < 3:
         if conf > CAP_COMPS_LT_3:
-            caps.append({"cap": CAP_COMPS_LT_3, "reason": "valid_comparable_count < 3"})
+            caps.append({"cap": CAP_COMPS_LT_3, "category": "comp_count", "reason": "valid_comparable_count < 3"})
             conf = min(conf, CAP_COMPS_LT_3)
 
     if n == 0:
         if conf > CAP_NO_VALID_COMPS:
-            caps.append({"cap": CAP_NO_VALID_COMPS, "reason": "no valid 0.5-mile comps"})
+            caps.append({"cap": CAP_NO_VALID_COMPS, "category": "comp_count", "reason": "no valid 0.5-mile comps"})
             conf = min(conf, CAP_NO_VALID_COMPS)
 
     if tenure_unknown:
         if conf > CAP_TENURE_UNRESOLVED:
-            caps.append({"cap": CAP_TENURE_UNRESOLVED, "reason": "tenure unresolved and material"})
+            caps.append({"cap": CAP_TENURE_UNRESOLVED, "category": "tenure", "reason": "tenure unresolved and material"})
             conf = min(conf, CAP_TENURE_UNRESOLVED)
 
     if leasehold_material and lease_unknown:
         if conf > CAP_LEASE_MISSING:
-            caps.append({"cap": CAP_LEASE_MISSING, "reason": "lease length missing for leasehold"})
+            caps.append({"cap": CAP_LEASE_MISSING, "category": "lease", "reason": "lease length missing for leasehold"})
             conf = min(conf, CAP_LEASE_MISSING)
 
     if short_lease_no_band:
         if conf > CAP_SHORT_LEASE_NO_BAND:
-            caps.append({"cap": CAP_SHORT_LEASE_NO_BAND, "reason": "subject lease < 80 and no same-band lease comps"})
+            caps.append({"cap": CAP_SHORT_LEASE_NO_BAND, "category": "lease", "reason": "subject lease < 80 and no same-band lease comps"})
             conf = min(conf, CAP_SHORT_LEASE_NO_BAND)
 
     # S33-STEP4a: scan the already-extracted flags array for condition/
@@ -2039,13 +2054,14 @@ def _calculate_confidence(
                        for r in included_risks)
     if unquantified:
         if conf > CAP_UNQUANTIFIED_RISKS:
-            caps.append({"cap": CAP_UNQUANTIFIED_RISKS, "reason": "material unquantified legal-pack value risks"})
+            caps.append({"cap": CAP_UNQUANTIFIED_RISKS, "category": "unquantified_risk", "reason": "material unquantified legal-pack value risks"})
             conf = min(conf, CAP_UNQUANTIFIED_RISKS)
 
     if condition_risk_flags:
         if conf > CAP_CONDITION_RISK_SIGNALS:
             caps.append({
                 "cap": CAP_CONDITION_RISK_SIGNALS,
+                "category": "condition_risk",
                 "reason": (
                     f"legal pack contains {len(condition_risk_flags)} condition/distress "
                     f"risk signal(s) (e.g. no-enquiries clause, extended probate "
@@ -2063,6 +2079,7 @@ def _calculate_confidence(
         if conf > CAP_CATEGORY_A_ONLY:
             caps.append({
                 "cap": CAP_CATEGORY_A_ONLY,
+                "category": "evidence_tier",
                 "reason": (
                     "evidence_tier=ppd_category_a_open_market — no distressed-sale "
                     "or auction comparables found; this is the weakest available "
@@ -2136,18 +2153,31 @@ def risk_routing_coverage(risks: list[dict]) -> dict:
 def _legal_pack_adjustment_factor(risks: list[dict]) -> float:
     """
     legal_pack_value_risk_adjustment_factor = product(1 - value_adjustment_i)
-    Total reduction capped at MAX_TOTAL_VALUE_RISK_ADJ.
+    across ALL active risks, unconditionally.
+
+    S-FIX (2026-06-28): previously used a running additive sum of the inputs
+    to decide when to stop multiplying ("if running_sum > 0.35: break"). That
+    mixed two different units -- an additive gate checked against a
+    multiplicative output -- and meant whichever risks happened to be listed
+    last (an artifact of LLM extraction order, not severity or significance)
+    were silently dropped from the calculation entirely, with no record of
+    having been excluded. Verified on a real deal (39 Main Street,
+    Marston Trussell): 21 active risks, additive sum 67.5%, but the old logic
+    only ever multiplied in the first 11 before breaking -- the other 10,
+    including "No Mining/Ground Stability Search" (0.06) and "No Seller's
+    Enquiries TA6/CPSE" (0.05), never contributed at all.
+
+    Fix: multiply every active risk's fraction in unconditionally, then cap
+    the *result* (1 - factor, the actual reduction) at MAX_TOTAL_VALUE_RISK_ADJ
+    via a floor clamp on factor. This is order-independent by construction
+    (multiplication commutes) and no risk is ever excluded from the product --
+    only the final total is capped, which is what "35% cap" is supposed to mean.
     """
     factor = 1.0
-    total_reduction = 0.0
     for r in risks:
         adj = r.get("value_adjustment", 0.0)
         if adj <= 0:
             continue
-        total_reduction += adj
-        if total_reduction > MAX_TOTAL_VALUE_RISK_ADJ:
-            # Hard cap: do not apply further
-            break
         factor *= (1.0 - adj)
     return round(max(1.0 - MAX_TOTAL_VALUE_RISK_ADJ, factor), 6)
 
@@ -3150,7 +3180,12 @@ def ensure_ceiling_owned_objects(
                         "method":           "property_value_risk_adjustment_only",
                         "adjustment_factor": 1.0, "adjusted_value": None, "risks": [],
                     },
-                    "confidence": _legacy.get("confidence") or {"final": 0.45, "label": "Low confidence"},
+                    "confidence": (
+                        _legacy.get("confidence")
+                        if isinstance(_legacy.get("confidence"), dict)
+                        else {"final": _legacy.get("confidence") if isinstance(_legacy.get("confidence"), (int, float)) else 0.45,
+                              "label": "Low confidence", "_legacy_scalar_normalised": True}
+                    ),
                     "audit": {
                         "source_decision":            _src_decision,
                         "sold_comps_count":           len(_sold_comps),
