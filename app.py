@@ -6468,31 +6468,56 @@ def detect_document_type(filename: str, text: str) -> str:
 def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     """Extract text from PDF bytes. Returns (text, page_count).
 
-    S-MIGRATE (2026-06-28): the actual extraction pipeline (pymupdf ->
-    Document AI OCR -> pdfplumber double-pass fallback) now runs on the
-    Hetzner extraction microservice, not locally on Render. This mirrors
-    the existing PDF-generation migration (guest_routes.py:_generate_pdf_bytes)
-    for the same underlying reason: Render's 512MB container OOM-crashed on
-    a real document (Lot_112_Local_Authority_Search.pdf, 32 pages) when
-    pdfplumber's double-pass retry consumed 1.29GB. A same-day repeat
-    incident (2026-06-28, two separate Render "Ran out of memory" events)
-    showed the routing logic meant to prevent that reaching pdfplumber
-    (is_image_only_pdf circuit breaker) had its own bug -- it swallowed
-    internal exceptions and returned the RISKY default instead of the
-    documented safe one. Rather than patch that guard again, the dangerous
-    code has been removed from Render's binary entirely; see
-    extraction_service_hetzner.py for the full history and the fixed logic,
-    now running where a 1.3GB worst case doesn't take the process down.
+    S-FIX2 (2026-06-28): the first version of this S-MIGRATE change routed
+    EVERY call through the Hetzner extraction service first, unconditionally.
+    That was over-scoped. The original danger (1.29GB pdfplumber double-pass
+    OOM, 2026-06-20) only ever applied to the rare case where a genuinely
+    scanned PDF got misclassified as needs_ocr=False and fell into this
+    function's old pdfplumber fallback. The common case -- a normal text
+    PDF where pymupdf succeeds immediately -- was already safe, fast, and
+    local; this function's own caller comment confirms it: "Fast path —
+    UNCHANGED from before. Confirmed sub-second for 9 of 16 documents...
+    no reason to make this path async." Routing that common case through a
+    synchronous Hetzner network call anyway turned a sub-second local
+    operation into a network-bound one, running directly inside the
+    gunicorn worker handling the HTTP request (this call site is NOT
+    backgrounded — see app.py's "fast path" comment above its call site).
+    With 2 sync workers total, that's a direct, plausible contributor to
+    both request queueing (manifesting as the CORS-looking failures seen
+    throughout 2026-06-28) and OOM (workers held open longer, increasing
+    overlap when multiple documents upload close together).
 
-    If the Hetzner service is unreachable, _safe_local_fallback_extraction
-    below is structurally incapable of running pdfplumber's retry loop --
-    it isn't guarded against more carefully, it doesn't exist in this
-    function anymore. Worst case on Hetzner being down: a single cheap
-    pymupdf pass, then Document AI directly, then empty text -- the same
-    non-fatal degrade-gracefully outcome a genuinely scanned PDF already
-    produces today (extraction_status becomes "empty", doc_type falls back
-    via detect_document_type on filename alone, upload still succeeds).
+    Fixed: try the cheap local pymupdf pass first, exactly as before this
+    migration ever happened. Only fall through to Hetzner -- where the
+    full pymupdf -> Document AI -> pdfplumber pipeline runs safely on
+    Hetzner's RAM headroom -- for the low-yield/ambiguous case that was
+    the actual original danger. The common case now has IDENTICAL
+    performance characteristics to the pre-migration code: zero network
+    calls, zero added latency, zero regression.
     """
+    page_count = 0
+    try:
+        import fitz  # pymupdf
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        page_count = len(doc)
+        text_parts = []
+        for page in doc:
+            text = page.get_text("text", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+            if text and text.strip():
+                text_parts.append(text)
+        doc.close()
+        combined = "\n\n".join(text_parts)
+        if combined.strip() and len(combined) > page_count * 50:
+            app.logger.info(f"extract_pdf_text: pymupdf (local, fast path) extracted {len(combined):,} chars from {page_count} pages")
+            return combined, page_count
+        app.logger.info(f"extract_pdf_text: pymupdf low yield ({len(combined)} chars) -- ambiguous/possibly-scanned, escalating to Hetzner")
+    except ImportError:
+        app.logger.info("extract_pdf_text: pymupdf not available -- escalating to Hetzner")
+    except Exception as e:
+        app.logger.warning(f"extract_pdf_text: pymupdf failed: {e} -- escalating to Hetzner")
+
+    # ── Only reached for the rare ambiguous/low-yield case. This is the
+    # ONLY path that should ever cost a network round-trip. ──
     ext_url    = (os.getenv("EXTRACTION_SERVICE_URL") or "").strip()
     ext_secret = (os.getenv("EXTRACTION_SECRET") or "").strip()
 
@@ -6503,7 +6528,7 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
                 ext_url,
                 headers={"X-Extraction-Secret": ext_secret, "Content-Type": "application/json"},
                 json={"file_b64": base64.b64encode(file_bytes).decode()},
-                timeout=110,  # Hetzner's own OCR path can take up to ~100s; leave headroom
+                timeout=110,
             )
             if resp.status_code == 200:
                 d = resp.json()
@@ -6511,7 +6536,7 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
                     f"extract_pdf_text: Hetzner returned {len(d.get('text',''))} chars "
                     f"via method={d.get('method')}"
                 )
-                return d.get("text", ""), d.get("pages", 0)
+                return d.get("text", ""), d.get("pages", page_count)
             app.logger.warning(
                 f"extract_pdf_text: Hetzner extraction {resp.status_code}: "
                 f"{resp.text[:200]} -- falling back to safe local degrade"
@@ -6524,10 +6549,10 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     else:
         app.logger.warning(
             "extract_pdf_text: EXTRACTION_SERVICE_URL not configured -- "
-            "using safe local degrade (pymupdf single-pass + Document AI only)"
+            "using safe local degrade (Document AI only)"
         )
 
-    result = {"text": "", "pages": 0}
+    result = {"text": "", "pages": page_count}
     t = threading.Thread(
         target=_safe_local_fallback_extraction_impl,
         args=(file_bytes, result),
@@ -6540,7 +6565,7 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
             f"extract_pdf_text: local fallback TIMEOUT after "
             f"{_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS}s -- returning empty text"
         )
-        return "", 0
+        return "", page_count
     return result["text"], result["pages"]
 
 
