@@ -3150,7 +3150,12 @@ def ensure_ceiling_owned_objects(
                         "method":           "property_value_risk_adjustment_only",
                         "adjustment_factor": 1.0, "adjusted_value": None, "risks": [],
                     },
-                    "confidence": _legacy.get("confidence") or {"final": 0.45, "label": "Low confidence"},
+                    "confidence": (
+                        _legacy.get("confidence")
+                        if isinstance(_legacy.get("confidence"), dict)
+                        else {"final": _legacy.get("confidence") if isinstance(_legacy.get("confidence"), (int, float)) else 0.45,
+                              "label": "Low confidence", "_legacy_scalar_normalised": True}
+                    ),
                     "audit": {
                         "source_decision":            _src_decision,
                         "sold_comps_count":           len(_sold_comps),
