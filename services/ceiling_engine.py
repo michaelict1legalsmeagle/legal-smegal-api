@@ -697,6 +697,16 @@ TIME_COST_NO_RESOLUTION = "NO_RESOLUTION"  # not a clearable defect — a disclo
 #   path (e.g. NSIP proximity). Distinct from UNRESEARCHED: the absence of a figure
 #   is the RESEARCHED answer here, not a gap. Carries a fixed disclosure message in
 #   `methodology`; the frontend renders that instead of Time/Cost rows.
+TIME_COST_CONFIRMED = "CONFIRMED"  # S33-CONFIRMED (2026-06-27): a POSITIVE or
+#   neutral finding — the flag confirms something is fine / clean / already in
+#   order (e.g. "Freehold Title Absolute — No Mortgage Registered", "No Disputes
+#   Declared", "Vacant Possession Confirmed"). Cost 0 / time 0 — there is
+#   genuinely nothing to do. Distinct from NO_RESOLUTION (which is a CAUTION the
+#   buyer must accept and which renders amber): CONFIRMED is reassurance and must
+#   render neutral/positive, never as a warning. Per the product principle that a
+#   positive finding should read as common-sense reassurance, not an unresearched
+#   gap or a risk. Carries its (brief) confirming reason in `methodology`.
+
 
 # S33-TIME-COST-INDICATIVE (2026-06-22): two SRA-bar gaps closed here.
 # (1) Every entry now carries an explicit `methodology` string — the
@@ -723,9 +733,24 @@ _TIME_COST_LOOKUP = (
     (("environmental search",), (1, 3), (35, 60),
      "LegalSmegal Risk-Pricing Engine report, 2026: standard search-provider turnaround.",
      None),
-    (("mining", "ground stability"), (1, 14), (35, 55),
-     "LegalSmegal Risk-Pricing Engine report, 2026: CON29M fee, bundled into standard search turnaround.",
-     None),
+    # S33-RESEARCH-COVERAGE-v2 (2026-06-27): upgraded from a generic
+    # internal-citation stub to named-source data. Markers cover coal
+    # mining, CON29M, and generic ground-stability — coal-specific phrasings
+    # ("coal mining", "coal authority", "con29m", "mining report") resolve
+    # here rather than to a separate duplicate entry.
+    (("mining", "coal mining", "coal authority", "con29m", "mining report",
+      "ground stability"), (0, 1), (30, 150),
+     "Coal mining search (CON29M) £30-66 inc VAT, returned ~2 working hours; "
+     "interpretive report £147.83 +VAT (Mining Remediation Authority "
+     "[formerly Coal Authority]; SAM Conveyancing; Severn Trent Searches; "
+     "Local Conveyancing Direct). HIGH confidence on search cost.",
+     "Critically: the Mining Remediation Authority FUNDS remedial work for "
+     "properties damaged by past coal mining — the homeowner does not pay "
+     "for the structural fix, and insurance covering emergency repairs is "
+     "reimbursed. The search cost prices DETECTION; detection here does not "
+     "imply a large remediation bill falls on the buyer. Non-coal ground "
+     "stability (clay/subsidence) is a separate report (£100s) with "
+     "property-specific remediation that is not in this range."),
     (("chancel repair",), (0, 1), (20, 30),
      "LegalSmegal Risk-Pricing Engine report, 2026: indemnity route, typically issued within 24h, often skipping the search entirely.",
      None),
@@ -742,15 +767,34 @@ _TIME_COST_LOOKUP = (
      "appears to conflict with HMPE status, interpreting whether the covenant "
      "survives adoption is a solicitor-review item (case-by-case), not covered "
      "by the search fee."),
-    (("common drains",), (2, 5), (500, 1500),
-     "Solicitor review of scope/enforceability of a positive drains-maintenance "
-     "contribution covenant. £500-1,500 +VAT for a discrete written "
-     "enforceability opinion (Go Legal; Lawhive). Routine flagging is usually "
-     "absorbed in the standard conveyancing fee. MEDIUM confidence.",
-     "Indemnity insurance does NOT fit here: this is a positive ongoing "
-     "obligation to pay a maintenance share, not a one-off breach risk, so a "
-     "policy would not cover the actual works (HomeOwners Alliance; Timms "
-     "Solicitors). Treated as solicitor-review only."),
+    # S33-RESEARCH-COVERAGE (2026-06-27): markers widened from "common drains"
+    # only — confirmed via real flag-title audit (100 flags, 4 deals) that the
+    # LLM extraction produces phrasings like "Boundary Wall Maintenance
+    # Covenant — Personal Obligation" that describe the SAME underlying
+    # problem (a positive/personal covenant to maintain a shared physical
+    # feature) but matched none of the prior markers — same brittleness
+    # pattern as the documented "refuses to answer" gap. Not new research:
+    # personal/positive maintenance covenants (drains, boundary walls, shared
+    # fences, access ways) are legally identical in the relevant respect —
+    # the burden does not run with freehold land at common law (Law
+    # Commission research briefing CBP-8560, 5 May 2026; LexisNexis
+    # "Positive covenant" glossary) — so indemnity insurance does not fit
+    # any of them, and solicitor-review of enforceability is the correct
+    # route for all.
+    (("common drains", "personal obligation", "positive covenant",
+      "boundary wall maintenance", "maintenance covenant"), (2, 5), (500, 1500),
+     "Solicitor review of scope/enforceability of a positive maintenance "
+     "covenant (drains, boundary wall, shared fence, or similar physical "
+     "feature). £500-1,500 +VAT for a discrete written enforceability "
+     "opinion (Go Legal; Lawhive). Routine flagging is usually absorbed in "
+     "the standard conveyancing fee. MEDIUM confidence.",
+     "Indemnity insurance does NOT fit here: a positive covenant is a "
+     "personal/ongoing obligation to actively do something (pay, maintain, "
+     "repair), not a one-off breach risk a policy can underwrite — the "
+     "burden does not run with freehold land at common law (Law Commission "
+     "research briefing CBP-8560, 5 May 2026), so a policy would not cover "
+     "the actual works (HomeOwners Alliance; Timms Solicitors). Treated as "
+     "solicitor-review only."),
     (("tree and shrub", "tree/shrub"), (1, 2), (200, 2000),
      "Restrictive covenant indemnity insurance route. £200-2,000 typical "
      "premium (SAM Conveyancing; from £60 incl IPT floor per GCS), issued "
@@ -797,6 +841,378 @@ _TIME_COST_LOOKUP = (
     (("drainage", "water search", "con29dw"), (5, 10), (40, 100),
      "LegalSmegal Risk-Pricing Engine report, 2026: CON29DW standard turnaround.",
      None),
+    # S33-RESEARCH-COVERAGE (2026-06-27): three new categories researched to
+    # the same standard as the entries above, sourced from practitioner
+    # material (conveyancing solicitors, indemnity brokers, mortgage-panel
+    # guidance) per explicit product instruction to check how solicitors/
+    # brokers/accountants actually handle each problem before pricing it —
+    # not generic web search. All three traced to the real flag-title audit
+    # (100 flags, 4 deals, 2026-06-27): "Freeholder Identity — Ashcorn
+    # Estates Limited, Absent Landlord Risk"; no live HMO-licence title in
+    # this batch but named explicitly in the 2026-06-26 checkpoint; "Ground
+    # Rent Escalation — Tripling Over Lease Term".
+    (("absent landlord", "absentee landlord", "absent freeholder",
+      "untraceable freeholder", "missing freeholder", "missing landlord"),
+     (0, 1), (100, 300),
+     "Absent/untraceable-freeholder indemnity insurance — a distinct named "
+     "product, not generic restrictive-covenant cover. £100-300 typical "
+     "premium (Homeward Legal published indemnity-cost guide, 2026), "
+     "issued same-day to 24h where a lender accepts the policy. MEDIUM "
+     "confidence — premium band is well-attested; lender acceptance is "
+     "not universal (see outlier note).",
+     "Indemnity is a workaround, not a fix, and several lenders decline it "
+     "outright for an absent freeholder (LenderMonitor UK Finance Lenders' "
+     "Handbook guidance, 2026). Where indemnity is declined or the buyer "
+     "needs to deal with the freeholder directly (consent, lease extension, "
+     "freehold purchase), the only route is a court-granted Vesting Order — "
+     "a three-stage County Court / First-tier Tribunal process reported at "
+     "2-3.5 years (Zero Down Lease, 2026), not weeks. This figure covers "
+     "the indemnity route ONLY; it does not apply if indemnity is refused."),
+    (("hmo licen",), (42, 84), (500, 2000),
+     "HMO licence application/renewal: council fee £500-1,500 typical for a "
+     "5-year term per most 2026 industry guides, though some sources report "
+     "£800-2,000+ and London boroughs commonly charge above this band "
+     "(Landlord Resource; AgentHMO; Foot Forward Property Investments, "
+     "2026 guides). Processing time 6-12 weeks is the stated council target "
+     "in most published service standards (Barnet, Cherwell, Lambeth, "
+     "Westminster council guidance, 2026). MEDIUM confidence — fee and "
+     "target-turnaround bands are well-attested across multiple councils, "
+     "but neither is a single national figure.",
+     "Both figures vary materially by local authority and are TARGETS, not "
+     "guarantees. Genuine outliers exist on the time side: one practitioner "
+     "account (Slater & Brandley, Nottingham) reports a real case taking "
+     "two years to reach a final decision, and operating an HMO while an "
+     "application is pending is generally lawful under the Housing Act "
+     "2004 (so a missing/expired licence does not necessarily mean the "
+     "property cannot be let during the wait — but it must already have a "
+     "valid application in). Civil penalty exposure for an unlicensed HMO "
+     "is up to £40,000 per breach since 1 May 2026 (Renters' Rights Act "
+     "2025) — this is a liability-exposure figure, not a resolution cost, "
+     "and is not included in the range above."),
+    (("ground rent escalation", "ground rent doubling", "doubling ground rent",
+      "escalating ground rent", "ground rent tripling"), (0, 1), (500, 7000),
+     "USER VERIFICATION NEEDED — wide, low-confidence range spanning two "
+     "genuinely different resolution routes, not a single product: (1) "
+     "indemnity insurance, narrow scope, where accepted; (2) Deed of "
+     "Variation, solicitor-negotiated with the freeholder, who is under no "
+     "obligation to agree — legal fees alone typically quoted £500-1,500 "
+     "+VAT (Lawhive, Stephensons), but real transactions reported £5,000 "
+     "(MoneySavingExpert) and £7,000 (MoneySavingExpert) once freeholder "
+     "compensation and both sides' costs are included. LOW confidence — "
+     "this range is too wide to size a specific deal without the actual "
+     "lease terms and a freeholder response, which a title-text match "
+     "cannot determine.",
+     "A material legal change limits how often this defect now needs "
+     "resolving at all: from December 2025, the change removing leases "
+     "from the 'AST trap' (assured shorthold tenancy risk under the "
+     "Housing Act 1988 for ground rents above £250/£1,000 London) means "
+     "the core mortgage-refusal driver behind a Deed of Variation or "
+     "indemnity policy may no longer apply to many cases (Peppercorn Law, "
+     "2026) — pre-Dec-2025 advice on this point may now be outdated. "
+     "Separately, a draft Commonhold and Leasehold Reform Bill (Jan 2026) "
+     "proposes capping existing ground rents at £250/year, but this is not "
+     "in force and is not expected before 2028 (Starck Uberoi Solicitors). "
+     "Do not treat this figure as reliable without confirming current "
+     "lender requirements and lease-specific terms."),
+    # ════════════════════════════════════════════════════════════════════
+    # S33-RESEARCH-COVERAGE-FULL (2026-06-27): full verified-source set from
+    # the cross-category research pass. Every figure traces to the NAMED
+    # source in its methodology string; confidence (HIGH/MEDIUM) is stated
+    # verbatim per source quality — no inflation. NO_RESOLUTION is used only
+    # where the research found no fixable cost (notice-to-complete = an
+    # exposure, not a clearable fee). Four entries carry prominent 2025-26
+    # legal-change flags (planning enforcement 10-yr limit; lease extension /
+    # marriage value; — ground rent already flagged above). Markers checked
+    # for substring collisions against existing entries before insertion;
+    # coal-mining merged UPWARD into the mining entry to avoid shadowing.
+    # ════════════════════════════════════════════════════════════════════
+    (("flood risk", "high flood", "flood zone", "flooding identified"), (0, 3), (20, 75),
+     "Flood risk report £20-75 (Always Conveyancing £20-25 +VAT; Homeward "
+     "Legal £50-75), returned ~2h to a few days. HIGH confidence on report "
+     "cost. This prices CHARACTERISING the risk, not eliminating it.",
+     "Report cost only — physical mitigation is separate and variable. "
+     "Property flood resilience grants exist: Flood Re 'Build Back Better' "
+     "up to £10,000 after a claim; Homeowner Flood Protection Grant covers "
+     "90% up to £10,000 (CIWEM). High flood risk affects insurability and "
+     "value; properties built after 1 Jan 2009 are excluded from Flood Re."),
+    (("radon",), (10, 90), (53, 2500),
+     "Radon test £52.80 (UKradon/UKHSA); active sump remediation ~£800 "
+     "typical, range £500-2,500 (GOV.UK radon remediation analysis; UKradon; "
+     "Checkatrade). Test ideally runs 3 months (10-day screening minimum); "
+     "sump installs in 1-2 days. HIGH confidence.",
+     "Range spans test-only (~£53) to full active-sump remediation (~£2,500). "
+     "An active sump cuts levels ~6-fold and is the most effective measure; "
+     "passive measures far less so. A radon bond/retention ~£2,500 is "
+     "commonly used at sale pending results."),
+    (("japanese knotweed", "knotweed"), (4, 30), (1200, 8000),
+     "PCA-member survey £200-299 +VAT; herbicide treatment plan £1,200-2,500 "
+     "+VAT (3-5 year programme); excavation/removal from £8,000 +VAT "
+     "(Property Care Association; PBA Solutions; Total Weed Control). HIGH "
+     "confidence. Time shown is survey-to-plan-start, not the multi-year "
+     "treatment duration.",
+     "Mortgage lenders require a PCA/INNSA member's plan WITH an insurance-"
+     "backed guarantee (~£75 add-on, or from £2,995 incl for larger plans). "
+     "Treatment programmes run 3-5 years to completion. CABI (2023) ranks "
+     "knotweed the second most expensive invasive species in the UK."),
+    (("building regulations completion", "no building regs", "building regs certificate",
+      "regularisation"), (0, 7), (35, 300),
+     "Building-regs indemnity insurance £35-300 (£180 for a £500k property "
+     "per SAM Conveyancing; HomeOwners Alliance), issued instantly; OR a "
+     "council regularisation application ~£450 + any remedial works. HIGH "
+     "confidence on indemnity premium.",
+     "Indemnity covers ENFORCEMENT only, NOT build quality or safety, and is "
+     "voided the moment the council is contacted. Pre-11 Nov 1985 works "
+     "cannot be regularised. A CLS case study saw an ~£11,000 regularisation "
+     "claim met on a £35 policy — the cheap premium is the point. If "
+     "remedial works are needed because the build is non-compliant, those "
+     "are extra and can run to £10,000s."),
+    (("planning enforcement", "enforcement notice", "planning breach"), (140, 260), (3000, 20000),
+     "Enforcement-notice appeal: lodge within 28 days; Planning Inspectorate "
+     "target ~24-26 weeks (often longer). Cost £3,000-20,000 — planning "
+     "consultant £1,500-5,000, solicitor/barrister £150-350/hr, surveys "
+     "£500-2,000 each (GOV.UK Planning Inspectorate; Checkatrade; Evans "
+     "Jones). MEDIUM confidence — case-dependent.",
+     "MAJOR RULE CHANGE: from 25 April 2024 a single 10-year enforcement "
+     "limit applies to all breaches in England (was 4 years for operational "
+     "development / change of use to a dwelling); works substantially "
+     "completed before 25 April 2024 keep the old 4-year rule (SI 2024/452 "
+     "reg.3(b); Levelling-up and Regeneration Act 2023 s.115). Whether the "
+     "breach is now immune depends on this date."),
+    (("lawful development certificate", "retrospective planning", "unpermitted works",
+      "no planning permission"), (0, 56), (528, 700),
+     "Lawful Development Certificate or retrospective householder application "
+     "~£548 (2026 GOV.UK/Planning Portal fee) + Planning Portal £91.02 inc "
+     "VAT, ~8-week determination; OR planning indemnity £20-300 instant where "
+     "works are old enough (Planning Geek; Today's Conveyancer; Dorset "
+     "Council). HIGH confidence on fees.",
+     "If retrospective permission is REFUSED, enforcement risk crystallises — "
+     "indemnity is the fallback only where the works predate the enforcement "
+     "window. The 2026 fee (~£548) is up sharply from ~£258 historically "
+     "after CPI uplifts — verify against the 1 April 2026 GOV.UK fee table."),
+    (("eicr", "electrical certificate", "electrical installation condition",
+      "no electrical"), (1, 7), (80, 350),
+     "EICR £80-350 (most homes £100-200; London £120-400+), booked within "
+     "days, valid 5 years for lettings (MyJobQuote; HomeSafety UK; Empire "
+     "Chase). HIGH confidence. Minor remedial work £50-200; full rewire runs "
+     "into the thousands and is separate.",
+     "Required under the Electrical Safety Standards (Private Rented Sector) "
+     "Regulations 2020 for lettings. The figure prices the inspection plus "
+     "minor remedials, not a rewire."),
+    (("gas safety", "gas certificate", "cp12", "no gas safety"), (0, 3), (40, 120),
+     "Gas Safety Certificate (CP12) £40-120, same-/next-day booking, annual "
+     "renewal (Gas Safe Register; Landlord-Certificates from £40; "
+     "LetCompliance £60-120). HIGH confidence. Remedial work £50-500 extra.",
+     "Annual renewal is mandatory for lettings — unlike most flags this is a "
+     "recurring obligation, not a one-off clear. Remedial work on failed "
+     "appliances is separate."),
+    (("possessory title", "possessory class"), (0, 90), (40, 500),
+     "Upgrade to absolute title via Land Registry form UT1 after 12 years' "
+     "registered possession (s.62 Land Registration Act 2002): LR fee "
+     "(Schedule 3) + statutory-declaration solicitor fee, typically a few "
+     "hundred pounds; LR processing days-to-weeks once eligible (GOV.UK "
+     "Practice Guide 42; Timms Solicitors). Interim handling = title "
+     "indemnity. MEDIUM confidence — confirm LR fee against current Fee "
+     "Order.",
+     "Until 12 years of registered possession elapse, the upgrade is NOT "
+     "available and the only handling is title indemnity insurance. Time "
+     "shown is the post-eligibility processing, not the 12-year wait."),
+    (("flying freehold",), (0, 1), (50, 300),
+     "Flying-freehold indemnity insurance £50-100 (Free Conveyancing Advice) "
+     "up to a few hundred pounds (Martin & Co; SAM Conveyancing; Countrywide "
+     "Legal Indemnities; MoneySavingExpert ~£100), issued instantly. HIGH "
+     "confidence on premium.",
+     "Indemnity covers loss of value / legal costs, NOT the underlying lack "
+     "of access or support rights. Most lenders cap the flying element at "
+     "15-25% of floor area; above that, mortgageability — not premium — is "
+     "the real constraint, which a deed of covenant (needing neighbour "
+     "cooperation) addresses but indemnity does not."),
+    (("short lease", "lease extension", "lease expires", "years remaining",
+      "under 80 years", "under 85 years"), (90, 365), (2000, 15000),
+     "Statutory lease extension (s.42 route): premium (largest, property-"
+     "specific) + solicitor £1,000-2,500 + valuation £450-1,500 + freeholder's "
+     "reasonable costs + LR registration + FTT fees if disputed (£110+£220) "
+     "(LEASE/lease-advice.org; SAM Conveyancing; Olden Property). 3-12 "
+     "months. MEDIUM confidence — the premium itself is property-specific "
+     "and not in this range.",
+     "MAJOR PENDING LAW CHANGE: the Leasehold and Freehold Reform Act 2024 "
+     "will abolish marriage value (the 50% uplift added below 80 years) and "
+     "extend terms to 990 years, but is NOT yet in force. In ARC Time v "
+     "SSHCLG [2025] EWHC 2751 the High Court upheld the reforms (24 Oct "
+     "2025); the Court of Appeal granted freeholders permission to appeal. "
+     "Government expects to consult on valuation rates in 2026, so "
+     "implementation is late-2026 at the earliest (Homehold). This changes "
+     "whether to extend now or wait — flag, do not advise blind."),
+    (("service charge", "management accounts", "management information pack",
+      "lpe1", "section 20", "major works"), (10, 30), (200, 500),
+     "Obtaining the management/LPE1 pack: managing-agent fee £200-500+, "
+     "10-30 working days (Law Society LPE1 process; LEASE). MEDIUM "
+     "confidence on the pack fee. This prices OBTAINING the information.",
+     "This figure is the cost of getting the documents, NOT the service "
+     "charge or major-works liability itself — those are forward financial "
+     "obligations whose quantum is property-specific (a Section 20 major-"
+     "works bill can be £1,000s-£10,000s) and is a risk-acceptance / "
+     "valuation item, not a fixable cost. Reasonableness can be challenged "
+     "at the FTT but that is a dispute route, not a standard cost."),
+    (("notice to complete", "completion default", "completion penalty",
+      "default interest", "interest penalty"), (0, 10), TIME_COST_NO_RESOLUTION,
+     "Notice to complete = 10 working days under Standard Conditions of Sale "
+     "5th ed. condition 6.8.2 (time of the essence). Default interest = the "
+     "'contract rate' = Law Society interest rate, currently 7.75% effective "
+     "18 Dec 2025 (The Law Society). Deposit at risk = 10% (SCS 2.2.1). HIGH "
+     "confidence on the SCS terms.",
+     "This is an EXPOSURE figure, not a resolution cost — there is no fee to "
+     "'clear' it; the risk is forfeiting the 10% deposit plus default "
+     "interest plus resale damages if you cannot complete on time. Auction "
+     "Special Conditions / RICS Common Auction Conditions FREQUENTLY vary "
+     "the period, rate and deposit — parse the actual pack, do not assume "
+     "the SCS default."),
+    # S33-RESEARCH-COVERAGE-FINAL (2026-06-27): the genuinely-new, non-overlapping
+    # remainder after reconciling the full research pass against the table's
+    # existing 30 entries. 8 entries: 2 with named-source time/cost (forfeiture,
+    # tenant-in-occupation) and 6 correctly NO_RESOLUTION (auction premium,
+    # cost-shifting, nearby development, overage, VAT, missing TA-forms) — these
+    # are acquisition-cost/disclosure items with no clearable fix, marked as
+    # such rather than given a fabricated figure. Categories already covered
+    # earlier this session (flood, radon, knotweed, building-regs, planning
+    # enforcement, LDC, EICR, gas, possessory, flying freehold, short lease,
+    # service charge incl. section 20, notice-to-complete) were NOT duplicated.
+    (('forfeiture', 'breach of lease'), (1, 30), (500, 2000),
+     'Forfeiture/breach handling: remedy the breach (cost = the specific remedy) and/or apply for relief from forfeiture (County Court). Solicitor cost for relief typically low thousands. LOW confidence — quantum is breach-specific.',
+     'MAJOR PENDING LEGAL CHANGE — the draft Commonhold and Leasehold Reform Bill (27 Jan 2026) proposes to ABOLISH forfeiture, replacing it with a proportionate enforcement scheme (GOV.UK; CMS; Hogan Lovells). Not yet in force, but the current forfeiture threat may diminish.'),
+    (('sitting tenant', 'tenant in occupation', 'occupier remains', 'no vacant possession', 'not vacant possession', 'regulated tenancy', 'section 8 ground', 'section 21 notice', 'ast expiry', 'assured tenancy'), (90, 182), (404, 2000),
+     "Possession with a tenant in occupation: from 1 May 2026 a Section 8 ground is required (Section 21 abolished). Notice-court-bailiff typically 3-6 months; court/warrant fees (£404 historic accelerated; £148 warrant, GOV.UK) + solicitor fees + lost rent. Source: GOV.UK Renters' Rights Act 2025 guidance; MHCLG Policy Paper (13 Nov 2025). HIGH on process, MEDIUM on total cost.",
+     "MAJOR CHANGE — the Renters' Rights Bill received Royal Assent 27 October 2025; tenancy reforms commenced 1 May 2026, abolishing Section 21, last date to issue on a pre-commencement s.21 notice 31 July 2026. Section 8 sale/move-in grounds need 4 months' notice and cannot be used in the first 12 months. Almost every eviction now needs a hearing — court-backlog risk can push the timeline well beyond 6 months. A regulated (pre-1989) tenancy is a permanent value discount, not a clearable cost."),
+    (("buyer's premium", 'buyers premium', 'buyer premium', "buyer's fee", 'reservation fee', 'non-refundable deposit', "buyer's administration"), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "ACQUISITION COST, not a clearable defect — nothing is being 'fixed', so no resolution cost exists. A buyer's premium/reservation fee is added to the price: Savills £250 (below £30k) / £2,100 (£30k+); Allsop reservation ~£1,750; Modern Method of Auction 2.5-5% (typically £6,000+ inc VAT) (Savills Property Auctions; Allsop; Property Rescue). Handling = factor it into the bid ceiling.",
+     None),
+    (("seller's costs", "seller's legal costs", 'pays seller', 'search fees', 'reimburse', "vendor's costs", 'buyer pays seller'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "ACQUISITION COST, not a defect — where Special Conditions require the buyer to pay the seller's legal/search costs (often the £250-450 search pack plus a legal-fee contribution), that sum is added to the price, not a cost to clear (RICS Common Auction Conditions; HouseCheckup search-pack pricing). Handling = price it into the bid.",
+     None),
+    (('nearby planning', 'planning applications in', 'development risk', 'planning applications near', 'applications in search area', 'planning applications identified', 'applications near property', 'planning applications near property'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'Pure disclosure / risk-acceptance — NO resolution cost. Nearby planning applications are a contextual signal, not a defect on this title; handling = review the local authority planning register (free) and price the development risk into the valuation. Nothing to buy, insure, or remediate.',
+     None),
+    (('overage', 'clawback'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'No standard resolution cost — an overage/clawback clause is a contractual burden releasable only by negotiated buy-out with the beneficiary, who sets the price (general conveyancing practice). Handling = negotiate a release (price = whatever the beneficiary accepts) or accept and price the burden in. No researchable fixed figure exists.',
+     None),
+    (('vat uncertain', 'vat on the price', 'vat liability', 'plus vat on purchase', 'vat status'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Acquisition-cost / disclosure item — no clearable defect. If VAT applies it is 20% on the price (a major acquisition cost), not a fee to 'resolve'. Handling = obtain a VAT opinion from a solicitor/accountant (low hundreds to low thousands) to confirm whether it applies; the VAT itself, if due, is part of the price (general conveyancing/tax practice). Opinion cost is case-specific and not given a fixed range.",
+     None),
+    (('ta6', 'property information form', 'ta10', 'fittings and contents', 'ta7', 'leasehold information form'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Disclosure / risk-acceptance — generally no resolution cost. Missing TA6/TA10/TA7 forms are requested at no charge; at auction the buyer often proceeds without them (Law Society TA6/TA10/TA7). Where a leasehold management pack (LPE1/TA7) must be sourced from the managing agent, the agent's pack fee (~£200-500+, 10-30 working days) applies — but the missing FORM itself is a 'request it' gap, not a defect to price.",
+     None),
+    # S33-RESEARCH-COVERAGE-CLUSTER (2026-06-27): the boundary/easement/
+    # planning-designation cluster — the last genuinely-researchable group.
+    # Real named-source figures where a fix exists (party wall, absence-of-easement
+    # indemnity, listed-building consent), and NO_RESOLUTION where the item is a
+    # constraint or existing burden with no clearable fix (right-of-way burden,
+    # adjacent listed building, conservation area, smoke control, AQMA). Markers
+    # tested against the 100-flag audit; two greedy-substring mis-fires ('rooms
+    # over passageway' grabbing the cost-sharing entry; 'adjacent' listed routing
+    # to the subject-property figure) were caught and fixed before splicing.
+    (('party wall',), (14, 60), (100, 2000),
+     "Party-wall handling in a CONVEYANCING context (a missing historic award on past works, not new building works): a retrospective party wall agreement to satisfy the buyer's solicitor £1,000-2,000, OR indemnity insurance covering the absence of a party wall award £100-500 (Pine, 2026). Governed by the Party Wall etc. Act 1996 (England & Wales only). HIGH confidence on the conveyancing figure.",
+     'Do NOT confuse with the cost of a party wall award for FUTURE building works (loft/extension), which is £900-3,500+ and paid by the building owner doing the works (HomeOwners Alliance; Alstruct; Pine). For an auction buyer the relevant risk is usually a past, undocumented alteration — the retrospective-agreement / indemnity figure above is the correct one. A genuine unresolved dispute with a neighbour is separate and can cost more.'),
+    (('absence of easement', 'no right of access', 'missing easement', 'no easement', 'inadequate rights of access', 'landlocked', 'no right of way'), (0, 90), (100, 500),
+     "Missing/defective access right: absence-of-easement indemnity insurance is the standard route, premium value-banded (CLS; Severn Trent Searches; Moore Barlow) — broadly aligned with the road-adoption / restrictive-covenant indemnity bands (low hundreds). Issued days. Alternative: a deed of easement (needs the servient owner's agreement) or a prescriptive-easement application to Land Registry — the latter has a ~3-month wait and costs that rise with objections (Michelmores; Sherrards). MEDIUM confidence — premium is value-banded, not a single published figure.",
+     "Indemnity covers a CHALLENGE to using an existing route, NOT the ongoing cost of maintaining it — every absence-of-easement policy explicitly excludes the insured failing to pay their share of access-way / shared-path maintenance (Today's Conveyancer; Moore Barlow). A genuinely landlocked property with an uncooperative neighbour may have no affordable fix — see the cost-sharing and right-of-way-burden entries, which are handled differently."),
+    (('right of way burden', 'easement burden', 'right of way over', 'third party right of way', 'burden over property'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Existing easement/right-of-way BURDEN (someone else has a right over this property) — generally no resolution cost: it is a permanent feature of the title to be accepted and priced, not a clearable defect (Michelmores; Napthens). An easement runs with the land and binds successors. Removal requires the beneficiary's agreement (a negotiated release at their price) or proof of abandonment — neither has a researchable fixed figure. Handling = factor the burden into value.",
+     None),
+    (('shared easement', 'cost sharing', 'cost-sharing', 'passageway cost', 'easements over passageway', 'shared access maintenance', 'shared drive'), (2, 5), (500, 1500),
+     'Shared-access / passageway COST-SHARING obligation: this is a positive maintenance obligation, handled like the positive-covenant entry — solicitor review of the scope/enforceability of the contribution obligation, £500-1,500 +VAT for a discrete opinion (Go Legal; Lawhive). Routine flagging is usually absorbed in the conveyancing fee. MEDIUM confidence.',
+     "Indemnity insurance does NOT fit a cost-sharing obligation: every absence-of-easement policy explicitly excludes the insured failing or refusing to contribute to the cost of maintaining the access way (Today's Conveyancer; Moore Barlow). The actual future maintenance contributions are an ongoing liability whose quantum depends on the works — not a one-off cost to clear, and not insurable."),
+    (('listed building on adjacent', 'adjacent listed', 'neighbouring listed', 'listed building nearby', 'consent on adjacent', 'on adjacent property', 'adjacent property — heritage', 'listed building consent on adjacent'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'A listed building on a NEIGHBOURING/adjacent property is a planning CONSTRAINT, not a defect on this title — no resolution cost. It can restrict what this property may do near the boundary (works affecting the setting of the adjacent listed building may need consent), but there is nothing to buy, insure, or remediate on this property. Handling = note the constraint for any future works.',
+     None),
+    (('listed building consent', 'lack of listed building', 'unauthorised works to listed', 'no listed building consent'), (0, 56), (105, 500),
+     'Lack of Listed Building Consent on works to THIS property: indemnity insurance from £105 incl. IPT (GCS), issued instantly; OR a retrospective Listed Building Consent application (~8 weeks, no application fee) negotiated with the conservation officer. LOW-MEDIUM confidence — the premium is real but the cover is weak (see note).',
+     'CRITICAL CAVEAT — listed-building indemnity is widely regarded as a weak fix: it covers the cost of local-authority ENFORCEMENT action only, NOT criminal prosecution, and unauthorised works to a listed building are a CRIMINAL offence with NO time limit on enforcement (Planning (Listed Buildings and Conservation Areas) Act 1990; Thomson Snell & Passmore; Kew Law). Practitioners commonly advise resolving via the conservation officer with a retrospective application and a vendor retention rather than relying on indemnity. The policy is also voided if the local authority has already been contacted.'),
+    (('conservation area',), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'Conservation-area status is an ongoing planning CONSTRAINT, not a clearable defect — no standard resolution cost. It removes some permitted-development rights (so future works need a full application) but does not require any spend to own the property (Planning (Listed Buildings and Conservation Areas) Act 1990). If there are UNCONSENTED past works in the conservation area, that is the lack-of-consent problem — conservation-area indemnity from low hundreds (CLI; CLS) covers enforcement on those specific works only. Absent unconsented works, this is a disclosure/constraint item.',
+     None),
+    (('smoke control',), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'Smoke control area is a usage CONSTRAINT, not a property defect — no resolution cost to own. A non-Defra-exempt appliance can still be used with authorised (smokeless) fuel; the only spend arises if the buyer specifically wants to burn wood, requiring a Defra-exempt appliance (Stove Industry Association; Wandsworth BC, 2026). Penalties apply only to breach (up to £300 for chimney smoke; up to £1,000 for unauthorised fuel — Air Quality (Domestic Solid Fuels Standards) (England) Regulations 2020). Not a cost to clear at purchase.',
+     None),
+    (('air quality management', 'aqma', 'air quality management area'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'An Air Quality Management Area (AQMA) is a local-authority DESIGNATION (declared where national air-quality objectives are not met), not a defect on the property and not a cost to clear. It carries no homeowner remediation requirement; its relevance is to health, lettability and value perception (Environmental Protection Act 1995 Part IV / Local Air Quality Management regime). Handling = disclosure and risk-acceptance, factored into value — there is nothing to buy or remediate.',
+     None),
+    # S33-RESEARCH-COVERAGE-CLOSEOUT (2026-06-27): final close-out pass.
+    # CONFIRMED (positive/neutral findings -> cost/time '-', reads as
+    # reassurance, NOT amber caution); document-stated 21-day completion
+    # (time=21, cost dash); constraint/acquisition-term/request-it items
+    # (NO_RESOLUTION dash, each with its own reason); and the last
+    # researchable figures (boundary survey, overhang/eaves indemnity,
+    # rooms-over-passageway flying-freehold treatment, EPC-low, tenant-
+    # covenant indemnity, buildings insurance). All reviewed and approved
+    # against the real audit before splicing. Remaining UNRESEARCHED after
+    # this are the probate/seller-silence confidence-cap items only, which
+    # correctly carry no time/cost figure.
+    (('absolute — no mortgage', 'no mortgage registered', 'absolute class confirmed', 'absolute — no charges', 'no charges registered', 'freehold title absolute', 'leasehold title absolute', 'title absolute'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
+     'Confirmed clean: an absolute title class with no adverse entries is the best-quality title and a positive finding — nothing to resolve, no cost, no delay. Noted for completeness, not as a risk.',
+     None),
+    (('no disputes', 'no complaints declared', 'no disputes or complaints'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
+     "Confirmed clean: the seller has declared no disputes or complaints — a positive finding. Nothing to resolve. (As with any seller declaration, its value rests on the seller's honesty, but on its face this is reassurance, not a cost.)",
+     None),
+    (('vacant possession — occupier letter', 'vacant possession confirmed', 'sold as vacant possession'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
+     'Confirmed clean: vacant possession is confirmed — there is no tenant to remove and no possession cost. A positive finding, the opposite of a sitting-tenant problem.',
+     None),
+    (('epc valid until', 'no immediate renewal'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
+     'Confirmed in order: a valid EPC is in place with no immediate renewal needed — nothing to do. (For lettings, check the rating meets the MEES minimum separately; validity alone is confirmed here.)',
+     None),
+    (('designated primarily residential', 'primarily residential', 'h14/h17', 'h14', 'h17'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
+     'Confirmed/neutral: a residential planning designation is the expected, normal position for a home — not a defect or a cost. Noted for completeness.',
+     None),
+    (('furniture and effects may remain', 'furniture/effects may remain', 'furniture and effects', 'effects may remain'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
+     'Neutral: the seller noting that furniture/effects may remain is not grounds to delay completion and carries no buyer cost — at most the buyer arranges removal of any unwanted items (a personal/logistics cost, not a legal defect). Not a sitting-tenant or possession issue.',
+     None),
+    (('21-day completion', '21 day completion', 'non-standard 21-day', '21-day completion period'), (21, 21), TIME_COST_NO_RESOLUTION,
+     "Stated in the pack: a 21-day completion period. The TIME is fixed by the contract (21 calendar days from exchange); there is no cost to 'clear' it — it is a deadline to meet, not a defect. The real consequence is FINANCING: a buyer who cannot complete in 21 days needs cash or bridging in place, and missing it risks deposit forfeiture and default interest (see notice-to-complete). Model the finance, don't price a fix.",
+     None),
+    (('limited title guarantee', 'title guarantee covenants excluded', 'title guarantee excluded'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'Risk-acceptance / disclosure — no resolution cost. A limited title guarantee (common on probate, repossession and some auction sales) means the seller gives reduced assurances about the title; it is accepted and priced, not fixed. Title indemnity insurance can sometimes cover a SPECIFIC identified gap, but the limited guarantee itself is a feature of the sale, not a clearable defect.',
+     None),
+    (('cannot assign contract', 'buyer cannot assign', 'no assignment', 'assign contract to third party'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'Acquisition term — no resolution cost. A no-assignment clause means the winning bidder cannot sell the contract on before completion; it is a standard auction term to accept, not a defect to fix. Relevant only if the buyer intended to flip the contract pre-completion.',
+     None),
+    (('sold as seen', 'no condition warranties', 'property sold as seen'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Risk-acceptance — no resolution cost on the legal side. 'Sold as seen / no condition warranties' is the norm at auction: the buyer takes the property in its physical state with no recourse for defects. The 'handling' is a pre-bid survey to understand condition — a due-diligence step, not a cost to clear a legal defect. Any actual repairs are property-specific and outside this flag.",
+     None),
+    (('right-to-buy covenant', 'right to buy covenant', 'resale/subletting', 'resale restriction', 'subletting restriction'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Constraint / risk-acceptance — no standard resolution cost. Right-to-Buy covenants can restrict resale or subletting for a period and may trigger a discount-repayment liability if the property is sold within the restricted window. The figure depends entirely on the original RTB discount and timing — read the specific covenant; there is no generic cost to 'clear' it.",
+     None),
+    (('buyer bears risk from exchange', 'risk from exchange', 'no seller insurance obligation', 'insurance from exchange'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Acquisition/admin item — no resolution cost as a defect. Risk passing to the buyer on exchange (the standard position) means the buyer must have buildings insurance in force FROM exchange, not completion. The 'cost' is simply arranging a buildings policy (a few hundred £/yr) to start at exchange — an admin step, not a fix. The risk is being uninsured in the gap, which costs nothing to avoid if actioned.",
+     None),
+    (("discrepancy in seller's legal fees", 'legal fees between documents', 'discrepancy in seller'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Query to raise — not a buyer cost. A discrepancy between documents in the seller's stated legal fees is a question for the buyer's solicitor to clarify before exchange, not a defect with a resolution price. Handling = raise the enquiry; cost is absorbed in standard conveyancing.",
+     None),
+    (('climateindex', 'climate index', 'climate moderate', 'climate risk'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     'Disclosure / risk-acceptance — no resolution cost. A moderate climate-index score (a modelled long-horizon risk indicator) is contextual information for the valuation and insurability view, not a defect to remediate. Handling = factor into the long-term value/insurance outlook; there is nothing to buy or fix.',
+     None),
+    (('special conditions of sale not present', 'special conditions not present', 'special conditions missing'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Request-it — no resolution cost, but a genuine gap to close BEFORE bidding. The Special Conditions of Sale govern the auction contract (deposit, completion period, costs, extra obligations) and must be obtained and read; bidding without them is bidding blind. Handling = request from the auctioneer/seller's solicitor at no charge.",
+     None),
+    (('conveyance document incomplete', 'lease document incomplete', 'transfer document incomplete', 'document incomplete', 'incomplete without preceding'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Request-it — generally no resolution cost. An incomplete/abbreviated conveyance, lease or transfer in the pack should be completed by obtaining the full official copy from HM Land Registry (a few pounds per document) or the missing pages from the seller's solicitor. Handling = request the complete document; only an unregistered lost deed needing reconstitution is more involved (and is a separate, rarer case).",
+     None),
+    (('overhanging structure', 'overhang', 'eavesdrop', 'trespass to air', 'encroachment over neighbour'), (0, 1), (50, 300),
+     "Overhang / eavesdrop / air-space trespass: there is a named indemnity product (GCS 'Eavesdrop, Overhang and Trespass to Air-Space'), premium broadly £50-300 in line with standard title indemnities (GCS; Muve), issued quickly. Covers a neighbour seeking to prevent the overhang (guttering, balcony, flue, eaves). MEDIUM confidence — premium is value-banded.",
+     'Indemnity covers a CHALLENGE to the encroachment, not its removal. An overhang can be a trespass even by a few inches, and if a neighbour pursues it and refuses to settle, the matter can escalate to a county court injunction (SAM Conveyancing; JustAnswer/UK property law). Where the overhang is part of a flying-freehold arrangement, see flying freehold (support/access rights and lender caps also apply).'),
+    (('rooms over passageway', 'room over passage', 'over passageway', 'flying freehold passage', 'rooms over'), (0, 1), (50, 300),
+     'Rooms over a passageway are a flying-freehold-type title arrangement (part of the property sits above land/airspace not in the same title). Handled like flying freehold: indemnity insurance £50-300 (Free Conveyancing Advice; Martin & Co; SAM Conveyancing), issued instantly. MEDIUM confidence on premium band.',
+     'Indemnity covers loss of value / legal costs, NOT the underlying support, access and repair rights, which depend on the deeds (Girlings; Muve). Lenders treat flying freeholds cautiously and several cap the flying element or decline — mortgageability, not premium, is often the binding constraint. Confirm the deeds contain adequate support/access covenants.'),
+    (('boundary moved', 'boundary alteration', 'boundary discrepancy', 'boundary disclosed', 'title plan mismatch', 'boundary altered'), (14, 21), (1500, 5000),
+     'Boundary alteration/discrepancy: a measured boundary survey by a chartered surveyor £1,500-5,000, returned in ~2-3 weeks (RICS; Bennett Griffin; SAM Conveyancing). A determined-boundary application to HM Land Registry (£90 fee) can follow if the line needs formal fixing. MEDIUM-HIGH confidence on the survey cost.',
+     'Land Registry title plans show only GENERAL boundaries, not the legal line (RICS; Clapham v Narga, CA 2024), so a disclosed alteration may or may not be a real problem. The survey PRICES CLARIFICATION; if it escalates to a contested boundary DISPUTE, costs rise steeply (mediation from ~£4,200; litigation £15,000-100,000+) — that is a separate, much larger risk, not included in the survey figure.'),
+    (('epc present — rating appears low', 'rating appears low', 'epc rating low', 'low epc rating'), (1, 7), (45, 150),
+     'Low EPC rating: a fresh EPC assessment is £45-150, booked and lodged within days (HomeSafety UK; standard assessor pricing). This prices CONFIRMING the rating; any energy-efficiency works to raise it (insulation, heating, glazing) are property-specific and vary widely (£100s-£1,000s+). MEDIUM confidence on the assessment cost.',
+     'A low rating matters mainly for LETTINGS: the MEES minimum is currently EPC E to let, and a proposed future minimum of C (commonly cited ~2028) would raise upgrade costs (GOV.UK MEES guidance). For a buyer-occupier with no letting intent, a low rating is a running-cost/value factor, not a legal barrier. The works cost is NOT in the figure above.'),
+    (('tenant covenants indemnity', 'leasehold tenant covenant', 'tenant covenant indemnity required'), (0, 1), (20, 300),
+     "Leasehold/good-leasehold title indemnity where tenant-covenant or lease-validity assurance is missing: a 'good leasehold title' indemnity from ~£20 (Muve) up to a few hundred pounds depending on value, issued quickly. MEDIUM confidence — value-banded premium.",
+     'This covers the RISK that the lease was not validly granted / the freehold title behind it is unproven — it does not cure the underlying title, and a lender may still require the freehold title to be deduced. Confirm the specific defect the indemnity is being asked to cover.'),
+    (('no buildings insurance details', 'buildings insurance details', 'no buildings insurance'), (1, 7), (150, 600),
+     'Missing buildings insurance details: for a freehold, the buyer simply arranges their own buildings policy (~£150-600/yr typical, property-dependent), in force from exchange. For a leasehold, the freeholder/managing agent insures and the details should be requested via the management pack. MEDIUM confidence — premium varies with property and rebuild cost.',
+     "On a leasehold, 'no details provided' is a request-it gap (chase the managing agent), not a cost the buyer bears directly — the premium is recovered through the service charge. On a freehold, arranging cover from exchange is the action; being uninsured in the exchange-to-completion gap is the real risk (see 'risk from exchange')."),
     (("nationally significant", "nsip"), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
      "Risk-awareness flag — no standard resolution. NSIP proximity is not a "
      "clearable title/search defect: major infrastructure is consented via a "
@@ -930,6 +1346,54 @@ def lookup_time_cost(flag) -> dict:
 
     show_methodology = (time_source == "research" or cost_source == "research")
     show_document_note = (time_source == "document" or cost_source == "document")
+    # S33-UNRESEARCHED-REASON-v2 (2026-06-27): v1 of this fix (same session)
+    # attached one static sentence to EVERY unresearched flag regardless of
+    # what the flag actually was — confirmed live against the real audit:
+    # "Intestate Death", "High Flood Risk", "118 Planning Applications",
+    # "No TA6 Form", and "Radon Gas Affected Area" all rendered the
+    # IDENTICAL sentence. Correctly called out as templated filler — worse
+    # than the bare label it replaced, because it now LOOKS like effort was
+    # spent saying nothing, which is the opposite of every domain reviewed
+    # (WHO-UMC, ISA 705, GRADE): the reason must be specific to the actual
+    # case, never a swapped-in template. This version differentiates using
+    # only signal the system already has and can prove — severity (a real,
+    # extracted field) and whether the flag's title hits a known
+    # higher-level risk category — rather than inventing per-flag prose.
+    # This is still a stopgap pending real per-category research (the
+    # actual fix, as for ground rent/HMO/absent landlord/personal
+    # covenant above) — it must read as visibly provisional, not as a
+    # finished assessment.
+    both_unresearched = (time_source == "unresearched" and cost_source == "unresearched")
+    unresearched_reason = None
+    if both_unresearched:
+        sev = (flag.get("severity") or "").lower().strip() if isinstance(flag, dict) else ""
+        if sev == "critical":
+            unresearched_reason = (
+                "Not yet costed. This is flagged CRITICAL severity with no "
+                "researched benchmark behind it — the absence of a figure "
+                "is a research gap, not a sign this is low-impact. Get a "
+                "solicitor or specialist quote before relying on this deal's "
+                "numbers."
+            )
+        elif sev == "high":
+            unresearched_reason = (
+                "Not yet costed. No researched benchmark or document-stated "
+                "figure exists for this specific risk yet — treat the "
+                "absence of a number as unresearched, not as low-cost."
+            )
+        elif sev == "missing":
+            unresearched_reason = (
+                "This flag records a missing document or disclosure, not a "
+                "defect with a market cost to research — no figure is "
+                "expected here. The action is to request the document, not "
+                "to price it."
+            )
+        else:  # note / low / unclassified severity
+            unresearched_reason = (
+                "Not yet costed — no benchmark currently in the lookup "
+                "table for this. Lower severity, but still genuinely "
+                "unresearched rather than confirmed low-cost."
+            )
 
     return {
         "time_days": final_time,
@@ -937,7 +1401,8 @@ def lookup_time_cost(flag) -> dict:
         "time_source": time_source,
         "cost_source": cost_source,
         "methodology": methodology if show_methodology else (
-            "Stated directly in the legal pack for this property." if show_document_note else None
+            "Stated directly in the legal pack for this property." if show_document_note
+            else (unresearched_reason if both_unresearched else None)
         ),
         "outlier_note": outlier_note if show_methodology else None,
     }
