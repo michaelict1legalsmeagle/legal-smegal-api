@@ -1485,12 +1485,27 @@ def _uncertainty_band(valid_count: int, caps: list[dict]) -> float:
         u += 0.08
     elif valid_count <= 4:
         u += 0.03
+    # S-FIX (2026-06-28): category-keyed, not substring-matched against the
+    # human-readable `reason` prose (was: "tenure"/"lease"/"legal_pack"/
+    # "evidence" in r). Increments below are golden-tested to reproduce the
+    # prior implementation's output exactly -- including that
+    # "unquantified_risk" and "condition_risk" currently add 0.0. Their old
+    # reason text used "legal-pack" / "legal pack", never the literal
+    # substring "legal_pack" the old code checked for, so those two caps
+    # were silently contributing nothing despite apparently being designed
+    # to. Preserved as-is here rather than silently corrected -- flagged
+    # separately as its own decision, since turning it on changes real
+    # confidence labels on real deals.
+    INCREMENTS = {
+        "tenure":           0.04,
+        "lease":            0.05,
+        "evidence_tier":    0.04,
+        "comp_count":       0.0,
+        "unquantified_risk":0.0,   # see note above -- was inert before too
+        "condition_risk":   0.0,   # see note above -- was inert before too
+    }
     for cap in caps:
-        r = cap.get("reason", "")
-        if "tenure" in r:    u += 0.04
-        if "lease" in r:     u += 0.05
-        if "legal_pack" in r:u += 0.04
-        if "evidence" in r:  u += 0.04
+        u += INCREMENTS.get(cap.get("category"), 0.0)
     return max(UNCERTAINTY_CAP_LO, min(UNCERTAINTY_CAP_HI, round(u, 4)))
 
 # =============================================================================
@@ -2001,27 +2016,27 @@ def _calculate_confidence(
 
     if n < 3:
         if conf > CAP_COMPS_LT_3:
-            caps.append({"cap": CAP_COMPS_LT_3, "reason": "valid_comparable_count < 3"})
+            caps.append({"cap": CAP_COMPS_LT_3, "category": "comp_count", "reason": "valid_comparable_count < 3"})
             conf = min(conf, CAP_COMPS_LT_3)
 
     if n == 0:
         if conf > CAP_NO_VALID_COMPS:
-            caps.append({"cap": CAP_NO_VALID_COMPS, "reason": "no valid 0.5-mile comps"})
+            caps.append({"cap": CAP_NO_VALID_COMPS, "category": "comp_count", "reason": "no valid 0.5-mile comps"})
             conf = min(conf, CAP_NO_VALID_COMPS)
 
     if tenure_unknown:
         if conf > CAP_TENURE_UNRESOLVED:
-            caps.append({"cap": CAP_TENURE_UNRESOLVED, "reason": "tenure unresolved and material"})
+            caps.append({"cap": CAP_TENURE_UNRESOLVED, "category": "tenure", "reason": "tenure unresolved and material"})
             conf = min(conf, CAP_TENURE_UNRESOLVED)
 
     if leasehold_material and lease_unknown:
         if conf > CAP_LEASE_MISSING:
-            caps.append({"cap": CAP_LEASE_MISSING, "reason": "lease length missing for leasehold"})
+            caps.append({"cap": CAP_LEASE_MISSING, "category": "lease", "reason": "lease length missing for leasehold"})
             conf = min(conf, CAP_LEASE_MISSING)
 
     if short_lease_no_band:
         if conf > CAP_SHORT_LEASE_NO_BAND:
-            caps.append({"cap": CAP_SHORT_LEASE_NO_BAND, "reason": "subject lease < 80 and no same-band lease comps"})
+            caps.append({"cap": CAP_SHORT_LEASE_NO_BAND, "category": "lease", "reason": "subject lease < 80 and no same-band lease comps"})
             conf = min(conf, CAP_SHORT_LEASE_NO_BAND)
 
     # S33-STEP4a: scan the already-extracted flags array for condition/
@@ -2039,13 +2054,14 @@ def _calculate_confidence(
                        for r in included_risks)
     if unquantified:
         if conf > CAP_UNQUANTIFIED_RISKS:
-            caps.append({"cap": CAP_UNQUANTIFIED_RISKS, "reason": "material unquantified legal-pack value risks"})
+            caps.append({"cap": CAP_UNQUANTIFIED_RISKS, "category": "unquantified_risk", "reason": "material unquantified legal-pack value risks"})
             conf = min(conf, CAP_UNQUANTIFIED_RISKS)
 
     if condition_risk_flags:
         if conf > CAP_CONDITION_RISK_SIGNALS:
             caps.append({
                 "cap": CAP_CONDITION_RISK_SIGNALS,
+                "category": "condition_risk",
                 "reason": (
                     f"legal pack contains {len(condition_risk_flags)} condition/distress "
                     f"risk signal(s) (e.g. no-enquiries clause, extended probate "
@@ -2063,6 +2079,7 @@ def _calculate_confidence(
         if conf > CAP_CATEGORY_A_ONLY:
             caps.append({
                 "cap": CAP_CATEGORY_A_ONLY,
+                "category": "evidence_tier",
                 "reason": (
                     "evidence_tier=ppd_category_a_open_market — no distressed-sale "
                     "or auction comparables found; this is the weakest available "
