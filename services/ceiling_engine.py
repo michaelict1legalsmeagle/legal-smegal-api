@@ -2136,18 +2136,31 @@ def risk_routing_coverage(risks: list[dict]) -> dict:
 def _legal_pack_adjustment_factor(risks: list[dict]) -> float:
     """
     legal_pack_value_risk_adjustment_factor = product(1 - value_adjustment_i)
-    Total reduction capped at MAX_TOTAL_VALUE_RISK_ADJ.
+    across ALL active risks, unconditionally.
+
+    S-FIX (2026-06-28): previously used a running additive sum of the inputs
+    to decide when to stop multiplying ("if running_sum > 0.35: break"). That
+    mixed two different units -- an additive gate checked against a
+    multiplicative output -- and meant whichever risks happened to be listed
+    last (an artifact of LLM extraction order, not severity or significance)
+    were silently dropped from the calculation entirely, with no record of
+    having been excluded. Verified on a real deal (39 Main Street,
+    Marston Trussell): 21 active risks, additive sum 67.5%, but the old logic
+    only ever multiplied in the first 11 before breaking -- the other 10,
+    including "No Mining/Ground Stability Search" (0.06) and "No Seller's
+    Enquiries TA6/CPSE" (0.05), never contributed at all.
+
+    Fix: multiply every active risk's fraction in unconditionally, then cap
+    the *result* (1 - factor, the actual reduction) at MAX_TOTAL_VALUE_RISK_ADJ
+    via a floor clamp on factor. This is order-independent by construction
+    (multiplication commutes) and no risk is ever excluded from the product --
+    only the final total is capped, which is what "35% cap" is supposed to mean.
     """
     factor = 1.0
-    total_reduction = 0.0
     for r in risks:
         adj = r.get("value_adjustment", 0.0)
         if adj <= 0:
             continue
-        total_reduction += adj
-        if total_reduction > MAX_TOTAL_VALUE_RISK_ADJ:
-            # Hard cap: do not apply further
-            break
         factor *= (1.0 - adj)
     return round(max(1.0 - MAX_TOTAL_VALUE_RISK_ADJ, factor), 6)
 
