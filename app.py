@@ -4624,18 +4624,18 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
     lim = max(1, min(int(lim), HOUSING_MAX_LIMIT))
     r_miles = max(0.25, min(float(r_miles), 10.0))
 
-    if HOUSING_PROVIDER != "supabase_rpc":
+    if HOUSING_PROVIDER not in ("supabase_rpc", "hetzner_direct"):
         return metric_missing_provider(
-            "Housing provider not configured. Set HOUSING_PROVIDER=supabase_rpc.",
+            "Housing provider not configured. Set HOUSING_PROVIDER=hetzner_direct.",
             sources,
             retrieved,
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
         )
 
-    if not supabase:
+    if not DATA_DATABASE_URL:
         return metric_unavailable(
-            "Housing provider set to supabase_rpc but Supabase is not configured on server.",
-            [{"label": "Supabase", "url": "https://supabase.com/"}],
+            "Housing provider configured but Hetzner DATA_DATABASE_URL is not set on server.",
+            [{"label": "Hetzner data DB", "url": "https://159.69.27.104/"}],
             retrieved,
             extra_metrics={"postcode": pc, "radius_miles": r_miles, "limit": lim},
         )
