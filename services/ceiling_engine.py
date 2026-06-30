@@ -2025,7 +2025,7 @@ def _calculate_confidence(
 
     if n == 0:
         if conf > CAP_NO_VALID_COMPS:
-            caps.append({"cap": CAP_NO_VALID_COMPS, "category": "comp_count", "reason": "no valid 0.5-mile comps"})
+            caps.append({"cap": CAP_NO_VALID_COMPS, "category": "comp_count", "reason": f"no valid comps within {MAX_RADIUS_MILES}mi"})
             conf = min(conf, CAP_NO_VALID_COMPS)
 
     if tenure_unknown:
@@ -2525,7 +2525,7 @@ def calculate_ceiling(
     excluded_comps: list[dict] = []
     seen_addresses: set[str]   = set()
 
-    formula_trace.append("step_1: type+tenure match + HPI normalisation within 0.5 miles")
+    formula_trace.append(f"step_1: type+tenure match + HPI normalisation within {MAX_RADIUS_MILES}mi")
 
     _hpi_used_count    = 0
     _hpi_missing_count = 0
@@ -2903,7 +2903,7 @@ def calculate_ceiling(
         "comparable_valuation": base_value,
         "risk_adjusted_value":  risk_adjusted_value,
         "comparables": {
-            "radius_miles": PRIMARY_RADIUS_MILES,
+            "radius_miles": MAX_RADIUS_MILES,  # engine's outer inclusion bound (S33-STEP1); PRIMARY_RADIUS_MILES drives confidence labelling only
             "valid":        valid_comps,
             "excluded":     excluded_comps,
         },
@@ -3181,7 +3181,7 @@ def ensure_ceiling_owned_objects(
                         "low":  int(round(_v_lo)),
                         "high": int(round(_v_hi)),
                     },
-                    "comparables": {"radius_miles": PRIMARY_RADIUS_MILES, "valid": [], "excluded": []},
+                    "comparables": {"radius_miles": MAX_RADIUS_MILES, "valid": [], "excluded": []},
                     "legal_pack_value_risks": {
                         "method":           "property_value_risk_adjustment_only",
                         "adjustment_factor": 1.0, "adjusted_value": None, "risks": [],
