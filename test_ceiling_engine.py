@@ -63,32 +63,62 @@ def _flag(title, sev):
     return {"title": title, "severity": sev, "summation": ""}
 
 # =============================================================================
-# TEST 1: 0.5-mile rule — comps outside 0.5 miles excluded from primary base
+# TEST 1: Extended-radius decay (S33-STEP1, 2026-06-21) — comps beyond
+# PRIMARY_RADIUS_MILES (0.5mi) are NOT excluded; they are included with
+# reduced weight via EXTENDED_DISTANCE_BANDS, out to MAX_RADIUS_MILES (3.0mi)
+# which is the actual exclusion boundary. PRIMARY_RADIUS_MILES now drives
+# confidence labelling only, not inclusion.
+#
+# 2026-06-30: replaces test_outside_radius_excluded and
+# test_all_outside_radius_is_insufficient, which asserted the pre-S33-STEP1
+# hard 0.5-mile cutoff. That doctrine was deliberately retired on 2026-06-21
+# after a live audit (Hey Street, NG10 3HA) found type/room/age-matched comps
+# at 0.82-1.27mi being wrongly excluded outright, leaving a single comp to
+# anchor the whole valuation — see the DISTANCE RULE comment block above
+# EXTENDED_DISTANCE_BANDS for the full rationale. The production code has
+# matched this doctrine since 2026-06-21; only these tests were stale,
+# flagged in two audits (2026-06-28, 2026-06-30) before being fixed here.
 # =============================================================================
 
-def test_outside_radius_excluded():
+def test_extended_radius_comps_included_with_decay():
+    """Comps beyond 0.5mi are included (not excluded) with reduced weight,
+    out to the 3.0-mile MAX_RADIUS_MILES bound; only beyond that are
+    comps actually excluded."""
     comps = [
-        _comp(200_000, 0.3, addr="A"),
-        _comp(200_000, 0.4, addr="B"),
-        _comp(200_000, 0.51, addr="C"),   # outside — must be excluded
-        _comp(200_000, 1.0,  addr="D"),   # outside — must be excluded
+        _comp(200_000, 0.3,  addr="A"),   # 0.25-0.50 band -> distance_score 0.80
+        _comp(200_000, 0.4,  addr="B"),   # 0.25-0.50 band -> distance_score 0.80
+        _comp(200_000, 0.51, addr="C"),   # 0.50-1.00 band -> distance_score 0.65 (wrongly excluded pre-S33-STEP1)
+        _comp(200_000, 1.0,  addr="D"),   # 0.50-1.00 band -> distance_score 0.65
+        _comp(200_000, 3.5,  addr="E"),   # beyond MAX_RADIUS_MILES (3.0) -> still excluded
     ]
     result = calculate_ceiling([], {}, sold_comps=comps, subject=_subject())
-    # Only 2 comps inside radius — insufficient for full valuation but should appear in valid
-    valid_addrs  = {c["address"] for c in result["comparables"]["valid"]}
-    excl_addrs   = {e["comp"]["address"] for e in result["comparables"]["excluded"] if "comp" in e}
-    assert "C" in excl_addrs, "Comp at 0.51 miles must be excluded"
-    assert "D" in excl_addrs, "Comp at 1.0 miles must be excluded"
-    assert "C" not in valid_addrs
-    assert "D" not in valid_addrs
-    assert result["base"]["valid_comparable_count"] == 2
+    valid_addrs = {c["address"] for c in result["comparables"]["valid"]}
+    excl_addrs  = {e["comp"]["address"] for e in result["comparables"]["excluded"] if "comp" in e}
+
+    assert {"A", "B", "C", "D"} <= valid_addrs, "Comps within 3.0 miles must all be included"
+    assert "E" in excl_addrs, "Comp beyond MAX_RADIUS_MILES (3.0mi) must still be excluded"
+    assert result["status"] == "ok"
+    assert result["base"]["valid_comparable_count"] == 4
+
+    # Decay must actually reduce weight, not just include-and-ignore distance:
+    # nearer comps (0.80 distance_score) must outweigh farther ones (0.65),
+    # all else held equal, and same-band comps must score identically.
+    by_addr = {c["address"]: c["weight"] for c in result["comparables"]["valid"]}
+    assert by_addr["A"] > by_addr["C"], "Nearer comp must carry more weight than farther comp"
+    assert by_addr["A"] == by_addr["B"], "Comps in the same distance band must score identically"
+    assert by_addr["C"] == by_addr["D"], "Comps in the same distance band must score identically"
 
 
-def test_all_outside_radius_is_insufficient():
+def test_few_comps_in_extended_radius_is_degraded_not_insufficient():
+    """2 comps within the 3.0-mile bound (0.6mi, 0.9mi) is 'degraded_low_comps'
+    (usable, flagged, real value) — not 'insufficient_evidence' (blank).
+    They are valid evidence, just below MIN_REQUIRED_COMPS=3."""
     comps = [_comp(200_000, 0.6, addr="X"), _comp(200_000, 0.9, addr="Y")]
     result = calculate_ceiling([], {}, sold_comps=comps, subject=_subject())
-    assert result["status"] == "insufficient_evidence"
-    assert result["valuation_range"]["midpoint"] is None
+    assert result["status"] == "degraded_low_comps"
+    assert result["base"]["valid_comparable_count"] == 2
+    assert result["valuation_range"]["midpoint"] is not None, \
+        "2 valid comps must still produce a (degraded) valuation, not a blank one"
 
 
 # =============================================================================
@@ -475,14 +505,23 @@ def test_uncertainty_band_category_golden():
 
 
 def test_distance_score_deterministic():
+    # 0-0.5mi shape is unchanged from the original pre-S33-STEP1 bands.
     assert _distance_score(0.05)  == 1.00
     assert _distance_score(0.10)  == 1.00
     assert _distance_score(0.15)  == 0.90
     assert _distance_score(0.25)  == 0.90
     assert _distance_score(0.30)  == 0.80
     assert _distance_score(0.50)  == 0.80
-    assert _distance_score(0.51)  is None  # excluded
-    assert _distance_score(1.00)  is None
+    # S33-STEP1 (2026-06-21): beyond 0.5mi, comps decay rather than exclude,
+    # out to MAX_RADIUS_MILES (3.0mi); only beyond that is None (excluded).
+    assert _distance_score(0.51)  == 0.65
+    assert _distance_score(1.00)  == 0.65
+    assert _distance_score(1.50)  == 0.50
+    assert _distance_score(2.00)  == 0.35
+    assert _distance_score(2.99)  == 0.20
+    assert _distance_score(3.00)  == 0.20
+    assert _distance_score(3.01)  is None  # beyond MAX_RADIUS_MILES — excluded
+    assert _distance_score(5.00)  is None
 
 
 def test_recency_score_deterministic():
@@ -1671,12 +1710,46 @@ def test_legacy_verdict_replaced_when_comps_succeed():
     assert src == "computed_from_sold_comps", f"source_decision wrong: {src}"
 
 
-def test_legacy_verdict_preserved_when_comps_all_excluded():
-    """Comps exist but all outside 0.5 miles → safe fallback to legacy, no blank."""
+def test_near_thin_comps_recompute_not_legacy_fallback():
+    """S33-STEP1 (2026-06-21): comps at 0.80mi/0.90mi are within
+    MAX_RADIUS_MILES (3.0) and are now valid evidence (degraded weight, not
+    excluded) — they must produce a genuine fresh recompute, not a legacy
+    fallback. Replaces test_legacy_verdict_preserved_when_comps_all_excluded,
+    which asserted the pre-S33-STEP1 doctrine that 0.5mi+ comps were excluded
+    outright, forcing a fallback. That premise no longer holds."""
     sj = _legacy_summary(base=160_000)
     area_json = {"housing": {"soldComps": [
-        _rpc_comp(260_000, 0.80, "F"),   # > 0.5 miles → excluded
+        _rpc_comp(260_000, 0.80, "F"),
         _rpc_comp(270_000, 0.90, "F"),
+    ]}}
+
+    result = ensure_ceiling_owned_objects(
+        summary_json=sj,
+        area_json=area_json,
+        subject={"property_type": "flat"},
+    )
+    vc  = result["verdict_ceiling"]
+    mid = (vc.get("valuation_range") or {}).get("midpoint") or 0
+
+    assert mid > 0, "Must produce a real value from the 2 valid comps"
+    assert not vc.get("_legacy_source"), \
+        "0.8mi/0.9mi comps are valid evidence under S33-STEP1 — must not fall back to legacy"
+    assert vc.get("status") == "degraded_low_comps", \
+        "2 valid comps (below MIN_REQUIRED_COMPS=3) is degraded, not legacy or insufficient"
+    src = (vc.get("audit") or {}).get("source_decision")
+    assert src == "computed_from_sold_comps", f"source_decision wrong: {src}"
+
+
+def test_comps_beyond_max_radius_fall_back_to_legacy():
+    """Comps genuinely beyond MAX_RADIUS_MILES (3.0mi) ARE excluded outright —
+    this is the real, current exclusion boundary (PRIMARY_RADIUS_MILES=0.5 is
+    label-only, see S33-STEP1) — and recompute correctly fails over to the
+    legacy ceiling rather than blanking. This preserves the regression intent
+    of the old 0.5mi-cutoff test at the boundary that actually exists today."""
+    sj = _legacy_summary(base=160_000)
+    area_json = {"housing": {"soldComps": [
+        _rpc_comp(260_000, 3.50, "F"),   # > MAX_RADIUS_MILES (3.0) → excluded
+        _rpc_comp(270_000, 4.00, "F"),
     ]}}
 
     result = ensure_ceiling_owned_objects(
@@ -2094,12 +2167,34 @@ def test_p2_all_flags_resolved_workbench_equals_verdict():
 
 # ── T19-T20: Fallback safety ──────────────────────────────────────────────
 
-def test_p2_no_blank_ceiling_when_all_comps_fail():
-    """T19: If all comps fail, no blank ceiling — safe fallback used."""
-    # All comps are outside 0.5 miles — will all be excluded
+def test_p2_near_thin_comps_recompute_not_legacy_fallback():
+    """T19 (revised, S33-STEP1): comps at 0.8mi/0.9mi are within
+    MAX_RADIUS_MILES (3.0) and are valid evidence (degraded weight, not
+    excluded) — must produce a genuine recompute, not a legacy fallback."""
     comps = [_p2_comp(260000, 0.8), _p2_comp(270000, 0.9)]
     area  = {"housing": {"soldComps": comps}}
-    # Give it a legacy ceiling to fall back to
+    sj = {
+        "ceiling": {
+            "base_valuation": 160000,
+            "ceiling_range": {"low": 152000, "high": 168000},
+        }
+    }
+    result = ensure_ceiling_owned_objects(summary_json=sj, area_json=area, subject=_p2_subject())
+    vc  = result["verdict_ceiling"]
+    mid = (vc.get("valuation_range") or {}).get("midpoint") or 0
+    assert mid > 0, "Must produce a real value from the 2 valid comps"
+    assert not vc.get("_legacy_source"), \
+        "0.8mi/0.9mi comps are valid evidence under S33-STEP1 — must not fall back to legacy"
+    assert vc.get("status") == "degraded_low_comps"
+
+
+def test_p2_comps_beyond_max_radius_fall_back_to_legacy():
+    """T19b: comps genuinely beyond MAX_RADIUS_MILES (3.0mi) ARE excluded
+    outright — recompute correctly fails over to legacy rather than
+    blanking. Preserves the original T19 regression intent at the boundary
+    that actually exists today (3.0mi, not 0.5mi)."""
+    comps = [_p2_comp(260000, 3.5), _p2_comp(270000, 4.0)]
+    area  = {"housing": {"soldComps": comps}}
     sj = {
         "ceiling": {
             "base_valuation": 160000,
