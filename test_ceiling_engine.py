@@ -266,13 +266,34 @@ def test_legal_pack_value_risk_affects_midpoint():
 
 
 def test_legal_pack_risk_product_formula():
-    """legal_pack_value_risk_adjustment_factor = product(1 - value_adjustment_i)"""
-    flags = [_flag("Defective title", "critical"), _flag("Short lease", "high")]
+    """legal_pack_value_risk_adjustment_factor = product(1 - value_adjustment_i),
+    where value_adjustment_i comes from _SEGMENT_RULES (defect type), not from
+    a severity-tier table. Replaces the 2026-06-14-stale version of this test,
+    which hard-coded severity fractions (critical=0.10, high=0.06) from the
+    pre-S33 severity-bucket pricing model retired on 2026-06-14 in favour of
+    market-consequence segment routing — see _SEGMENT_RULES."""
+    # "Defective title" -> defective_title rule: 0.055 + 0.045 = 0.10
+    # "Restrictive covenant" -> restrictive_covenant rule: 0.010+0.020+0.020 = 0.05
+    # Chosen deliberately distinct (not both 0.10, as the old "critical"/"high"
+    # case coincidentally was) so this test can't pass for the wrong reason.
+    flags = [_flag("Defective title", "critical"), _flag("Restrictive covenant", "high")]
     risks = _process_legal_risks(flags)
     factor = _legal_pack_adjustment_factor(risks)
-    # critical=0.10, high=0.06 → (1-0.10)×(1-0.06) = 0.90×0.94 = 0.846
-    expected = (1 - 0.10) * (1 - 0.06)
+    expected = (1 - 0.10) * (1 - 0.05)
     assert abs(factor - expected) < 0.001, f"Expected {expected} got {factor}"
+
+
+def test_legal_pack_risk_severity_does_not_change_matched_rule_fraction():
+    """Explicit regression guard for the 2026-06-14 design rule: severity is a
+    descriptive label only for a flag that matches a _SEGMENT_RULES entry —
+    it must NOT scale or change the fraction. Same title, different severity,
+    must yield an identical value_adjustment."""
+    fraction_critical = _process_legal_risks([_flag("Defective title", "critical")])[0]["value_adjustment"]
+    fraction_low      = _process_legal_risks([_flag("Defective title", "low")])[0]["value_adjustment"]
+    assert fraction_critical == fraction_low == 0.10, (
+        f"Severity must not change a matched-rule fraction: "
+        f"critical={fraction_critical} low={fraction_low}, both must equal 0.10"
+    )
 
 
 def test_legal_pack_risk_capped_at_35pct():
@@ -814,15 +835,19 @@ def test_partial_resolution_raises_workbench_not_above_verdict():
 # ── TEST 19: Workbench formula — product not sum ─────────────────────────────
 
 def test_workbench_uses_risk_product_not_sum():
-    """Workbench midpoint = verdict_midpoint × product(1 - adj_i)."""
+    """Workbench midpoint = verdict_midpoint × product(1 - adj_i), where adj_i
+    comes from _SEGMENT_RULES (defect type), not a severity-tier table.
+    Replaces the 2026-06-14-stale version, which hard-coded
+    critical=0.10/high=0.06 from the retired severity-bucket pricing model."""
     comps   = _rpc_comps_5(200_000)
     verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    # "Defective title" -> 0.10 (defective_title rule), "Planning issue" -> 0.05
+    # (planning rule: 0.012+0.018+0.020) — confirmed via _process_legal_risks.
     flags   = [_flag("Defective title", "critical"), _flag("Planning issue", "high")]
     wb      = calculate_workbench_ceiling(verdict, flags)
 
     vm = verdict["valuation_range"]["midpoint"]
-    # critical=0.10, high=0.06 → factor = (1-0.10)×(1-0.06) = 0.846
-    expected_factor = (1 - 0.10) * (1 - 0.06)
+    expected_factor = (1 - 0.10) * (1 - 0.05)
     expected_mid    = round(vm * expected_factor, 2)
     actual_mid      = wb["valuation_range"]["midpoint"]
 
