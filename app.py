@@ -4576,22 +4576,50 @@ def _robust_comp_base(prices) -> Optional[float]:
     return sum(trimmed) / len(trimmed)
 
 
-# ── TASK 2: density-aware radius compression ────────────────────────────────
-# Measured: a 3-mile radius in dense London postcode areas pulls 13k-14k
-# transactions and the comps RPC times out cold (NW9/E14/N1/E1 verified).
-# Compress the START radius for these areas BEFORE RPC execution. Only the
-# London postcode areas are included — that is the measured timeout zone;
-# other areas are left on the configured default (no evidence they time out).
+# ── density-aware radius compression ────────────────────────────────────────
+# JUSTIFICATION (2026-06-30 audit — evidence-based, supersedes original):
 #
-# Radius set to 0.5 mile (805 m) per cold-cache measurement: 1.0 mile still
-# returned 2.3-3.3 s for E14/N1/E1 (above the sub-2s bar); 0.5 mile delivers
-# NW9 676 ms, N1 820 ms, E14 1,535 ms (cold reads present) — all sub-2s.
+# Original reason (2026-05-20): Supabase earthdistance RPC timed out at 3mi in
+# dense London areas (NW9/E14/N1/E1 measured, no spatial index on price_paid_geo).
+# That infrastructure was retired 2026-06-26 (H1-HETZNER migration to PostGIS).
+#
+# Current reason — VALUATION ACCURACY, NOT PERFORMANCE:
+# A spatial index (idx_nspl_geography) was built on nspl_postcodes on 2026-06-30.
+# Post-index, SE22 8LY at 3mi runs in 486ms and E14 5AB at 3mi in <2s, so
+# performance is no longer the constraint. The cap is retained because of a
+# structural accuracy problem confirmed by live data on 2026-06-30:
+#
+# The query uses LIMIT 100 ORDER BY date_of_transfer DESC. In dense London
+# postcodes, ~771 transactions/month occur within 3mi. The 100 most recent
+# therefore span only ~4 days of activity, drawn proportionally from the full
+# 3mi pool. For SE22 8LY (verified against live price_paid_raw_2025):
+#   - 0.0-0.5mi: 2 of the 100 rows (local evidence)
+#   - 2.0-3.0mi: 49 of the 100 rows (Peckham, Camberwell, Brixton)
+#
+# Step 1 property-type filter running on those 100 for a flat (most common
+# type in SE22) finds 2 F-type comps from within 0.5mi — the thin-evidence
+# degraded path. Q3 confirmed the price distortion:
+#   Flats  0.5mi median £540,000 vs 3mi median £425,000 → -£115,000 (-21%)
+#   Terraced: -£195,000 (-20%); Semi: -£440,000 (-33%)
+#
+# This 20-33% systematic undervaluation cannot be corrected by the ceiling
+# engine's distance-decay scoring, because the problem is upstream of scoring:
+# LIMIT 100 fills with distant transactions before the engine sees the data.
+# 0.5mi ensures LIMIT 100 is filled with evidence from the subject's actual
+# market, not the broader area's cheaper postcodes.
+#
+# Non-London areas are left on HOUSING_DEFAULT_RADIUS_MILES (default 3.0mi)
+# because (a) transaction density is far lower, so LIMIT 100 draws from a
+# meaningful fraction of the local pool, and (b) evidence from 0.5-3.0mi is
+# genuinely relevant in sparse markets (see S33-STEP1, 2026-06-21, Hey Street).
 _DENSE_POSTCODE_AREAS = frozenset({"E", "EC", "N", "NW", "SE", "SW", "W", "WC"})
 _DENSE_RADIUS_MILES = 0.5
 
 def _density_tier_radius(pc: str) -> Optional[float]:
-    """Compressed start radius (miles) for dense-market postcodes, else None
-    (None => use the configured default). Decided before RPC execution."""
+    """Compressed radius (miles) for dense London postcodes to prevent
+    LIMIT 100 being crowded out by distant transactions. Returns None for
+    non-London postcodes (caller uses HOUSING_DEFAULT_RADIUS_MILES).
+    Justified by accuracy, not performance — see block comment above."""
     if not pc:
         return None
     _m = re.match(r"^([A-Z]{1,2})", str(pc).upper().strip())
