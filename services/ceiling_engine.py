@@ -13,7 +13,10 @@ Formula
 -------
 base_value =
     weighted_median(adjusted_value_i, weight_i)
-    from sold comparables within 0.5 miles only.
+    from sold comparables within MAX_RADIUS_MILES (3.0 miles).
+    Comps beyond PRIMARY_RADIUS_MILES (0.5mi) are NOT excluded — they are
+    included with reduced weight via EXTENDED_DISTANCE_BANDS (S33-STEP1,
+    2026-06-21). PRIMARY_RADIUS_MILES now drives confidence labelling only.
 
 improved_ceiling_midpoint =
     base_value × legal_pack_value_risk_adjustment_factor
@@ -33,7 +36,8 @@ Architecture
 - Backend owns canonical ceiling object.
 - Frontend must not mutate ceiling_range values.
 - Arithmetic mean is NOT the primary base.
-- Primary comparable universe: distance_miles <= 0.5.
+- Primary comparable universe: distance_miles <= MAX_RADIUS_MILES (3.0),
+  weighted by distance via EXTENDED_DISTANCE_BANDS (see DISTANCE RULE below).
 """
 
 from __future__ import annotations
@@ -2193,7 +2197,9 @@ def calculate_verdict_ceiling(
     fallback_allowed: bool = True,
 ) -> dict:
     """
-    Verdict ceiling: weighted median of 0.5-mile relational comparable evidence.
+    Verdict ceiling: weighted median of relational comparable evidence within
+    MAX_RADIUS_MILES (3.0mi), distance-weighted via EXTENDED_DISTANCE_BANDS
+    (S33-STEP1, 2026-06-21) — not a 0.5-mile hard cutoff.
     Legal-pack flag risks are NOT applied.
     This is the ceiling the investor sees before legal-pack adjustment.
     """
