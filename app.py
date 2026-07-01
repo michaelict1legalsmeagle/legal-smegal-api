@@ -4942,10 +4942,39 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _subject_epc = {}
         try:
             import re as _re_sepc
-            _subj_house = None
-            _shm = _re_sepc.match(r"^\s*(\d+)", str(subject_address or ""))
-            if _shm:
-                _subj_house = _shm.group(1)
+            _subj_house    = None   # building number for neighbour proximity (age band)
+            _subj_flat_num = None   # flat designator for exact EPC match ("3" from "Flat 3, 24 HS")
+            _addr_str      = str(subject_address or "")
+            _addr_lower    = _addr_str.lower().strip()
+
+            # PAON-FIX (2026-07-01): detect flat-prefix addresses and extract the
+            # FLAT designator for EPC matching, plus the BUILDING number for the
+            # age-band neighbour lookup. Previously the regex extracted "3" from
+            # "Flat 3, 24 High Street" as the house number, which never matched
+            # EPC address1 values like "FLAT 3" (they don't start with a digit)
+            # and also compared against "3 Some Other Road" in proximity ranking.
+            _FLAT_UNIT_PREFIXES = ("flat ", "flat,", "apartment ", "apt ", "apt,")
+            _is_flat_addr = any(_addr_lower.startswith(_p) for _p in _FLAT_UNIT_PREFIXES)
+
+            if _is_flat_addr:
+                # Flat designator: the unit identifier after the keyword
+                # "Flat 3A, 24 High St" → flat_num = "3a"; "Apt 12, ..." → "12"
+                _fm = _re_sepc.match(
+                    r"(?:flat|apartment|apt)[,\s]+([0-9a-z]+)", _addr_lower
+                )
+                if _fm:
+                    _subj_flat_num = _fm.group(1).strip(",").strip()
+                # Building number: first digit sequence after a comma in the address
+                # "Flat 3, 24 High Street" → building = "24" (used for age-band only)
+                _bm = _re_sepc.search(r",\s*(\d+)", _addr_str)
+                if _bm:
+                    _subj_house = _bm.group(1)
+            else:
+                # Standard house: "24 High Street" → house = "24"
+                _shm = _re_sepc.match(r"^\s*(\d+)", _addr_str)
+                if _shm:
+                    _subj_house = _shm.group(1)
+
             _sepc_rows = data_query(
                 """SELECT address1, number_habitable_rooms, total_floor_area,
                           construction_age_band, current_energy_rating, uprn, lodgement_date
@@ -4958,15 +4987,40 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             _exact = None
             _nearest = None
             if _sepc_rows:
-                # Exact subject-address match (authoritative for the subject).
-                if _subj_house:
+                # Exact match path A — flat-designator match.
+                # EPC address1 for flats: "FLAT 3" or "FLAT 3, 24 HIGH STREET".
+                # Neither starts with a digit, so the old house-number path never
+                # fired for flats regardless of what _subj_house was.
+                if _subj_flat_num:
+                    _flat_desigs = [
+                        f"flat {_subj_flat_num}",
+                        f"apartment {_subj_flat_num}",
+                        f"apt {_subj_flat_num}",
+                    ]
+                    for _er in _sepc_rows:
+                        _a1 = str(_er.get("address1") or "").lower().strip()
+                        for _fd in _flat_desigs:
+                            if (_a1 == _fd
+                                    or _a1.startswith(_fd + " ")
+                                    or _a1.startswith(_fd + ",")):
+                                _exact = _er
+                                break
+                        if _exact:
+                            break
+
+                # Exact match path B — standard house-number match (non-flat).
+                if not _exact and _subj_house:
                     for _er in _sepc_rows:
                         _m = _re_sepc.match(r"^\s*(\d+)", str(_er.get("address1") or ""))
                         if _m and _m.group(1) == _subj_house:
                             _exact = _er
                             break
+
                 # Nearest neighbour — used ONLY for construction age band, which
                 # IS street-homogeneous (houses on a street were built together).
+                # For flats, _subj_house is the building number after the comma
+                # ("24" from "Flat 3, 24 High St") so the age-band lookup correctly
+                # targets EPCs for properties at or near building 24.
                 if _subj_house:
                     _best = None
                     for _er in _sepc_rows:
@@ -9655,8 +9709,27 @@ def save_area(deal_id: str):
     def _resolve_subject_type_code(addr: str, pc_norm: str, llm_code):
         """Deterministic subject-type resolution.
         Returns (code, source, confidence) where source ∈
-        {epc_exact, epc_neighbour, llm_fallback, none}."""
+        {address_prefix, epc_exact, epc_neighbour, llm_fallback, none}."""
         import re as _re
+
+        # PAON-FIX (2026-07-01): if the subject address begins with a residential
+        # unit designator, the physical property type is unambiguously F (flat /
+        # maisonette) — no EPC lookup is needed or appropriate, and skipping it
+        # avoids the old bug where "Flat 3, 24 High Street" extracted "3" as the
+        # house number and matched "3 <some other road>" in the postcode EPC table,
+        # potentially returning S/T/D instead of F. Returns "high" confidence so
+        # CAP_SUBJECT_TYPE_LOW_CONFIDENCE does not fire on flat deals.
+        _addr_lower = str(addr or "").lower().strip()
+        _FLAT_UNIT_PREFIXES = (
+            "flat ",     # "Flat 3, 24 High Street"
+            "flat,",     # "Flat,24 High Street" (no space before comma)
+            "apartment ",
+            "apt ",
+            "apt,",
+        )
+        if any(_addr_lower.startswith(_p) for _p in _FLAT_UNIT_PREFIXES):
+            return ("F", "address_prefix", "high")
+
         _house = None
         _m = _re.match(r"^\s*(\d+)", str(addr or ""))
         if _m:
