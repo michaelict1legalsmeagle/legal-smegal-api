@@ -6,19 +6,24 @@
 import os
 
 # Workers
-# 2026-07-01: REDUCED FROM 2 TO 1 — OOM fix.
-# Root cause: extract_pdf_text() uses mp.get_context("fork") which copies the
-# full gunicorn worker RSS (~175-210MB) to a child process for each PDF
-# extraction. With 2 workers both simultaneously extracting (triggered by a
-# 6-8 file concurrent upload session), peak memory = 2×worker + 2×fork_child
-# + overhead = ~430-480MB → over the 512MB Render Starter ceiling.
-# workers=1 ensures only one extraction fork runs at a time (~200MB total,
-# ~300MB headroom). Cost: serialised requests — uploads queue behind analysis
-# calls (60-120s LLM). Acceptable on Starter plan. Revert to 2 only after
-# refactoring _extract_pdf_text_worker into a standalone module (imports only
-# fitz, not all of app.py) so mp.get_context("spawn") can be used instead —
-# spawn child RSS ~30-40MB vs fork child ~175MB, making 2 workers safe again.
-workers = 1
+# 2026-07-01: restored to 2 after workers=1 caused ERR_HTTP2_PROTOCOL_ERROR.
+# The OOM on 2026-07-01 (Render instance 27crh, 10:03 AM) was caused by
+# CONCURRENCY=4 in legalsmegal-upload.html sending 4 simultaneous PDF
+# extractions. Each extraction forks the gunicorn worker (~175MB RSS) to a
+# child process via mp.get_context("fork"). 4 concurrent forks = ~430MB+
+# overhead → over the 512MB Starter ceiling. The fix is reducing frontend
+# upload concurrency to 1 (one fork child at a time), NOT reducing workers.
+# workers=1 made the OOM worse in a different direction: the single sync
+# worker blocked in p.join() during extraction, causing all other connections
+# (status polls, analysis, other uploads) to queue on Render's load balancer
+# and eventually receive ERR_HTTP2_PROTOCOL_ERROR. workers=2 keeps worker 2
+# available to serve those requests while worker 1 is extracting.
+# Memory with CONCURRENCY=1: 2×175MB (workers) + 1×25MB (fork) + 30MB = ~405MB → safe.
+# Follow-up (medium-term): refactor _extract_pdf_text_worker into a standalone
+# module (imports only fitz, not all of app.py) and switch to
+# mp.get_context("spawn") — spawn child RSS ~30-40MB vs fork child ~175MB,
+# which allows restoring CONCURRENCY=4 if needed in future.
+workers = 2
 worker_class = "sync"
 
 # Timeouts — must be longer than ANALYSIS_TIMEOUT_SECONDS (120)
