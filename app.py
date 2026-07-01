@@ -7007,67 +7007,42 @@ def upload_document():
     if file_size > MAX_SIZE:
         return jsonify({"error": "File exceeds 20MB limit. Split your legal pack into smaller documents."}), 413
 
-    # ── H4-ASYNC-OCR: decide OCR-needed inline (fast, no network call) ──
-    # H4-OOM-SAFETY (2026-06-27): if is_image_only_pdf() itself throws, this
-    # MUST default to needs_ocr=True, not False. A prior incident (confirmed
-    # via direct memory measurement) showed a genuinely scanned 32-page PDF
-    # caused pdfplumber's double-pass retry to consume 1.29GB against this
-    # container's 512MB ceiling — an OOM crash, not a timeout. The fast path
-    # below has NO memory safeguard against that; only the OCR/background
-    # path does (Document AI, not local CPU/memory). Defaulting to False on
-    # a detection failure would route straight back into the exact mechanism
-    # that caused the original crash. Failing toward OCR is always the safe
-    # direction — OCR being slow or retried is recoverable; an OOM kill is not.
+    # ── H4-ASYNC-OCR: route to OCR based on Hetzner extraction result ──────
+    # H-EXTRACT-OCR-ROUTE (2026-07-01): eliminated is_image_only_pdf() from
+    # the main gunicorn worker process. Root cause of OOM with CONCURRENCY=2:
+    # is_image_only_pdf() calls fitz.open(stream=file_bytes) IN THE WORKER,
+    # parsing the entire PDF structure in local memory. For large PDFs (14MB+),
+    # fitz uses 3-5× the PDF size as working memory — 56-100MB per worker.
+    # With 2 workers simultaneously: 350MB base + 2×70MB = 490MB+, breaching
+    # the 512MB Render Starter ceiling. Confirmed OOMs: 10:03 AM, 2:14 PM,
+    # 2:49 PM, 5:05 PM (all July 1 2026 — Render Events tab).
+    #
+    # Fix: Hetzner already runs fitz internally (on a machine with adequate
+    # RAM). extract_pdf_text() calls Hetzner first. If Hetzner returns
+    # non-empty text → PDF has a text layer → no OCR needed. If Hetzner
+    # returns empty text → PDF has no extractable layer → route to background
+    # OCR. Identical information to is_image_only_pdf(), zero local fitz usage.
+    #
+    # H4-OOM-SAFETY preserved: empty text (Hetzner or spawn fallback) → OCR
+    # background path. The fail-safe direction (toward OCR, not local retry)
+    # is unchanged. The only new edge case — Hetzner returning empty text for
+    # a malformed-but-not-scanned PDF — routes it to OCR unnecessarily but
+    # safely. OCR being slow is recoverable; local fitz OOM is not.
+    #
+    # Memory model post-fix: 2 workers × (175MB base + 20MB file_bytes) =
+    # 390MB peak even for max-size PDFs — 122MB headroom within 512MB.
     _t0 = time.time()
-    needs_ocr = True  # safe default — only set False on a CONFIRMED negative result
-    if docai_ocr is not None:
-        try:
-            needs_ocr = docai_ocr.is_image_only_pdf(file_bytes)
-        except Exception as e:
-            app.logger.warning(f"is_image_only_pdf check failed: {e} — "
-                                f"defaulting to needs_ocr=True (fail-safe; "
-                                f"see H4-OOM-SAFETY) rather than risking the "
-                                f"fast path's unguarded pdfplumber retry")
-            needs_ocr = True
-    else:
-        # H4-OOM-RISK-ACKNOWLEDGED (2026-06-27): docai_ocr module failed to
-        # import entirely (should not happen in normal operation — both
-        # google-cloud-documentai and google-cloud-storage are pinned in
-        # requirements.txt — but this branch exists as a defensive
-        # fallback for a broken deploy/dependency). In this specific case
-        # there is NO safe routing available: the background-OCR path
-        # cannot run without docai_ocr, and extract_pdf_text() itself
-        # falls through to the SAME unguarded pdfplumber double-pass retry
-        # either way (confirmed by direct code inspection — see the
-        # "Both extraction methods failed" fallback inside extract_pdf_text).
-        # This is a PRE-EXISTING risk this change does not worsen, but does
-        # not close either — if docai_ocr is genuinely unavailable AND a
-        # truly scanned, many-page PDF is uploaded, the OOM risk from the
-        # documented 2026-06-20 incident (1.29GB on a 32-page scan vs a
-        # 512MB ceiling) remains real. Logged loudly so this is never
-        # silently masked.
-        app.logger.error(
-            "docai_ocr module is unavailable — OCR fallback cannot run. "
-            "Scanned/image-only PDFs will fall through to pdfplumber's "
-            "double-pass retry with NO memory safeguard (see 2026-06-20 "
-            "OOM incident). This indicates a broken deploy/dependency, "
-            "not normal operation."
-        )
-        needs_ocr = False  # no OCR path exists to send it to either — see above
-    _t_classify_ocr_need = round(time.time() - _t0, 2)
+    try:
+        extracted_text, page_count = extract_pdf_text(file_bytes)
+        needs_ocr = (docai_ocr is not None) and (not extracted_text)
+    except Exception as e:
+        app.logger.warning(f"PDF extraction failed: {e} — routing to OCR")
+        extracted_text, page_count = "", 0
+        needs_ocr = docai_ocr is not None
+    _t_extract = round(time.time() - _t0, 2)
+    _t_classify_ocr_need = 0.0  # no longer a separate step
 
     if not needs_ocr:
-        # ── Fast path — UNCHANGED from before. Confirmed sub-second for
-        # 9 of 16 documents in the real test batch; no reason to make
-        # this path async. ──
-        try:
-            _t0 = time.time()
-            extracted_text, page_count = extract_pdf_text(file_bytes)
-            _t_extract = round(time.time() - _t0, 2)
-        except Exception as e:
-            app.logger.warning(f"PDF extraction failed: {e} — storing without text")
-            extracted_text, page_count = "", 0
-            _t_extract = round(time.time() - _t0, 2)
         extraction_status = "complete" if extracted_text else "empty"
 
         _t0 = time.time()
