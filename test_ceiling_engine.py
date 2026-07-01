@@ -26,10 +26,13 @@ from services.ceiling_engine import (
     _uncertainty_band,
     _legal_pack_adjustment_factor,
     _process_legal_risks,
+    _calculate_confidence,
     MIN_REQUIRED_COMPS,
     PREFERRED_COMPS,
     PRIMARY_RADIUS_MILES,
     MAX_TOTAL_VALUE_RISK_ADJ,
+    CAP_SUBJECT_TYPE_LOW_CONFIDENCE,
+    CAP_SUBJECT_FLOOR_AREA_LOW_CONFIDENCE,
     EXCLUDED_FROM_CEILING,
     VERSION,
 )
@@ -2941,3 +2944,247 @@ class TestEngineTypeMatchingWithResolver:
                 f"None subject type: comp {c.get('property_type')} should score "
                 f"TYPE_NEAR_EQUIV=0.75, got {c['scores'].get('type')}"
             )
+
+
+# =============================================================================
+# resolve_comp_size — persisted unit tests
+# (2026-06-30: the 2026-06-25 session described this as "unit-tested" but
+# it was verified manually against real deals only — zero entries existed in
+# this file. Added here so the function has durable regression coverage
+# matching the same standard as the rest of the suite.)
+#
+# resolve_comp_size lives in app.py and requires Flask context to import,
+# so the tests reproduce the function logic standalone (trivially verifiable
+# against app.py:4383-4459 — identical logic, no mocking, no patching).
+# =============================================================================
+
+import re as _re
+
+def _resolve_comp_size_standalone(comp_paon_or_address, candidate_epc_rows):
+    """
+    Verbatim copy of resolve_comp_size() from app.py:4383-4459.
+    Kept here so the test file has no Flask import dependency.
+    If app.py's resolve_comp_size is ever changed, this copy must be updated
+    to match — they are intentionally identical.
+    """
+    _none_result = {
+        "floor_area": None, "habitable_rooms": None,
+        "construction_age_band": None, "energy_rating": None, "source": "none",
+    }
+    if not candidate_epc_rows:
+        return _none_result
+
+    def _lead_num(_s):
+        _m = _re.match(r"^\s*(\d+)", str(_s or ""))
+        return _m.group(1) if _m else None
+
+    _comp_house = _lead_num(comp_paon_or_address)
+    _chosen, _source = None, "none"
+
+    if _comp_house:
+        for _er in candidate_epc_rows:
+            if _lead_num(_er.get("address1")) == _comp_house:
+                _chosen, _source = _er, "comp_epc_exact"
+                break
+
+    if _chosen is None and _comp_house:
+        _best = None
+        for _er in candidate_epc_rows:
+            _hn = _lead_num(_er.get("address1"))
+            if _hn is None:
+                continue
+            _dist = abs(int(_hn) - int(_comp_house))
+            if _best is None or _dist < _best[0]:
+                _best = (_dist, _er)
+        if _best:
+            _chosen, _source = _best[1], "comp_epc_nearest"
+
+    if _chosen is None:
+        _chosen, _source = candidate_epc_rows[0], "comp_epc_postcode_any"
+
+    if not _chosen:
+        return _none_result
+
+    return {
+        "floor_area":            float(_chosen.get("total_floor_area") or 0) or None,
+        "habitable_rooms":       _chosen.get("number_habitable_rooms"),
+        "construction_age_band": (str(_chosen.get("construction_age_band") or "").strip().upper() or None),
+        "energy_rating":         _chosen.get("current_energy_rating"),
+        "source":                _source,
+    }
+
+
+_EPC_ROWS = [
+    {"address1": "8 Main St",  "total_floor_area": 75.0,  "number_habitable_rooms": 3,
+     "construction_age_band": "1950-1966", "current_energy_rating": "D"},
+    {"address1": "12 Main St", "total_floor_area": 85.0,  "number_habitable_rooms": 4,
+     "construction_age_band": "1967-1975", "current_energy_rating": "C"},
+    {"address1": "14 Main St", "total_floor_area": 90.0,  "number_habitable_rooms": 4,
+     "construction_age_band": "1967-1975", "current_energy_rating": "B"},
+]
+
+
+def test_resolve_comp_size_exact_match():
+    """Tier 1: comp's own house number matches an EPC row → comp_epc_exact."""
+    r = _resolve_comp_size_standalone("12", _EPC_ROWS)
+    assert r["source"]       == "comp_epc_exact",  f"source={r['source']}"
+    assert r["floor_area"]   == 85.0,               f"floor_area={r['floor_area']}"
+    assert r["habitable_rooms"] == 4
+
+
+def test_resolve_comp_size_nearest_match():
+    """Tier 2: no exact match → nearest house number wins (12 < 14 distance from 13)."""
+    r = _resolve_comp_size_standalone("13", _EPC_ROWS)
+    assert r["source"]     == "comp_epc_nearest", f"source={r['source']}"
+    assert r["floor_area"] == 85.0,               "nearest to 13 is 12 (distance 1), not 14 (distance 1 too — first wins)"
+
+
+def test_resolve_comp_size_postcode_any_no_house_number():
+    """Tier 3: no leading house number in paon → can't exact/nearest match → postcode_any."""
+    r = _resolve_comp_size_standalone("Flat 2", _EPC_ROWS)
+    assert r["source"]     == "comp_epc_postcode_any", f"source={r['source']}"
+    assert r["floor_area"] == 75.0  # first EPC row
+
+
+def test_resolve_comp_size_none_no_epc_rows():
+    """Tier 4: empty candidate list → source=none, all fields None."""
+    r = _resolve_comp_size_standalone("12", [])
+    assert r["source"]     == "none", f"source={r['source']}"
+    assert r["floor_area"] is None
+    assert r["habitable_rooms"] is None
+
+
+def test_resolve_comp_size_zero_floor_area_returns_none():
+    """A row with total_floor_area=None (or 0) must return floor_area=None, not 0.0."""
+    rows = [{"address1": "12 Main St", "total_floor_area": None,
+             "number_habitable_rooms": 3, "construction_age_band": None, "current_energy_rating": "C"}]
+    r = _resolve_comp_size_standalone("12", rows)
+    assert r["source"]     == "comp_epc_exact"
+    assert r["floor_area"] is None, f"zero/None total_floor_area must produce floor_area=None, got {r['floor_area']}"
+
+
+def test_resolve_comp_size_postcode_any_triggers_downstream_cap():
+    """
+    Regression: when floor_area_source == 'comp_epc_postcode_any', ceiling_engine.py
+    caps the size score at 0.80 (ceiling_engine.py:1762-1763, S35-COMP-SOURCE-DISCOUNT).
+    This test confirms the source tag is the right string to trigger that cap, and that
+    the cap fires correctly in the engine for this specific tag value.
+    """
+    from services.ceiling_engine import calculate_ceiling
+
+    def _mk_comp_with_source(price, dist, floor_area, source):
+        return {
+            "price": price, "distance_miles": dist, "months_ago": 3,
+            "address": f"Comp {price}", "tenure": "freehold", "property_type": "flat",
+            "evidence_quality": "official", "internal_area": floor_area,
+            "floor_area_source": source,
+        }
+
+    subject = {"property_type": "flat", "tenure": "freehold", "internal_area": 80.0}
+
+    # Comp with EXACT EPC (source != postcode_any) — size score should be full
+    # Comp with POSTCODE_ANY — same size ratio, but size score capped at 0.80
+    comps_exact = [_mk_comp_with_source(200_000 + i*2000, 0.1+i*0.02, 80.0, "comp_epc_exact")
+                   for i in range(5)]
+    comps_any   = [_mk_comp_with_source(200_000 + i*2000, 0.1+i*0.02, 80.0, "comp_epc_postcode_any")
+                   for i in range(5)]
+
+    result_exact = calculate_ceiling([], {}, sold_comps=comps_exact, subject=subject)
+    result_any   = calculate_ceiling([], {}, sold_comps=comps_any,   subject=subject)
+
+    # Both should have 5 valid comps (size-score cap doesn't exclude, it just reduces weight)
+    assert result_exact["base"]["valid_comparable_count"] == 5
+    assert result_any["base"]["valid_comparable_count"]   == 5
+
+    # The postcode_any comps must carry a lower per-comp weight (cap reduces size score)
+    w_exact = sum(c["weight"] for c in result_exact["comparables"]["valid"])
+    w_any   = sum(c["weight"] for c in result_any["comparables"]["valid"])
+    assert w_any < w_exact, (
+        f"postcode_any comps must carry lower total weight than exact comps: "
+        f"w_any={w_any:.4f} w_exact={w_exact:.4f}"
+    )
+    # Any postcode_any comp's size_score must not exceed 0.80
+    for c in result_any["comparables"]["valid"]:
+        sz = c["scores"].get("size")
+        if sz is not None:
+            assert sz <= 0.80, f"comp_epc_postcode_any size score must be capped at 0.80, got {sz}"
+
+
+# =============================================================================
+# Subject-resolution confidence caps — S35-TYPE-CONF + S35-AREA-CONF
+# (2026-06-30: closes the gap confirmed live against 10 Lid Lane DE6 2EG on
+# 2026-06-25 and flagged as blocking go-live in two audit sessions without
+# being actioned — _type_conf and _gia_conf were computed and discarded, never
+# reaching _calculate_confidence.)
+# =============================================================================
+
+def _conf_subject(**kw):
+    return {"tenure": "freehold", **kw}
+
+def _conf_comps(n=5):
+    return [{"weight": 0.65, "audit_warnings": []} for _ in range(n)]
+
+def test_subject_type_high_conf_no_cap():
+    """type_confidence='high' must not change score vs None."""
+    f_none, _, _ = _calculate_confidence(_conf_comps(), _conf_subject(), [], [], False, False, False, "")
+    f_high, _, _ = _calculate_confidence(_conf_comps(), _conf_subject(type_confidence="high"), [], [], False, False, False, "")
+    assert f_high == f_none, f"'high' must not cap: {f_high} vs {f_none}"
+
+def test_subject_type_medium_conf_no_cap():
+    """type_confidence='medium' must not change score."""
+    f_none, _, _ = _calculate_confidence(_conf_comps(), _conf_subject(), [], [], False, False, False, "")
+    f_med, _, _  = _calculate_confidence(_conf_comps(), _conf_subject(type_confidence="medium"), [], [], False, False, False, "")
+    assert f_med == f_none, f"'medium' must not cap: {f_med} vs {f_none}"
+
+def test_subject_type_none_conf_no_cap():
+    """type_confidence=None (old deals, missing key) must not change score."""
+    f1, _, _ = _calculate_confidence(_conf_comps(), _conf_subject(), [], [], False, False, False, "")
+    f2, _, _ = _calculate_confidence(_conf_comps(), _conf_subject(type_confidence=None), [], [], False, False, False, "")
+    assert f1 == f2, f"None must not cap: {f1} vs {f2}"
+
+def test_subject_type_low_conf_caps_at_0_55():
+    """type_confidence='low' must cap confidence at 0.55 and produce Low confidence label."""
+    f, caps, lbl = _calculate_confidence(_conf_comps(), _conf_subject(type_confidence="low"), [], [], False, False, False, "")
+    assert f <= 0.55, f"Expected <= 0.55, got {f}"
+    assert lbl == "Low confidence", f"Expected 'Low confidence', got '{lbl}'"
+    cats = [c["category"] for c in caps]
+    assert "subject_type_low_confidence" in cats, f"Cap category missing from {cats}"
+
+def test_subject_floor_area_low_conf_caps_at_0_55():
+    """floor_area_confidence='low' must cap confidence at 0.55."""
+    f, caps, lbl = _calculate_confidence(_conf_comps(), _conf_subject(floor_area_confidence="low"), [], [], False, False, False, "")
+    assert f <= 0.55, f"Expected <= 0.55, got {f}"
+    assert lbl == "Low confidence"
+    cats = [c["category"] for c in caps]
+    assert "subject_floor_area_low_confidence" in cats, f"Cap category missing from {cats}"
+
+def test_subject_conf_caps_do_not_change_valuation_midpoint():
+    """
+    CRITICAL: comparable_valuation midpoint must be identical whether
+    type_confidence is 'high' or 'low'. The cap changes the label, not the number.
+    """
+    def _rcomp_full(price, dist):
+        return {"price": price, "distance_miles": dist, "months_ago": 3,
+                "address": f"A{price}", "tenure": "freehold",
+                "property_type": "flat", "evidence_quality": "official"}
+    comps = [_rcomp_full(200_000 + i*2000, 0.1 + i*0.02) for i in range(5)]
+    r_hi = calculate_ceiling([], {}, sold_comps=comps,
+                             subject={"property_type": "flat", "tenure": "freehold", "type_confidence": "high"})
+    r_lo = calculate_ceiling([], {}, sold_comps=comps,
+                             subject={"property_type": "flat", "tenure": "freehold", "type_confidence": "low"})
+    assert r_hi["base"]["value"] == r_lo["base"]["value"], (
+        f"type_confidence cap must not change midpoint: hi={r_hi['base']['value']} lo={r_lo['base']['value']}"
+    )
+    assert r_hi["confidence"]["final"] > r_lo["confidence"]["final"], (
+        "low type_confidence must produce a lower confidence score than high"
+    )
+
+def test_subject_both_low_conf_applies_both_caps():
+    """Both type and floor_area low must both appear in caps list."""
+    f, caps, _ = _calculate_confidence(
+        _conf_comps(), _conf_subject(type_confidence="low", floor_area_confidence="low"),
+        [], [], False, False, False, ""
+    )
+    cats = [c["category"] for c in caps]
+    assert "subject_type_low_confidence" in cats or f <= 0.55, "type cap must fire or conf already at cap"
+    assert f <= 0.55

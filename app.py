@@ -9339,11 +9339,20 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
         # Build subject dict for relational comparable engine
         _prop_rc = (_summary.get("property") or {})
         _subject_rc = {
-            "property_type": _prop_rc.get("physical_type") or _prop_rc.get("type") or _d.get("deal_type"),
-            "tenure":        _prop_rc.get("tenure") or _fins_inputs.get("tenure"),
-            "lease_length":  _prop_rc.get("lease_length") or _fins_inputs.get("lease_length"),
-            "internal_area": _prop_rc.get("internal_area") or _fins_inputs.get("internal_area") or (_housing.get("subject_floor_area") if isinstance(_housing, dict) else None),
-            "condition":     _prop_rc.get("condition"),
+            "property_type":        _prop_rc.get("physical_type") or _prop_rc.get("type") or _d.get("deal_type"),
+            "tenure":               _prop_rc.get("tenure") or _fins_inputs.get("tenure"),
+            "lease_length":         _prop_rc.get("lease_length") or _fins_inputs.get("lease_length"),
+            "internal_area":        _prop_rc.get("internal_area") or _fins_inputs.get("internal_area") or (_housing.get("subject_floor_area") if isinstance(_housing, dict) else None),
+            "condition":            _prop_rc.get("condition"),
+            # S35-TYPE-CONF-PERSIST (2026-06-30): thread subject-resolution confidence
+            # labels into the engine so _calculate_confidence can cap accordingly.
+            # Both values were computed in save_area and persisted to summary_json.property:
+            #   type_confidence          → from _resolve_subject_type_code ("high"/"medium"/"low"/"none")
+            #   floor_area_confidence    → from _compute_gia_from_text ("high"/"medium"/"low")
+            # The engine reads these via subject.get() with None defaults — no cap fires
+            # for old deals that pre-date this change (None → no cap, not "low").
+            "type_confidence":       _prop_rc.get("type_confidence"),
+            "floor_area_confidence": _prop_rc.get("internal_area_confidence"),
         }
         # Verdict: comparable base only, no flag risks.
         # Use v2 functions when available; fall back to v1 _calc_ceiling when not.
@@ -9796,6 +9805,19 @@ def save_area(deal_id: str):
     if _resolved_code:
         _prop_type_code = _resolved_code
     _subject_type_meta = {"code": _resolved_code, "source": _type_source, "confidence": _type_conf}
+    # S35-TYPE-CONF-PERSIST (2026-06-30): persist _type_conf to summary_json so
+    # _recompute_deal_ceiling's fresh DB read can thread it into the subject dict
+    # and on into _calculate_confidence. Without this, the value is computed here
+    # and discarded — _recompute_deal_ceiling (called later from _fetch_and_store)
+    # does a fresh Supabase read and has no other way to see it. Mirrors exactly
+    # the existing _gia_conf persist at line 9631 (internal_area_confidence).
+    try:
+        _prop["type_confidence"] = _type_conf
+        _summary["property"] = _prop
+        supabase.table("deals").update({"summary_json": _summary}) \
+            .eq("id", deal_id).eq("user_id", request.user_id).execute()
+    except Exception as _tcp:
+        print(f"[S35-TYPE-CONF-PERSIST warn] {deal_id}: {_tcp}")
     _raw_gp = _prop.get("guide_price_pence") or _prop.get("guide_price") or 0
     try:
         _gp_num = float(_raw_gp)
