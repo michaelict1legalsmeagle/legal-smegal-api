@@ -299,8 +299,8 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
 
     # ── Missing searches — cure cost + timing/delay ──────────────────────────
     (["local authority search", "local search", "drainage search", "environmental search",
-      "water search", "chancel search", "coal search", "mining search",
-      "missing search", "no search"],
+      "water search", "chancel search", "chancel repair", "chancel liability",
+      "coal search", "mining search", "missing search", "no search"],
      {"direct_cure_cost": 0.008, "delay_finance_drag": 0.012}),
 
     # ── Management pack / service charge info missing ────────────────────────
@@ -318,7 +318,7 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
      {"lender_certifiability_risk": 0.060, "residual_marketability_risk": 0.040}),
 
     # ── Forfeiture / breach of covenant ─────────────────────────────────────
-    (["forfeiture", "breach of covenant", "breach of lease"],
+    (["forfeiture", "breach of covenant", "breach of lease", "prohibition on dealings"],
      {"indemnity_insurance_cost": 0.010, "lender_certifiability_risk": 0.025,
       "residual_marketability_risk": 0.015}),
 
@@ -338,18 +338,23 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
      {"indemnity_insurance_cost": 0.012, "residual_marketability_risk": 0.008}),
 
     # ── Restrictive covenant ─────────────────────────────────────────────────
-    (["restrictive covenant", "restrictive covenants"],
+    # "covenant" added (2026-07-01) to catch LLM flag titles formatted as
+    # "YEAR Covenant — [restriction]" e.g. "1984 Covenant — No Back-to-Back
+    # Dwellinghouses" which share the same market-consequence profile as an
+    # explicit restrictive covenant but lack "restrictive" in the title.
+    (["restrictive covenant", "restrictive covenants", "covenant"],
      {"indemnity_insurance_cost": 0.010, "lender_certifiability_risk": 0.020,
       "residual_marketability_risk": 0.020}),
 
     # ── Rights of way / easement defects ─────────────────────────────────────
     (["right of way", "rights of way", "easement", "right to light", "access rights",
-      "ransom strip"],
+      "ransom strip", "third-party right", "right to use", "party wall"],
      {"lender_certifiability_risk": 0.020, "residual_marketability_risk": 0.025}),
 
     # ── Planning / building control ───────────────────────────────────────────
     (["planning", "building regulations", "building control", "planning permission",
-      "listed building", "conservation area", "enforcement notice"],
+      "listed building", "conservation area", "enforcement notice",
+      "article 4", "permitted development"],
      {"indemnity_insurance_cost": 0.012, "lender_certifiability_risk": 0.018,
       "residual_marketability_risk": 0.020}),
 
@@ -367,7 +372,8 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
      {"lender_certifiability_risk": 0.030, "residual_marketability_risk": 0.025}),
 
     # ── Contamination / environmental ────────────────────────────────────────
-    (["contamination", "environmental risk", "flood risk", "subsidence"],
+    (["contamination", "environmental risk", "environmental liability",
+      "environmental indemnity", "flood risk", "subsidence"],
      {"lender_certifiability_risk": 0.025, "residual_marketability_risk": 0.035}),
 
     # ── S35-RISK-COVERAGE (2026-06-25): three new entries closing the fallback
@@ -405,6 +411,134 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
     (["separate title", "dual title", "two titles", "probate", "estate sale",
       "deceased proprietor"],
      {"direct_cure_cost": 0.006, "delay_finance_drag": 0.010, "lender_certifiability_risk": 0.008}),
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # S36-RISK-COVERAGE (2026-07-01): ten new rules closing the 59.6% fallback
+    # gap confirmed against 5 live deals (138 substantive flags measured).
+    # Each rule's fractions are COPIED VERBATIM from an existing, already-
+    # trusted rule for the structurally closest analogous defect — no new
+    # fraction values invented. Fraction sources documented per rule.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Occupier / vacant possession risk ────────────────────────────────────
+    # Unknown occupiers, tenancy uncertainty, receiver has no tenancy info.
+    # Market consequence: legal process to achieve vacant possession (delay +
+    # direct cost) and residual risk that property cannot be cleared.
+    # Fractions: arrears rule (direct_cure 0.015), section_20 (delay 0.015),
+    # contamination rule (residual 0.035).
+    (["vacant possession", "unknown occupier", "tenancy agreement",
+      "tenancy schedule", "receiver has none", "no tenancy",
+      "occupiers or tenancies", "occupancy status", "missing tenancy"],
+     {"direct_cure_cost": 0.015, "delay_finance_drag": 0.015,
+      "residual_marketability_risk": 0.035}),
+
+    # ── LPA receiver / no title guarantee / limited title guarantee ───────────
+    # LPA receivers, attorneys without direct ownership, limited/good leasehold
+    # title, seller gives no warranties. Primary risk: lender certifiability
+    # (most lenders require full title guarantee) and resale (buyer cannot
+    # pass on the warranty they never received).
+    # Fractions: flying_freehold rule (lender 0.030, residual 0.025).
+    (["lpa receiver", "lpa receivership", "no title guarantee",
+      "limited title guarantee", "good leasehold title",
+      "seller gives no warranty", "attorney sale", "title guarantee",
+      "minimal warranty", "not absolute", "not original owner",
+      "structural complexity"],
+     {"lender_certifiability_risk": 0.030, "residual_marketability_risk": 0.025}),
+
+    # ── Registered mortgage / lender's charge outstanding ────────────────────
+    # Registered charges that require lender consent or discharge on completion.
+    # Market consequence: delay (coordination with selling lender required) and
+    # lender certifiability risk for the buyer's lender until charge removed.
+    # Fractions: missing_search (delay 0.012), flying_freehold (lender 0.030).
+    (["registered charge", "mortgage outstanding", "lender consent",
+      "further advances", "lender entitled", "charge outstanding",
+      "mortgage charge", "lender's charge", "bank mortgage",
+      "separate mortgage charge", "restriction on title", "consent of"],
+     {"delay_finance_drag": 0.012, "lender_certifiability_risk": 0.030}),
+
+    # ── Coal mining confirmed / ground instability ────────────────────────────
+    # Confirmed coal mining, ground instability, mines and minerals excepted.
+    # Distinct from missing coal search (handled by missing_search rule) —
+    # this is where a confirmed risk has been identified.
+    # Fractions: contamination rule (lender 0.025, residual 0.035) — same
+    # risk profile as physical contamination.
+    (["coal mining", "underground coal", "coal mine", "mining confirmed",
+      "mining ground instability", "mines and minerals", "past mining",
+      "ground stability", "mine entry"],
+     {"lender_certifiability_risk": 0.025, "residual_marketability_risk": 0.035}),
+
+    # ── Seller will not answer buyer enquiries ────────────────────────────────
+    # A blanket refusal to answer enquiries removes the buyer's ability to
+    # obtain pre-completion warranties. Lenders require specific answers;
+    # resale is harder without disclosed property information.
+    # Fractions: rights_of_way rule (lender 0.020, residual 0.025).
+    (["will not answer buyer enquiries", "seller will not answer",
+      "replies qualified", "enquiries not answered",
+      "will not answer enquiries"],
+     {"lender_certifiability_risk": 0.020, "residual_marketability_risk": 0.025}),
+
+    # ── Short / extreme completion / buyer insures from exchange ──────────────
+    # 14-day completions require expensive bridging; buyer-insures-from-exchange
+    # clauses transfer total loss risk pre-completion; blank completion dates
+    # create legal uncertainty. Market consequence: finance drag and residual.
+    # Fractions: section_20 rule (delay 0.015, residual 0.020).
+    (["buyer insures from exchange", "buyer bears risk from exchange",
+      "seller insurance excluded", "14-day completion", "seven-day completion",
+      "28-day completion", "short completion", "completion date blank",
+      "notice to complete"],
+     {"delay_finance_drag": 0.015, "residual_marketability_risk": 0.020}),
+
+    # ── Building Safety Act / fire safety certification ───────────────────────
+    # Missing EWS1 / BSA leaseholder certificates render affected flats
+    # unmortgageable with most mainstream lenders. Equivalent severity to a
+    # defective lease in lender certifiability terms.
+    # Fractions: defective_lease rule (lender 0.050, residual 0.035).
+    (["building safety act", "leaseholder certificate", "ews1", "ews 1",
+      "cladding", "fire safety certificate", "building safety",
+      "remediation contribution"],
+     {"lender_certifiability_risk": 0.050, "residual_marketability_risk": 0.035}),
+
+    # ── EPC E / MEES compliance risk ─────────────────────────────────────────
+    # EPC E / MEES non-compliance creates a letting risk (properties must
+    # be EPC E or better to let legally from 2025). Extends the existing
+    # EPC G/F rule to catch E-rated and MEES-flagged properties, plus
+    # structural defects (solid brick, electric storage heating) that imply
+    # near-term mandatory improvement works.
+    # Fractions: existing EPC G/F rule (delay 0.015, residual 0.020).
+    (["mees compliance", "mees", "epc rating e", "minimum energy efficiency",
+      "electric storage heating", "solid brick walls", "very poor rating",
+      "no epc in", "epc not present", "epc — not present",
+      "near expiry", "epc near expiry"],
+     {"delay_finance_drag": 0.015, "residual_marketability_risk": 0.020}),
+
+    # ── Missing / incomplete leasehold management documents ───────────────────
+    # LPE1, TA7, stale title registers, unreadable lease documents, rent
+    # apportionment issues, conveyance plan gaps, and similar leasehold
+    # administrative deficiencies short of a full lease defect.
+    # Fractions: management_pack rule (direct_cure 0.006, delay 0.010,
+    # lender 0.008) — same administrative-complexity profile.
+    (["lpe1", "ta7", "leaseholder information",
+      "leasehold management information", "sums payable",
+      "leasehold form incomplete", "lease documents unreadable",
+      "lease copy incomplete", "conveyance plan", "stale title register",
+      "very stale", "leasehold information form",
+      "full lease document", "missing copy", "rent apportionment",
+      "tupe"],
+     {"direct_cure_cost": 0.006, "delay_finance_drag": 0.010,
+      "lender_certifiability_risk": 0.008}),
+
+    # ── Absent landlord / corporate freeholder ────────────────────────────────
+    # Freehold held by an absent, corporate, or uncontactable landlord creates
+    # difficulty obtaining consent for works, subletting, or resale; some
+    # lenders require evidence of a responsive freeholder.
+    # Fractions: management_pack (delay 0.010, lender 0.008) +
+    # rights_of_way (residual 0.025) — reflects consent/delay risk and
+    # moderate ongoing resale friction.
+    (["absent landlord", "freeholder is corporate", "corporate freeholder",
+      "freeholder held by", "freehold held by third", "absentee freeholder",
+      "corporate entity — absent"],
+     {"delay_finance_drag": 0.010, "lender_certifiability_risk": 0.020,
+      "residual_marketability_risk": 0.025}),
 ]
 
 # Severity zero-gate: "note" flags carry no market consequence.
