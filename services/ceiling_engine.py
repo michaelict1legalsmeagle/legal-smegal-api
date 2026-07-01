@@ -606,6 +606,31 @@ CAP_TENURE_UNRESOLVED  = 0.45
 CAP_LEASE_MISSING      = 0.40
 CAP_SHORT_LEASE_NO_BAND= 0.35
 CAP_UNQUANTIFIED_RISKS = 0.55
+# S35-TYPE-CONF (2026-06-30): confidence cap when the subject's property type
+# was resolved with low confidence — specifically the 50/50 EPC neighbour
+# tiebreak case (1 Lid Lane=Semi vs 5 Lid Lane=End-Terrace, no clear majority,
+# tie-broke by nearest-house distance). Confirmed live against 10 Lid Lane
+# (DE6 2EG) on 2026-06-25 — flagged as blocking go-live in two separate audit
+# sessions (2026-06-25 and 2026-06-28) without being actioned. The valuation
+# TYPE FILTER (Step 1) runs on this resolved type: if we valued a semi off
+# terrace comps (or vice versa) because of a wrong 50/50 tiebreak, the ceiling
+# number is structurally uncertain. The comp selection was correct IF the type
+# was right, but we cannot be confident it was. A confidence cap is the
+# correct signal — not an adjustment to the number, a flag on its reliability.
+# Also fires when the LLM listing-text crosscheck overrides the EPC tiebreak
+# (llm_crosscheck_override) — the override improves accuracy but the
+# underlying evidence was split, so low confidence is still appropriate.
+# 0.55 = same as CAP_UNQUANTIFIED_RISKS (same principle: real evidence exists,
+# degraded quality). Strictly less severe than CAP_TENURE_UNRESOLVED (0.45)
+# because we HAVE a type, just low confidence in it.
+CAP_SUBJECT_TYPE_LOW_CONFIDENCE        = 0.55
+# S35-AREA-CONF (2026-06-30): same principle for subject floor area resolved
+# with low confidence — specifically when _compute_gia_from_text built a GIA
+# estimate from only 1-2 room dimensions from a partial room schedule
+# (returns _gia_conf="low"). Rare in practice: 80% of the deal book has EPC
+# cert text (returns "high"), 20% has no area data at all (returns None, no
+# cap fires). Only fires when the engine has a number but the number is shaky.
+CAP_SUBJECT_FLOOR_AREA_LOW_CONFIDENCE  = 0.55
 # S33-STEP4a (2026-06-21): confidence cap when the legal pack contains
 # language suggesting the subject property's actual condition may not be
 # comparable to the comp evidence used — e.g. a clause stating the seller
@@ -2091,6 +2116,46 @@ def _calculate_confidence(
                 ),
             })
             conf = min(conf, CAP_CATEGORY_A_ONLY)
+
+    # S35-TYPE-CONF + S35-AREA-CONF (2026-06-30): subject-resolution quality caps.
+    # Only fires when the value is specifically "low" — "high", "medium", and None
+    # (old deals that pre-date this persist, or cases where resolution was clean)
+    # all pass through with no cap. This closes the gap confirmed live against
+    # 10 Lid Lane (DE6 2EG, 2026-06-25): the type was resolved on a 50/50 EPC
+    # neighbour tiebreak (tagged "low") but the ceiling was labelled "High
+    # confidence" — a direct contradiction. The comparable_valuation MIDPOINT is
+    # not affected by this cap; only the label and the confidence.final score change.
+    _type_conf_val        = (subject.get("type_confidence") or "").lower()
+    _floor_area_conf_val  = (subject.get("floor_area_confidence") or "").lower()
+
+    if _type_conf_val == "low":
+        if conf > CAP_SUBJECT_TYPE_LOW_CONFIDENCE:
+            caps.append({
+                "cap":      CAP_SUBJECT_TYPE_LOW_CONFIDENCE,
+                "category": "subject_type_low_confidence",
+                "reason": (
+                    "subject property type resolved with low confidence — "
+                    "EPC neighbour evidence split (no clear majority) or "
+                    "LLM listing-text crosscheck overrode a tiebreak; "
+                    "comp type-matching and the valuation may be affected "
+                    "if the resolved type is wrong"
+                ),
+            })
+            conf = min(conf, CAP_SUBJECT_TYPE_LOW_CONFIDENCE)
+
+    if _floor_area_conf_val == "low":
+        if conf > CAP_SUBJECT_FLOOR_AREA_LOW_CONFIDENCE:
+            caps.append({
+                "cap":      CAP_SUBJECT_FLOOR_AREA_LOW_CONFIDENCE,
+                "category": "subject_floor_area_low_confidence",
+                "reason": (
+                    "subject floor area estimated from partial room schedule "
+                    "(low confidence) — only 1-2 room dimensions were "
+                    "available; size normalisation of comp prices may be "
+                    "less reliable than usual"
+                ),
+            })
+            conf = min(conf, CAP_SUBJECT_FLOOR_AREA_LOW_CONFIDENCE)
 
     final = round(max(0.00, min(1.00, conf)), 2)
     return final, caps, _confidence_label(final)
