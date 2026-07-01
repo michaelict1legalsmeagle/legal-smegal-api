@@ -6497,67 +6497,82 @@ def detect_document_type(filename: str, text: str) -> str:
 def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     """Extract text from PDF bytes. Returns (text, page_count).
 
-    Strategy:
-    1. pymupdf (fitz) — best on complex layouts, tables, multi-column
-    2. Document AI OCR — only if pymupdf yields nothing AND the PDF is
-       confirmed image-only (no text layer at all anywhere)
-    3. Empty string — if both fail (scanned/image PDFs)
+    H-EXTRACT (2026-07-01): production architecture.
 
-    S-CLEANUP (2026-06-28): pdfplumber's double-pass retry has been
-    removed entirely, not migrated anywhere -- it doesn't need a safer
-    place to run, it needs to not run. On a genuinely scanned PDF it has
-    no more chance of extracting text than pymupdf does, but it WILL
-    burn ~30-40MB of memory per page trying — on a 32-page document that
-    crosses this container's 512MB ceiling. This was the confirmed root
-    cause of the original 2026-06-20 OOM incident. Document AI is the
-    existing, already-safe (cloud-side, no local memory cost) fallback
-    for that exact case.
+    PRIMARY — Hetzner extraction microservice:
+      POST http://159.69.27.104:5002/extract  (EXTRACTION_SERVICE_URL)
+      Auth: X-Extraction-Secret header (EXTRACTION_SECRET)
+      Request: multipart file upload (avoids base64 33% overhead on large PDFs)
+      Response: {"text": str, "pages": int, "method": str}
+      Timeout: 30s — text PDFs complete in <5s even at 20MB on Hetzner.
+      Memory on Render: zero child processes. Worker blocks on network I/O
+      only — no fork, no spawn, no child process memory.
 
-    H-KILL (2026-06-29): the real extraction work runs in a separate
-    CHILD PROCESS (not a thread) with a hard timeout. Previously this
-    ran in a daemon thread with `t.join(timeout=...)` — but Python
-    cannot force-terminate a thread. If pymupdf hung on a pathological
-    PDF (no internal timeout of its own — observed live 2026-06-20, a
-    low-yield pymupdf call hanging 17+ seconds), the outer wrapper gave
-    up *waiting*, returned empty text, and moved on — but the hung
-    thread kept running in the background, in the same worker process,
-    holding the full file_bytes and whatever pymupdf/MuPDF allocated at
-    the C level, for as long as it took to either finish or never
-    finish. No single request ever errored from this. Across a
-    multi-hour session with many uploads, each hang left one more
-    orphaned thread running — this is the confirmed mechanism behind
-    every "Instance failed" event recorded on 2026-06-28/29, matching
-    the gradual-climb-then-crash shape on Render's own memory graph,
-    present identically in every code version deployed that day,
-    including states with none of that day's other changes.
+    FALLBACK — spawn-based local extraction (extract_worker.py):
+      Used when Hetzner is unreachable, returns non-200, or times out.
+      Spawn child only imports fitz (~25MB child RSS vs ~175MB fork child).
+      Sufficient for normal-size PDFs without OOM risk on Render Starter.
 
-    A process can be forcibly terminated (SIGTERM, then SIGKILL if
-    needed) regardless of what it's doing internally — the kernel
-    reclaims it outright, unlike a thread. This also closes a second,
-    separate risk for free: if pymupdf ever segfaults on a malformed
-    PDF (a real, known risk in native PDF-parsing libraries), only the
-    child process dies — the gunicorn worker itself is unaffected. Under
-    the old thread-based design, a native crash in the extraction call
-    would have taken the entire worker process down with it.
+    Why multipart over base64 JSON:
+      Hetzner supports both. Multipart avoids encoding the bytes twice in
+      memory (file_bytes + 33% larger base64 string) before sending.
+      For a 20MB PDF: base64 adds 6.7MB of extra in-process allocation.
+
+    H-KILL (2026-06-29): hard timeout via child process retained in the
+    fallback path — SIGTERM/SIGKILL can forcibly terminate a stuck pymupdf
+    call; a thread cannot be terminated.
     """
-    ctx = mp.get_context("fork")
-    q = ctx.Queue()
-    p = ctx.Process(target=_extract_pdf_text_worker, args=(file_bytes, q), daemon=True)
+    ext_url    = (os.getenv("EXTRACTION_SERVICE_URL") or "").strip()
+    ext_secret = (os.getenv("EXTRACTION_SECRET") or "").strip()
+
+    if ext_url and ext_secret:
+        try:
+            resp = requests.post(
+                ext_url,
+                headers={"X-Extraction-Secret": ext_secret},
+                files={"file": ("document.pdf", file_bytes, "application/pdf")},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                d    = resp.json()
+                text = d.get("text", "")
+                pages = d.get("pages", 0)
+                app.logger.info(
+                    f"[H-EXTRACT] Hetzner: {len(text):,} chars, "
+                    f"{pages} pages via method={d.get('method')}"
+                )
+                return text, pages
+            app.logger.warning(
+                f"[H-EXTRACT] Hetzner returned {resp.status_code}: "
+                f"{resp.text[:200]} — falling back to spawn"
+            )
+        except Exception as _e:
+            app.logger.warning(
+                f"[H-EXTRACT] Hetzner unreachable ({_e}) — falling back to spawn"
+            )
+    else:
+        app.logger.warning(
+            "[H-EXTRACT] EXTRACTION_SERVICE_URL or EXTRACTION_SECRET not set "
+            "— using spawn fallback (set both on Render environment)"
+        )
+
+    # ── Spawn fallback ───────────────────────────────────────────────────
+    from extract_worker import extract_pdf_text_worker
+
+    ctx = mp.get_context("spawn")
+    q   = ctx.Queue()
+    p   = ctx.Process(target=extract_pdf_text_worker, args=(file_bytes, q), daemon=True)
     p.start()
     p.join(timeout=_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS)
 
     if p.is_alive():
         app.logger.warning(
-            f"extract_pdf_text: TIMEOUT after {_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS}s "
-            f"— terminating extraction process (genuinely hung, not just slow)."
+            f"[H-EXTRACT] Spawn TIMEOUT after {_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS}s "
+            f"— terminating extraction process."
         )
         p.terminate()
         p.join(timeout=5)
         if p.is_alive():
-            app.logger.warning(
-                "extract_pdf_text: process did not respond to SIGTERM "
-                "within 5s — sending SIGKILL."
-            )
             p.kill()
             p.join(timeout=5)
         return "", 0
@@ -6565,14 +6580,9 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     try:
         return q.get_nowait()
     except Exception:
-        # Process exited (e.g. a native crash/segfault in pymupdf) without
-        # ever putting a result on the queue. Degrade the same way a
-        # genuinely unreadable PDF already does, rather than raising here
-        # — the gunicorn worker itself was never at risk either way.
         app.logger.warning(
-            "extract_pdf_text: worker process exited without a result "
-            "(likely a native crash in the extraction library) — "
-            "returning empty text."
+            "[H-EXTRACT] Spawn exited without a result "
+            "(likely a native crash in fitz) — returning empty text."
         )
         return "", 0
 
@@ -6587,53 +6597,6 @@ _EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 100
 # both. 100s gives the 90s OCR path headroom to actually finish, while
 # still bounding worst-case request latency to something Render's gunicorn
 # worker timeout (180s, see gunicorn.conf.py) can absorb.
-
-
-def _extract_pdf_text_worker(file_bytes: bytes, _q) -> None:
-    """Runs in a separate child process — see extract_pdf_text() above for
-    the timeout/kill-switch wrapper. pymupdf first, Document AI directly
-    if that's insufficient. No pdfplumber double-pass retry (removed
-    2026-06-28, S-CLEANUP — see extract_pdf_text()'s docstring).
-
-    Uses the module-level `docai_ocr` global directly rather than
-    re-importing — this process was created via fork(), so it already
-    has its own copy of everything the parent had already imported."""
-    page_count = 0
-    try:
-        import fitz  # pymupdf
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        page_count = len(doc)
-        text_parts = []
-        for page in doc:
-            text = page.get_text("text", flags=fitz.TEXT_PRESERVE_WHITESPACE)
-            if text and text.strip():
-                text_parts.append(text)
-        doc.close()
-        combined = "\n\n".join(text_parts)
-        if combined.strip() and len(combined) > page_count * 50:
-            print(f"⏱️ [extract_pdf_text] pymupdf extracted {len(combined):,} chars from {page_count} pages")
-            _q.put((combined, page_count))
-            return
-        print(f"⏱️ [extract_pdf_text] pymupdf low yield ({len(combined)} chars) -- trying Document AI")
-    except ImportError:
-        print("⏱️ [extract_pdf_text] pymupdf not available -- trying Document AI")
-    except Exception as e:
-        print(f"⏱️ [extract_pdf_text] pymupdf failed: {e} -- trying Document AI")
-
-    if docai_ocr is not None:
-        try:
-            if docai_ocr.is_image_only_pdf(file_bytes):
-                print("⏱️ [extract_pdf_text] detected image-only PDF -- routing to Document AI OCR")
-                ocr_text = docai_ocr.extract_text_via_docai(file_bytes)
-                if ocr_text.strip():
-                    _q.put((ocr_text, page_count))
-                    return
-                print("⏱️ [extract_pdf_text] Document AI OCR returned no text")
-        except Exception as e:
-            print(f"⏱️ [extract_pdf_text] Document AI OCR failed: {e}")
-
-    print("⏱️ [extract_pdf_text] pymupdf insufficient and Document AI unavailable/failed -- returning empty text")
-    _q.put(("", page_count))
 
 
 
