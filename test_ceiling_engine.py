@@ -497,33 +497,36 @@ def test_uncertainty_band_category_golden():
     """
     S-FIX (2026-06-28) regression anchor: _uncertainty_band moved from
     substring-matching cap['reason'] prose to switching on an explicit
-    cap['category'] field. These values are golden -- captured from the
-    live function BEFORE the refactor, against the real reason strings
-    every call site actually writes -- and must not change without a
-    deliberate decision, not an accidental refactor side-effect.
+    cap['category'] field.
 
-    Confirmed at refactor time: 'unquantified_risk' and 'condition_risk'
-    currently add 0.0, NOT because that's clearly correct, but because the
-    pre-refactor reason text used "legal-pack" / "legal pack" (hyphen /
-    space), never the literal substring "legal_pack" the old code checked
-    for -- so they were silently inert even though their names suggest they
-    were meant to add uncertainty. Preserved as historical behaviour here.
-    If this ever changes, it must be a deliberate edit to this test, not a
-    silent side-effect of something else.
+    2026-06-30 DELIBERATE UPDATE: unquantified_risk and condition_risk
+    increments activated at +0.03 each (were 0.0 by substring-typo accident,
+    never 0.0 by design). Evidence: 2026-06-30 live deal book audit confirmed
+    CAP_UNQUANTIFIED_RISKS has never fired (unquantified_count=0 for all 19
+    deals); condition_risk CAN fire (6 deals at 0.55 confidence below the
+    Category-A cap of 0.59). When condition_risk fires, the band SHOULD widen —
+    it signals the property may not be comparable to the sold comps used.
+    Two new categories added for subject-resolution confidence (S35-TYPE-CONF /
+    S35-AREA-CONF, 2026-06-30) at +0.02 each.
+
+    If any value below changes, it must be a deliberate edit to this test,
+    not an accidental refactor side-effect.
     """
     golden = {
-        "comp_count":        0.05,  # base only -- comp count already handled via valid_count
-        "tenure":            0.09,  # 0.05 + 0.04
-        "lease":             0.10,  # 0.05 + 0.05
-        "unquantified_risk": 0.05,  # 0.05 + 0.0 -- inert, see docstring
-        "condition_risk":    0.05,  # 0.05 + 0.0 -- inert, see docstring
-        "evidence_tier":     0.09,  # 0.05 + 0.04
+        "comp_count":                       0.05,  # base only — comp count handled via valid_count
+        "tenure":                           0.09,  # 0.05 + 0.04
+        "lease":                            0.10,  # 0.05 + 0.05
+        "unquantified_risk":                0.08,  # 0.05 + 0.03 (activated 2026-06-30)
+        "condition_risk":                   0.08,  # 0.05 + 0.03 (activated 2026-06-30)
+        "evidence_tier":                    0.09,  # 0.05 + 0.04
+        "subject_type_low_confidence":      0.07,  # 0.05 + 0.02 (S35-TYPE-CONF 2026-06-30)
+        "subject_floor_area_low_confidence":0.07,  # 0.05 + 0.02 (S35-AREA-CONF 2026-06-30)
     }
     for category, expected in golden.items():
         actual = _uncertainty_band(5, [{"category": category}])
         assert actual == expected, f"category={category!r}: expected {expected}, got {actual}"
 
-    # All six together at valid_count=1 -> clamps at the 0.20 ceiling
+    # All eight together at valid_count=1 -> clamps at the 0.20 ceiling
     all_caps = [{"category": c} for c in golden]
     assert _uncertainty_band(1, all_caps) == 0.20
 
