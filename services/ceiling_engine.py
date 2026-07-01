@@ -1516,22 +1516,37 @@ def _uncertainty_band(valid_count: int, caps: list[dict]) -> float:
         u += 0.03
     # S-FIX (2026-06-28): category-keyed, not substring-matched against the
     # human-readable `reason` prose (was: "tenure"/"lease"/"legal_pack"/
-    # "evidence" in r). Increments below are golden-tested to reproduce the
-    # prior implementation's output exactly -- including that
-    # "unquantified_risk" and "condition_risk" currently add 0.0. Their old
-    # reason text used "legal-pack" / "legal pack", never the literal
-    # substring "legal_pack" the old code checked for, so those two caps
-    # were silently contributing nothing despite apparently being designed
-    # to. Preserved as-is here rather than silently corrected -- flagged
-    # separately as its own decision, since turning it on changes real
-    # confidence labels on real deals.
+    # "evidence" in r).
+    #
+    # 2026-06-30 DECISION — unquantified_risk and condition_risk increments
+    # activated at +0.03 each (was 0.0 by accident of a substring typo in the
+    # pre-S-FIX implementation — "legal_pack" underscore vs "legal-pack" / "legal pack"
+    # hyphen/space — so they were inert since they were written, confirmed by
+    # 2026-06-28 audit). Evidence for the decision:
+    #   - unquantified_risk: CAP_UNQUANTIFIED_RISKS confirmed to never fire on
+    #     any of the 19 live deals (unquantified_count=0 for all, because fallback
+    #     pricing always assigns a non-zero value_adjustment). Zero current impact;
+    #     activating establishes correct future behaviour.
+    #   - condition_risk: CAN fire on real deals — 6 of 19 deals at 0.55 confidence
+    #     (below Category-A cap of 0.59) are consistent with this cap having fired.
+    #     When it fires (no-enquiries clause, squatters, extended probate), the property
+    #     MAY not be comparable to the sold comps used, so the ceiling range SHOULD
+    #     express that uncertainty. +0.03 widens a £300k deal's range from ±£15k to
+    #     ±£24k, a £450k deal from ±£22.5k to ±£36k. Midpoint is UNCHANGED.
+    #   - +0.03 calibrated below evidence_tier/tenure (+0.04): those cap for ABSENT
+    #     data; these cap for DEGRADED quality. Strictly less severe.
+    #   - subject_type/floor_area low confidence: +0.02 each — subject-resolution
+    #     quality signals, less severe than legal-pack structural issues.
+    # Golden test updated in test_ceiling_engine.py under the same tag.
     INCREMENTS = {
-        "tenure":           0.04,
-        "lease":            0.05,
-        "evidence_tier":    0.04,
-        "comp_count":       0.0,
-        "unquantified_risk":0.0,   # see note above -- was inert before too
-        "condition_risk":   0.0,   # see note above -- was inert before too
+        "tenure":                          0.04,
+        "lease":                           0.05,
+        "evidence_tier":                   0.04,
+        "comp_count":                      0.0,   # handled via valid_count path above
+        "unquantified_risk":               0.03,  # 2026-06-30: activated (was 0.0 by typo)
+        "condition_risk":                  0.03,  # 2026-06-30: activated (was 0.0 by typo)
+        "subject_type_low_confidence":     0.02,  # 2026-06-30: S35-TYPE-CONF
+        "subject_floor_area_low_confidence":0.02, # 2026-06-30: S35-AREA-CONF
     }
     for cap in caps:
         u += INCREMENTS.get(cap.get("category"), 0.0)
