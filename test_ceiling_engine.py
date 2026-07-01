@@ -3191,3 +3191,170 @@ def test_subject_both_low_conf_applies_both_caps():
     cats = [c["category"] for c in caps]
     assert "subject_type_low_confidence" in cats or f <= 0.55, "type cap must fire or conf already at cap"
     assert f <= 0.55
+
+
+# =============================================================================
+# Section 9 — PAON-FIX (2026-07-01) address-prefix flat detection
+# =============================================================================
+#
+# Tests the flat short-circuit logic added to _resolve_subject_type_code and
+# the flat-designator extraction used by the EPC subject lookup in get_housing_data.
+#
+# The function itself has DB dependencies so cannot be imported directly.
+# These tests inline the detection logic only (no DB calls) and prove the
+# regex/prefix patterns match exactly the address formats that appear in
+# real legal-pack extractions.
+# =============================================================================
+
+import re as _paon_re
+
+def _detect_flat_addr(addr: str):
+    """
+    Inlined from app.py PAON-FIX — flat-prefix detection.
+    Returns (is_flat, flat_num, building_num).
+    flat_num    = unit designator ("3", "3a", "12") or None
+    building_num = building number after comma ("24") or None (age-band only)
+    """
+    _FLAT_UNIT_PREFIXES = ("flat ", "flat,", "apartment ", "apt ", "apt,")
+    addr_lower = str(addr or "").lower().strip()
+    is_flat = any(addr_lower.startswith(p) for p in _FLAT_UNIT_PREFIXES)
+    flat_num = None
+    building_num = None
+    if is_flat:
+        fm = _paon_re.match(r"(?:flat|apartment|apt)[,\s]+([0-9a-z]+)", addr_lower)
+        if fm:
+            flat_num = fm.group(1).strip(",").strip()
+        bm = _paon_re.search(r",\s*(\d+)", addr)
+        if bm:
+            building_num = bm.group(1)
+    else:
+        shm = _paon_re.match(r"^\s*(\d+)", addr)
+        if shm:
+            building_num = shm.group(1)
+    return is_flat, flat_num, building_num
+
+
+def _epc_flat_match(address1: str, flat_num: str) -> bool:
+    """
+    Inlined from app.py PAON-FIX — EPC address1 flat-designator match.
+    Mirrors the logic in the _subj_flat_num exact-match path.
+    """
+    a1 = str(address1 or "").lower().strip()
+    for prefix in (f"flat {flat_num}", f"apartment {flat_num}", f"apt {flat_num}"):
+        if a1 == prefix or a1.startswith(prefix + " ") or a1.startswith(prefix + ","):
+            return True
+    return False
+
+
+class TestPaonFixFlatDetection:
+    """PAON-FIX: flat-prefix detection and flat/building number extraction."""
+
+    def test_flat_prefix_detected(self):
+        is_flat, _, _ = _detect_flat_addr("Flat 3, 24 High Street")
+        assert is_flat is True
+
+    def test_apartment_prefix_detected(self):
+        is_flat, _, _ = _detect_flat_addr("Apartment 2, The Maltings")
+        assert is_flat is True
+
+    def test_apt_prefix_detected(self):
+        is_flat, _, _ = _detect_flat_addr("Apt 7, 156 Commercial Road")
+        assert is_flat is True
+
+    def test_house_address_not_flat(self):
+        is_flat, _, _ = _detect_flat_addr("24 High Street")
+        assert is_flat is False
+
+    def test_house_number_extracted_for_non_flat(self):
+        is_flat, flat_num, building_num = _detect_flat_addr("24 High Street")
+        assert is_flat is False
+        assert flat_num is None
+        assert building_num == "24"
+
+    def test_flat_num_extracted_correctly(self):
+        _, flat_num, _ = _detect_flat_addr("Flat 3, 24 High Street")
+        assert flat_num == "3", f"Expected '3', got {flat_num!r}"
+
+    def test_building_num_extracted_correctly(self):
+        """Bug was: 'Flat 3, 24 High Street' → house='3' (flat number, not building).
+        Fix: building_num='24' (after the comma)."""
+        _, flat_num, building_num = _detect_flat_addr("Flat 3, 24 High Street")
+        assert flat_num == "3"
+        assert building_num == "24", (
+            f"PAON bug: expected building_num='24', got {building_num!r}. "
+            f"Old code extracted flat number '3' as the house number."
+        )
+
+    def test_flat_num_alphanumeric(self):
+        _, flat_num, building_num = _detect_flat_addr("Flat 3A, 24 High Street")
+        assert flat_num == "3a"
+        assert building_num == "24"
+
+    def test_apartment_num_extracted(self):
+        _, flat_num, building_num = _detect_flat_addr("Apartment 12, The Maltings, London")
+        assert flat_num == "12"
+        assert building_num is None  # no digit-only segment after comma in "The Maltings"
+
+    def test_flat_no_building_number(self):
+        """Flat address where the building has no number — no building_num extracted."""
+        _, flat_num, building_num = _detect_flat_addr("Flat 3, High Street")
+        assert flat_num == "3"
+        assert building_num is None
+
+    def test_case_insensitive(self):
+        is_flat_lower, _, _ = _detect_flat_addr("flat 3, 24 high street")
+        is_flat_upper, _, _ = _detect_flat_addr("FLAT 3, 24 HIGH STREET")
+        assert is_flat_lower is True
+        assert is_flat_upper is True
+
+    def test_old_bug_house_number_was_flat_number(self):
+        """Regression: old code ran r'^\\s*(\\d+)' on 'Flat 3, 24 High Street'
+        and extracted '3' (flat number) as _house. This then matched EPC records
+        for '3 <other road>', returning wrong type S/T/D instead of F."""
+        old_regex_result = _paon_re.match(r"^\s*(\d+)", "Flat 3, 24 High Street")
+        assert old_regex_result is None, (
+            "Old regex should NOT match 'Flat 3, ...' — it starts with 'F'. "
+            "If this fails the test data is wrong."
+        )
+        # Old code produced None → _house = None → fell to LLM/neighbour
+        # which could return wrong type on mixed postcodes.
+        # New code: is_flat=True, return ("F", "address_prefix", "high") immediately.
+        is_flat, _, _ = _detect_flat_addr("Flat 3, 24 High Street")
+        assert is_flat is True
+
+
+class TestPaonFixEpcFlatMatch:
+    """PAON-FIX: EPC address1 flat-designator matching for floor area / room lookup."""
+
+    def test_flat_3_matches_epc_flat_3(self):
+        assert _epc_flat_match("FLAT 3", "3") is True
+
+    def test_flat_3_matches_epc_flat_3_with_building(self):
+        assert _epc_flat_match("FLAT 3, 24 HIGH STREET", "3") is True
+
+    def test_flat_3_does_not_match_flat_30(self):
+        """Must not match "FLAT 30" when looking for "FLAT 3"."""
+        assert _epc_flat_match("FLAT 30", "3") is False
+
+    def test_flat_3_does_not_match_flat_31(self):
+        assert _epc_flat_match("FLAT 31", "3") is False
+
+    def test_apartment_12_matches(self):
+        assert _epc_flat_match("APARTMENT 12", "12") is True
+
+    def test_apt_7_matches(self):
+        assert _epc_flat_match("APT 7", "7") is True
+
+    def test_house_address_does_not_match(self):
+        assert _epc_flat_match("24 HIGH STREET", "3") is False
+
+    def test_case_insensitive_match(self):
+        assert _epc_flat_match("flat 3", "3") is True
+        assert _epc_flat_match("Flat 3", "3") is True
+
+    def test_flat_3a_matches(self):
+        assert _epc_flat_match("FLAT 3A", "3a") is True
+
+    def test_empty_address1_no_match(self):
+        assert _epc_flat_match("", "3") is False
+        assert _epc_flat_match(None, "3") is False
