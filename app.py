@@ -9330,8 +9330,30 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
 
         # Build subject dict for relational comparable engine
         _prop_rc = (_summary.get("property") or {})
+
+        # TYPE-MISMATCH-FIX (2026-07-02): infer physical type from soldComps as
+        # the primary source, NOT from summary_json.property.physical_type.
+        #
+        # Root cause: get_housing_data() fetches comps using the EPC-resolved
+        # physical type code (correct). But _recompute_deal_ceiling reads
+        # physical_type from summary_json.property — which holds the LLM's
+        # inference and is NOT updated when the EPC lookup overrides it.
+        # When the LLM misclassifies (e.g. "Other" for a flat-above-commercial,
+        # "Terraced" for an HMO flat that is physically a flat), the ceiling
+        # engine receives the wrong subject type, rejects ALL comps as
+        # type_mismatch, and returns insufficient_evidence despite a full comp set.
+        #
+        # The soldComps ARE the ground truth: they were selected by the SQL
+        # filter that used the EPC-resolved type. Their property_type field
+        # (e.g. "F") tells us what physical type was confirmed for this subject.
+        # We use the majority type from the comp set as the subject type.
+        from collections import Counter as _Counter
+        _pt_vals = [c.get("property_type") for c in _comps
+                    if isinstance(c, dict) and c.get("property_type")]
+        _inferred_pt = _Counter(_pt_vals).most_common(1)[0][0] if _pt_vals else None
+
         _subject_rc = {
-            "property_type":        _prop_rc.get("physical_type") or _prop_rc.get("type") or _d.get("deal_type"),
+            "property_type":        _inferred_pt or _prop_rc.get("physical_type") or _prop_rc.get("type") or _d.get("deal_type"),
             "tenure":               _prop_rc.get("tenure") or _fins_inputs.get("tenure"),
             "lease_length":         _prop_rc.get("lease_length") or _fins_inputs.get("lease_length"),
             "internal_area":        _prop_rc.get("internal_area") or _fins_inputs.get("internal_area") or (_housing.get("subject_floor_area") if isinstance(_housing, dict) else None),
@@ -9824,6 +9846,18 @@ def save_area(deal_id: str):
     # the existing _gia_conf persist at line 9631 (internal_area_confidence).
     try:
         _prop["type_confidence"] = _type_conf
+        # TYPE-MISMATCH-FIX (2026-07-02): also persist the EPC-resolved physical
+        # type back to summary_json.property. The EPC lookup at line 9816 already
+        # overrides _prop_type_code for get_housing_data() — but without writing
+        # it back here, _recompute_deal_ceiling's fresh DB read still sees the
+        # LLM's misclassified value ("Other", "Terraced", etc.) and passes it to
+        # the ceiling engine, causing type_mismatch → insufficient_evidence on
+        # every deal where the LLM physical_type disagrees with the EPC.
+        _PT_CODE_TO_LABEL = {
+            "F": "Flat", "T": "Terraced", "S": "Semi-Detached", "D": "Detached"
+        }
+        if _resolved_code and _resolved_code in _PT_CODE_TO_LABEL:
+            _prop["physical_type"] = _PT_CODE_TO_LABEL[_resolved_code]
         _summary["property"] = _prop
         supabase.table("deals").update({"summary_json": _summary}) \
             .eq("id", deal_id).eq("user_id", request.user_id).execute()
