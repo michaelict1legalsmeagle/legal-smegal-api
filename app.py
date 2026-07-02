@@ -4937,6 +4937,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 },
             )
             out["metrics"]["query"] = {"postcode": pc, "radius_m": _radius_m, "property_type": _pt_param, "limit": lim}
+            print(f"⏱️ [GH-TIMING] {pc} EMPTY (no rows after {_rpc_attempts} attempts, verified_empty={_rpc_verified_empty}): A_sql={_gst.get('A_sql_retry_verify', '?')}s")
             return out
 
         # ══════════════════════════════════════════════════════════════════════
@@ -5962,6 +5963,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
     except Exception as e:
         msg = str(e) or "Unknown error"
+        print(f"⏱️ [GH-TIMING] {pc} EXCEPTION: {msg[:200]}")
         out = metric_missing_provider(
             f"Comparable housing data unavailable — Hetzner query failed. Error: {msg}",
             sources,
