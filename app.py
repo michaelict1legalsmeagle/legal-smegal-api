@@ -277,19 +277,56 @@ DATA_DATABASE_URL = os.environ.get(
 )
 
 def get_data_conn():
-    """Get a psycopg v3 connection to Hetzner data database."""
+    """Get a fresh psycopg v3 connection to Hetzner data database.
+    Used by callers that manage their own transaction lifecycle.
+    Not pooled — each call returns a new connection the caller owns.
+    """
     return psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row)
 
+# ── Thread-local connection pool for Hetzner ─────────────────────────────────
+# PERF-FIX (2026-07-02): data_query() was opening a new TCP + TLS + auth
+# connection to Hetzner (EU) on every call from Render (US). get_housing_data()
+# makes 6 data_query() calls per area fetch; at ~7s per WAN connection that is
+# ~42s of pure connection overhead per Verdict page load — matching H2-TIMING
+# exactly (housing: 43.06s, 42.34s across two consecutive runs, B17 0NB).
+# The PostGIS query itself takes 5ms (EXPLAIN ANALYZE confirmed 2026-07-02).
+# Fix: one connection per background thread, reused across all queries in that
+# thread's lifetime. Re-established on any failure. autocommit=True since every
+# data_query() call is a read-only SELECT with no transaction semantics needed.
+_hetzner_tl = threading.local()
+
 def data_query(sql: str, params=None) -> list:
-    """Execute a SELECT query on Hetzner and return list of dicts."""
+    """Execute a SELECT query on Hetzner and return list of dicts.
+
+    Uses a thread-local persistent connection — established once per
+    background thread (e.g. _fetch_and_store) and reused for all
+    subsequent calls in that thread. Reconnects automatically on any
+    connection-level failure, retrying the query once before giving up.
+    """
+    def _run(conn):
+        with conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            return [dict(r) for r in cur.fetchall()]
+
+    def _new_conn():
+        c = psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row, autocommit=True)
+        _hetzner_tl.conn = c
+        return c
+
     try:
-        with psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row) as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params or ())
-                return [dict(r) for r in cur.fetchall()]
-    except Exception as e:
-        print(f"[DATA_QUERY ERROR] {e}")
-        return []
+        conn = getattr(_hetzner_tl, 'conn', None)
+        if conn is None or conn.closed:
+            conn = _new_conn()
+        return _run(conn)
+    except Exception as _e1:
+        print(f"[DATA_QUERY ERROR] {_e1}")
+        _hetzner_tl.conn = None
+        try:                          # reconnect + retry once
+            return _run(_new_conn())
+        except Exception as _e2:
+            print(f"[DATA_QUERY ERROR] retry failed: {_e2}")
+            _hetzner_tl.conn = None
+            return []
 
 print("🟢 Hetzner data connection configured:", DATA_DATABASE_URL.split("@")[1])
 
@@ -298,22 +335,40 @@ print("🟢 Hetzner data connection configured:", DATA_DATABASE_URL.split("@")[1
 # postgresql://postgres.[ref]:[password]@aws-0-eu-west-2.pooler.supabase.com:6543/postgres
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "")
 
+# ── Thread-local connection pool for Supabase direct psycopg ─────────────────
+_supabase_tl = threading.local()
+
 def supabase_data_query(sql: str, params=None) -> list:
     """
     Query Supabase tables (uk_hpi_monthly, uk_prms_monthly).
-    Primary:  direct psycopg via SUPABASE_DB_URL.
+    Primary:  direct psycopg via SUPABASE_DB_URL — thread-local persistent
+              connection (same PERF-FIX rationale as data_query above).
     Fallback: Supabase REST client — works when pooler DNS fails on Render.
     """
     import re as _re2
 
     if SUPABASE_DB_URL:
+        def _sb_run(conn):
+            with conn.cursor() as cur:
+                cur.execute(sql, params or ())
+                return [dict(r) for r in cur.fetchall()]
+
+        def _sb_new_conn():
+            c = psycopg.connect(
+                SUPABASE_DB_URL, row_factory=dict_row,
+                autocommit=True, connect_timeout=8
+            )
+            _supabase_tl.conn = c
+            return c
+
         try:
-            with psycopg.connect(SUPABASE_DB_URL, row_factory=dict_row, connect_timeout=8) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql, params or ())
-                    return [dict(r) for r in cur.fetchall()]
-        except Exception as e:
-            print(f"[SUPABASE_DATA_QUERY] direct postgres failed ({e}) — REST fallback")
+            conn = getattr(_supabase_tl, 'conn', None)
+            if conn is None or conn.closed:
+                conn = _sb_new_conn()
+            return _sb_run(conn)
+        except Exception as _se:
+            _supabase_tl.conn = None
+            print(f"[SUPABASE_DATA_QUERY] direct postgres failed ({_se}) — REST fallback")
 
     if not supabase:
         return []
@@ -4750,6 +4805,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _rpc_max_attempts = 3
         rows = None
         _rpc_last_error = None
+        _gst_sql_t0 = time.time()   # H2-TIMING-INNER: SQL block start
         while _rpc_attempts < _rpc_max_attempts:
             _rpc_attempts += 1
             rows = data_query(
@@ -4818,7 +4874,10 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         if not isinstance(rows, list):
             rows = []
 
-        # ── T-1: dedupe identical PPD entries post-RPC ──────────────────────
+        # H2-TIMING-INNER checkpoints — incremental (each = time for that step only).
+        _gst: dict = {}
+        _gst["A_sql_retry_verify"] = round(time.time() - _gst_sql_t0, 3)
+        _gst_ck = time.time()          # rolling checkpoint — updated per step
         # A single conveyance can appear as multiple Price Paid Data rows
         # (separate title entries — flat + parking, etc.) sharing identical
         # (postcode, price, date_of_transfer). They are not two distinct
@@ -5148,6 +5207,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _audit["warnings"].append(f"hpi_latest_lookup_failed: {_e}")
 
         # ── STEP 1: PROPERTY TYPE FILTER ────────────────────────────────────
+        _gst["B_subject_data"] = round(time.time() - _gst_ck, 3); _gst_ck = time.time()
         # S33-TYPE-MATCH (2026-06-23): prefer like-for-like (terraced↔terraced,
         # semi↔semi, detached↔detached). Previously this required >=5 same-type
         # comps or it ABANDONED type-matching entirely and used all types — the
@@ -5282,6 +5342,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 )
 
         # ── STEP 3: HABITABLE ROOM FILTER ───────────────────────────────────
+        _gst["C_comp_epc_and_filters_12"] = round(time.time() - _gst_ck, 3); _gst_ck = time.time()
         if _subject_rooms:
             _room_matched = [
                 r for r in rows
@@ -5414,6 +5475,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _audit["warnings"].append(f"hpi_sale_month_batch_failed: {_e}")
 
         # Step 8c: compute per-comp hpi_multiplier via ratio
+        _gst["D_filters_36_and_hpi_fetch"] = round(time.time() - _gst_ck, 3); _gst_ck = time.time()
         for _r in rows:
             _sm_str       = _r.get("_sale_month_str")
             _sm_avg       = _sale_month_avg.get(_sm_str) if _sm_str else None
@@ -5465,6 +5527,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             )
 
         # ── STEP 9: SIMILARITY SCORING ───────────────────────────────────────
+        _gst["E_hpi_multiplier_calc"] = round(time.time() - _gst_ck, 3); _gst_ck = time.time()
         # Weighted score: recency × proximity × type-match × room-match × tenure-match × age-match
         # All weights are explicit and disclosed in comp output
         def _similarity_score(_r: dict) -> float:
@@ -5872,6 +5935,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 "date":    _cdate[:10] if _cdate else "",
             })
 
+        _gst["F_scoring_top10_nspl"] = round(time.time() - _gst_ck, 3); _gst_ck = time.time()
         out["metrics"]["mapPoints"] = _map_pts
         # ────────────────────────────────────────────────────────────────────
 
@@ -5891,6 +5955,9 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # field would have shown instantly. Persisting it here so future
         # debugging reads a saved field instead of repeating that process.
         out["_audit"] = _audit
+        _gst["G_output_build"] = round(time.time() - _gst_ck, 3)
+        _gst["_total_inner"] = round(time.time() - _gst_sql_t0, 3)
+        print(f"⏱️ [GH-TIMING] {pc} n={len(rows)}: {_gst}")
         return out
 
     except Exception as e:
