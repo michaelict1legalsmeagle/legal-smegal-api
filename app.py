@@ -5157,13 +5157,16 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             # filter expects F/L only.
         if _subject_tenure is None:
             # Tier 3: postcode majority-vote proxy (preserved verbatim)
+            # PERF-FIX (2026-07-03): was WHERE postcode = %s (unindexed, full
+            # 7.6M-row scan). Changed to postcode_nospace which has
+            # idx_pp2025_postcode_nospace — drops from ~12s to <1ms.
             try:
                 _tr = data_query(
                     """SELECT duration, COUNT(*) AS cnt
                        FROM public.price_paid_raw_2025
-                       WHERE postcode = %s AND duration IN ('F','L')
+                       WHERE postcode_nospace = %s AND duration IN ('F','L')
                        GROUP BY duration ORDER BY cnt DESC LIMIT 1""",
-                    (_pc_norm,)
+                    (_hetzner_pcd_nospace,)
                 )
                 if _tr:
                     _subject_tenure = str(_tr[0].get("duration") or "").upper() or None
@@ -5175,13 +5178,15 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # dormant for this deal (unchanged behaviour for unresolved cases).
 
         # Subject: new-build status from price_paid
+        # PERF-FIX (2026-07-03): was WHERE postcode = %s (unindexed, full
+        # 7.6M-row scan). Changed to postcode_nospace — <1ms with index.
         _subject_old_new = None
         try:
             _nbr = data_query(
                 """SELECT old_new FROM public.price_paid_raw_2025
-                   WHERE postcode = %s AND old_new IN ('Y','N')
+                   WHERE postcode_nospace = %s AND old_new IN ('Y','N')
                    ORDER BY date_of_transfer DESC LIMIT 1""",
-                (_pc_norm,)
+                (_hetzner_pcd_nospace,)
             )
             if _nbr:
                 _subject_old_new = str(_nbr[0]["old_new"]).upper()
