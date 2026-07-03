@@ -1089,6 +1089,74 @@ _TIME_COST_LOOKUP = (
     # for substring collisions against existing entries before insertion;
     # coal-mining merged UPWARD into the mining entry to avoid shadowing.
     # ════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════════
+    # S34-COVERAGE-GAP-2026-07-03: five flags found live-unresearched on
+    # 57 York Road (SY1 3QU) — two were near-misses on already-built
+    # categories (fixed above by widening markers on the incomplete-
+    # document entry), three are genuinely new categories added here at
+    # the same named-source standard as the rest of the table. Where no
+    # published figure exists for the exact reservation type, the entry
+    # says so explicitly and maps to the nearest verified task-type
+    # benchmark instead of inventing one.
+    # ════════════════════════════════════════════════════════════════════
+    (("alter access", "alter the route", "alter roads", "vary the route of",
+      "reroute access", "reroute the access"), (2, 5), (500, 1500),
+     "No published figure exists for pricing a transferor's reserved right "
+     "to alter access routes specifically — this is a title condition, not "
+     "a marketed product. The underlying professional task is the same "
+     "class as the shared-access cost-sharing entry above: a solicitor's "
+     "discrete opinion on the scope and enforceability of the reservation, "
+     "£500-1,500 +VAT (Go Legal; Lawhive), 2-5 working days. MEDIUM "
+     "confidence — mapped from a verified task-type benchmark, not a "
+     "category-specific published source.",
+     "This is a right reserved IN FAVOUR of the transferor/estate, not a "
+     "right the buyer can remove. The £500-1,500 figure buys an opinion on "
+     "how the clause could be exercised, not a way to extinguish it — "
+     "removal would need the transferor's agreement (a deed variation, "
+     "priced at whatever they will accept) and has no fixed figure."),
+    (("multi-property title", "multi property title", "shared obligations",
+      "estate-wide covenants", "large estate title", "large multi-property"),
+     (3, 7), (500, 1500),
+     "Same discrete-opinion task class as the shared-access cost-sharing "
+     "entry: solicitor review of the scope and enforceability of the "
+     "covenants affecting a plot within a large multi-property title, "
+     "£500-1,500 +VAT (Go Legal; Lawhive). Time widened to 3-7 working "
+     "days versus the single-clause cost-sharing entry, since reading an "
+     "estate-wide scheme of covenants across dozens of plots is a larger "
+     "review. MEDIUM confidence — task-type benchmark, not a category-"
+     "specific published figure.",
+     "Does not price any specific shared maintenance contribution — those "
+     "depend on the estate's actual scheme of covenants and cannot be "
+     "sized without reading it. Treat this as the cost of finding out what "
+     "you're bound by, not the cost of the obligations themselves."),
+    (("groundwater flooding", "groundwater flood"), (1, 5), (0, 0),
+     "At MODERATE (not high) rating, the real remaining action is checking "
+     "insurance availability, not buying a further report — the buyer "
+     "already holds a Groundsure Homebuyers assessment in the pack. UK "
+     "insurance brokers do not charge a fee for a flood-risk quote; they "
+     "are paid by commission from the insurer (MoneyHelper/GOV.UK). HIGH "
+     "confidence on the £0 broker-quote cost; 1-5 working days for a "
+     "quote turnaround.",
+     "Flood Re — the government scheme capping premiums for high-flood-"
+     "risk homes — excludes buy-to-let and commercial property (Admiral; "
+     "Go.Compare), so a BTL purchase cannot fall back on it if a standard "
+     "insurer declines or loads the premium. A specialist broker (BIBA "
+     "directory) may be needed, which can extend the timeline but remains "
+     "fee-free at quote stage. Many standard policies do cover groundwater "
+     "flooding at moderate ratings; confirm with the specific insurer "
+     "rather than assuming exclusion (MoneySuperMarket)."),
+    (("surface water flooding", "surface water flood"), (1, 5), (0, 0),
+     "Same basis as groundwater flooding above: at MODERATE building-level "
+     "risk (not the overall site's low rating), the action is an insurance "
+     "quote check, not a further report purchase — the Groundsure "
+     "Homebuyers assessment already covers this. Broker quotes are free, "
+     "paid by insurer commission (MoneyHelper/GOV.UK). HIGH confidence on "
+     "£0 cost; 1-5 working days for a quote.",
+     "Flood Re excludes buy-to-let property (Admiral; Go.Compare) — same "
+     "caveat as groundwater flooding. A moderate surface-water rating at "
+     "building level (as opposed to the site-wide rating) most often "
+     "reflects drainage/run-off risk rather than a fluvial flood zone, and "
+     "is generally the more commonly insurable of the flood-risk types."),
     (("flood risk", "high flood", "flood zone", "flooding identified"), (0, 3), (20, 75),
      "Flood risk report £20-75 (Always Conveyancing £20-25 +VAT; Homeward "
      "Legal £50-75), returned ~2h to a few days. HIGH confidence on report "
@@ -1355,9 +1423,9 @@ _TIME_COST_LOOKUP = (
     (('special conditions of sale not present', 'special conditions not present', 'special conditions missing'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
      "Request-it — no resolution cost, but a genuine gap to close BEFORE bidding. The Special Conditions of Sale govern the auction contract (deposit, completion period, costs, extra obligations) and must be obtained and read; bidding without them is bidding blind. Handling = request from the auctioneer/seller's solicitor at no charge.",
      None),
-    (('conveyance document incomplete', 'lease document incomplete', 'transfer document incomplete', 'incomplete transfer document', 'incomplete conveyance', 'incomplete lease document', 'document incomplete', 'incomplete without preceding', 'transferee name blank', 'name blank in tr1', 'blank in tr1', 'consideration amount blank', 'tr1 form', 'blank in transfer'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
-     "Request-it — generally no resolution cost. An incomplete/abbreviated conveyance, lease or transfer in the pack should be completed by obtaining the full official copy from HM Land Registry (a few pounds per document) or the missing pages from the seller's solicitor. Handling = request the complete document; only an unregistered lost deed needing reconstitution is more involved (and is a separate, rarer case).",
-     None),
+    (('conveyance document incomplete', 'lease document incomplete', 'transfer document incomplete', 'incomplete transfer document', 'incomplete conveyance', 'incomplete lease document', 'document incomplete', 'incomplete without preceding', 'transferee name blank', 'name blank in tr1', 'blank in tr1', 'consideration amount blank', 'tr1 form', 'blank in transfer', 'content unreadable', 'unreadable', 'illegible'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Request-it — generally no resolution cost. An incomplete, blank, or unreadable conveyance, lease or transfer in the pack should be completed by obtaining Official Copy of a Document (Form OC2) from HM Land Registry — £11 per document by post, £7 per document via the portal/Business Gateway (GOV.UK, Land Registration Fee Order 2024, updated 9 Dec 2024) — or the missing pages from the seller's solicitor. HIGH confidence on the OC2 fee itself. Handling = request the complete document; only an unregistered lost deed needing reconstitution is more involved (and is a separate, rarer case).",
+     "OC2 is a document-copy request, not a full title application — HM Land Registry's well-publicised multi-month backlogs apply to substantive applications (transfers, first registrations), not to ordering an existing document. Turnaround for a document-only request is materially faster, though GOV.UK does not publish a specific SLA for OC2."),
     (('overhanging structure', 'overhang', 'eavesdrop', 'trespass to air', 'encroachment over neighbour'), (0, 1), (50, 300),
      "Overhang / eavesdrop / air-space trespass: there is a named indemnity product (GCS 'Eavesdrop, Overhang and Trespass to Air-Space'), premium broadly £50-300 in line with standard title indemnities (GCS; Muve), issued quickly. Covers a neighbour seeking to prevent the overhang (guttering, balcony, flue, eaves). MEDIUM confidence — premium is value-banded.",
      'Indemnity covers a CHALLENGE to the encroachment, not its removal. An overhang can be a trespass even by a few inches, and if a neighbour pursues it and refuses to settle, the matter can escalate to a county court injunction (SAM Conveyancing; JustAnswer/UK property law). Where the overhang is part of a flying-freehold arrangement, see flying freehold (support/access rights and lender caps also apply).'),
