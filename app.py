@@ -9957,18 +9957,65 @@ def save_area(deal_id: str):
             if lat is None or lng is None:
                 lat, lng, _ = geocode_postcode(_postcode)
 
-            # H2-TIMING (2026-06-27): instrumenting each call in the area-fetch
-            # chain to find which one(s) dominate total load time, before
-            # deciding whether/how to parallelise. Purely additive — logs
-            # only, no behaviour change. Remove once timing data is captured
-            # and the real fix (parallelise independent calls, or not) is built.
             _timings = {"_lsoa_lookup": round(time.time() - _t_start, 2)}
 
-            def _timed(label, fn, *args, **kwargs):
+            # PERF-FIX (2026-07-03): parallelise all independent area-data
+            # functions. Previously a Python dict literal evaluated them
+            # sequentially (left-to-right), so total = SUM of all calls.
+            # H2-TIMING confirmed: housing=12.9s, transport=8-11s, others 1-4s
+            # each, sequential total ~34s (after connection pooling fix).
+            # All 11 functions are independent (no shared state, no ordering
+            # dependency). Thread-local Hetzner connections (data_query) and
+            # per-call Supabase connections mean each thread operates cleanly.
+            # With parallelism: total = MAX of all calls ≈ max(12.9s, 10s) = ~13s.
+            # Census demographics (_get_census_demographics) is also independent
+            # and joins the same pool.
+            from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
+
+            def _run_timed(label, fn, args, kwargs):
+                """Run fn(*args, **kwargs), record elapsed in _timings, return (label, result)."""
                 _t0 = time.time()
-                _result = fn(*args, **kwargs)
+                try:
+                    _res = fn(*args, **kwargs)
+                except Exception as _fe:
+                    app.logger.warning(f"[area-fetch] {label} raised: {_fe}")
+                    _res = None
                 _timings[label] = round(time.time() - _t0, 2)
-                return _result
+                return label, _res
+
+            _ons = (lsoa_gss or NOMIS_DEFAULT_GEOGRAPHY or "").strip()
+
+            _area_task_specs = [
+                ("housing",   get_housing_data,         [_postcode],              {"property_type": _prop_type_code, "guide_price": _guide_price_gbp, "subject_tenure_hint": _prop.get("tenure"), "subject_address": _prop.get("address"), "subject_internal_area": _subject_gia_listing or safe_float(_prop.get("internal_area"))}),
+                ("crime",     get_crime_data,           [lat, lng],               {}),
+                ("transport", get_transport_data,       [lat, lng],               {}),
+                ("amenities", get_amenities_data,       [lat, lng],               {}),
+                ("schools",   get_schools_data,         [_postcode],              {}),
+                ("broadband", get_broadband_data,       [_postcode],              {}),
+                ("gp",        get_gp_data,              [_postcode],              {}),
+                ("flood",     get_flood_risk,           [lat, lng, _postcode],    {}),
+                ("epc",       get_epc_data,             [_postcode],              {}),
+                ("planning",  get_planning_data,        [lat, lng, _postcode],    {}),
+                ("trends",    build_trends_from_uk_hpi, [_postcode, area_code, 24], {}),
+                ("_census",   _get_census_demographics, [_ons],                   {}),
+            ]
+
+            _area_results = {}
+            with _TPE(max_workers=12, thread_name_prefix="area_fetch") as _pool:
+                _label_futures = {
+                    _pool.submit(_run_timed, lbl, fn, args, kw): lbl
+                    for lbl, fn, args, kw in _area_task_specs
+                }
+                for _completed in _as_completed(_label_futures, timeout=120):
+                    _lbl = _label_futures[_completed]
+                    try:
+                        _, _res = _completed.result()
+                        _area_results[_lbl] = _res
+                    except Exception as _fe:
+                        app.logger.warning(f"[area-fetch] {_lbl} failed: {_fe}")
+                        _area_results[_lbl] = None
+
+            _census_result = _area_results.pop("_census", None)
 
             area_data = {
                 "postcode":     _postcode,
@@ -9976,17 +10023,7 @@ def save_area(deal_id: str):
                 "lat":          lat,
                 "lng":          lng,
                 "area_code":    area_code,
-                "housing":      _timed("housing", get_housing_data, _postcode, property_type=_prop_type_code, guide_price=_guide_price_gbp, subject_tenure_hint=_prop.get("tenure"), subject_address=_prop.get("address"), subject_internal_area=_subject_gia_listing or safe_float(_prop.get("internal_area"))),
-                "crime":        _timed("crime", get_crime_data, lat, lng),
-                "transport":    _timed("transport", get_transport_data, lat, lng),
-                "amenities":    _timed("amenities", get_amenities_data, lat, lng),
-                "schools":      _timed("schools", get_schools_data, _postcode),
-                "broadband":    _timed("broadband", get_broadband_data, _postcode),
-                "gp":           _timed("gp", get_gp_data, _postcode),
-                "flood":        _timed("flood", get_flood_risk, lat, lng, _postcode),
-                "epc":          _timed("epc", get_epc_data, _postcode),
-                "planning":     _timed("planning", get_planning_data, lat, lng, _postcode),
-                "trends":       _timed("trends", build_trends_from_uk_hpi, _postcode, area_code, 24),
+                **_area_results,
                 "fetched_at":   now_iso(),
                 "fetch_status": "complete",
             }
@@ -10019,11 +10056,8 @@ def save_area(deal_id: str):
             # independently fault-tolerant: missing/failing tables yield empty
             # arrays, never fake data.
             try:
-                _ons = (area_data.get("lsoa_gss") or NOMIS_DEFAULT_GEOGRAPHY or "").strip()
-                if _ons:
-                    _demo = _get_census_demographics(_ons)
-                    if _demo:
-                        area_data.setdefault("census", {})["demographics"] = _demo
+                if _census_result:
+                    area_data.setdefault("census", {})["demographics"] = _census_result
             except Exception:
                 pass
 
