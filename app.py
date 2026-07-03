@@ -4938,6 +4938,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             )
             out["metrics"]["query"] = {"postcode": pc, "radius_m": _radius_m, "property_type": _pt_param, "limit": lim}
             print(f"⏱️ [GH-TIMING] {pc} EMPTY (no rows after {_rpc_attempts} attempts, verified_empty={_rpc_verified_empty}): A_sql={_gst.get('A_sql_retry_verify', '?')}s")
+            _gst["_total_inner"] = round(time.time() - _gst_sql_t0, 3)
+            out["_gh_timing"] = _gst
             return out
 
         # ══════════════════════════════════════════════════════════════════════
@@ -5959,6 +5961,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _gst["G_output_build"] = round(time.time() - _gst_ck, 3)
         _gst["_total_inner"] = round(time.time() - _gst_sql_t0, 3)
         print(f"⏱️ [GH-TIMING] {pc} n={len(rows)}: {_gst}")
+        out["_gh_timing"] = _gst      # H2-TIMING-INNER: persisted to area_json.housing._gh_timing
         return out
 
     except Exception as e:
