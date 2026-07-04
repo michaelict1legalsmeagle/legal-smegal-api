@@ -55,6 +55,14 @@ _calc_financial_standing = None
 _ensure_ceiling_objects  = None
 _ceiling_engine_available = False
 
+# S38-RESOLVED-FLAG-FILTER (2026-07-03): safe fallback if for any reason the
+# import below fails — falls back to "no flags resolved" (all flags active),
+# which is the OLD (buggy) behaviour, not a silent worse failure mode. Never
+# falls back to "all flags excluded", which would silently zero out every
+# deal's legal risk.
+def filter_active_flags(all_flags, resolved_map):  # type: ignore
+    return list(all_flags or [])
+
 try:
     from services.ceiling_engine import calculate_ceiling as _calc_ceiling  # type: ignore
     _ceiling_engine_available = True
@@ -73,6 +81,7 @@ if _ceiling_engine_available:
             calculate_workbench_ceiling  as _calc_workbench_ceiling,
             calculate_financial_standing as _calc_financial_standing,
             ensure_ceiling_owned_objects as _ensure_ceiling_objects,
+            filter_active_flags          as filter_active_flags,
         )
     except ImportError:
         import logging as _log
@@ -9447,7 +9456,26 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
         }
         # Verdict: comparable base only, no flag risks.
         # Use v2 functions when available; fall back to v1 _calc_ceiling when not.
-        _active_flags = _summary.get("flags") or []
+        #
+        # S38-RESOLVED-FLAG-FILTER (2026-07-03): previously this line passed
+        # EVERY flag from summary_json.flags into the workbench risk calc,
+        # regardless of resolved status — despite calculate_workbench_ceiling's
+        # own docstring stating it expects "each active (unresolved) legal-
+        # pack value risk", and despite /api/deals/<id>/flags-resolved
+        # existing as a dedicated, working, persisted endpoint for exactly
+        # this state. Verified: grepped every reference to _resolved_flags
+        # in the codebase — written and read back by that endpoint only,
+        # never once referenced in this function before this fix. Clicking
+        # "Mark resolved" in the Flag Workbench UI had zero effect on the
+        # valuation ceiling. Filtering logic lives in
+        # ceiling_engine.filter_active_flags() so it has a real, direct,
+        # importable unit test — the previous gap was never a wrong
+        # implementation, it was untestable inline logic that nobody wrote
+        # a test against.
+        _active_flags = filter_active_flags(
+            _summary.get("flags") or [],
+            _summary.get("_resolved_flags") or {},
+        )
         if _calc_verdict_ceiling and _calc_workbench_ceiling:
             # V2 path — relational comparable engine
             _verdict = _calc_verdict_ceiling(

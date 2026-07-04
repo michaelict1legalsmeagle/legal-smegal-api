@@ -274,15 +274,31 @@ def test_legal_pack_risk_product_formula():
     a severity-tier table. Replaces the 2026-06-14-stale version of this test,
     which hard-coded severity fractions (critical=0.10, high=0.06) from the
     pre-S33 severity-bucket pricing model retired on 2026-06-14 in favour of
-    market-consequence segment routing — see _SEGMENT_RULES."""
-    # "Defective title" -> defective_title rule: 0.055 + 0.045 = 0.10
-    # "Restrictive covenant" -> restrictive_covenant rule: 0.010+0.020+0.020 = 0.05
-    # Chosen deliberately distinct (not both 0.10, as the old "critical"/"high"
-    # case coincidentally was) so this test can't pass for the wrong reason.
+    market-consequence segment routing — see _SEGMENT_RULES.
+
+    Updated 2026-07-03 (S37-COVENANT-SPLIT): a bare "Restrictive covenant"
+    title carries no unknown-content or unusual-obligation signal, so it now
+    correctly routes to the STANDARD covenant tier (0.02), not the
+    unknown/unusual tier (0.05). Intentional behaviour change, not test drift
+    — see the covenant-split rules in _SEGMENT_RULES.
+
+    Updated again 2026-07-03 (S37-SEGMENT-CAPS): aggregation moved from
+    per-flag multiplication to per-segment aggregation. Same two flags
+    combine as: indemnity=0.012, lender=0.055, residual=0.045+0.008=0.053 —
+    none exceed their segment cap.
+
+    Updated a third time 2026-07-03 (diminishing-marginal combination):
+    segment totals are now combined by sorting descending and applying
+    geometrically decaying weight (0.5**i), not straight multiplication —
+    sorted [0.055, 0.053, 0.012] -> total_reduction =
+    0.055*1 + 0.053*0.5 + 0.012*0.25 = 0.0845 -> factor = 1 - 0.0845."""
+    # "Defective title" -> defective_title rule: lender 0.055, residual 0.045
+    # "Restrictive covenant" (bare) -> standard covenant tier:
+    #   indemnity 0.012, residual 0.008
     flags = [_flag("Defective title", "critical"), _flag("Restrictive covenant", "high")]
     risks = _process_legal_risks(flags)
     factor = _legal_pack_adjustment_factor(risks)
-    expected = (1 - 0.10) * (1 - 0.05)
+    expected = 1 - (0.055 * 1 + 0.053 * 0.5 + 0.012 * 0.25)
     assert abs(factor - expected) < 0.001, f"Expected {expected} got {factor}"
 
 
@@ -841,25 +857,35 @@ def test_partial_resolution_raises_workbench_not_above_verdict():
 # ── TEST 19: Workbench formula — product not sum ─────────────────────────────
 
 def test_workbench_uses_risk_product_not_sum():
-    """Workbench midpoint = verdict_midpoint × product(1 - adj_i), where adj_i
-    comes from _SEGMENT_RULES (defect type), not a severity-tier table.
-    Replaces the 2026-06-14-stale version, which hard-coded
-    critical=0.10/high=0.06 from the retired severity-bucket pricing model."""
+    """Workbench midpoint = verdict_midpoint × risk factor, where the factor
+    comes from _SEGMENT_RULES (defect type) via segment-level diminishing-
+    marginal aggregation, not a severity-tier table and not straight
+    per-flag multiplication. Replaces the 2026-06-14-stale version, which
+    hard-coded critical=0.10/high=0.06 from the retired severity-bucket
+    pricing model.
+
+    2026-07-03 (S37-SEGMENT-CAPS, diminishing-marginal combination):
+    "Defective title" contributes lender=0.055, residual=0.045;
+    "Planning issue" contributes indemnity=0.012, lender=0.018,
+    residual=0.020. Segment totals: indemnity=0.012, lender=0.073,
+    residual=0.065 — none exceed their cap. Sorted descending
+    [0.073, 0.065, 0.012], combined with 0.5**i decay:
+    total_reduction = 0.073 + 0.065*0.5 + 0.012*0.25 = 0.1085."""
     comps   = _rpc_comps_5(200_000)
     verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
-    # "Defective title" -> 0.10 (defective_title rule), "Planning issue" -> 0.05
-    # (planning rule: 0.012+0.018+0.020) — confirmed via _process_legal_risks.
+    # "Defective title" -> lender 0.055, residual 0.045
+    # "Planning issue" -> indemnity 0.012, lender 0.018, residual 0.020
     flags   = [_flag("Defective title", "critical"), _flag("Planning issue", "high")]
     wb      = calculate_workbench_ceiling(verdict, flags)
 
     vm = verdict["valuation_range"]["midpoint"]
-    expected_factor = (1 - 0.10) * (1 - 0.05)
+    expected_factor = 1 - (0.073 * 1 + 0.065 * 0.5 + 0.012 * 0.25)
     expected_mid    = round(vm * expected_factor, 2)
     actual_mid      = wb["valuation_range"]["midpoint"]
 
     assert abs(actual_mid - expected_mid) < 1, (
-        f"Workbench midpoint must be verdict × product(1-adj): "
-        f"expected {expected_mid} got {actual_mid}"
+        f"Workbench midpoint must reflect the diminishing-marginal segment "
+        f"factor: expected {expected_mid} got {actual_mid}"
     )
     assert abs(wb["legal_pack_value_risks"]["adjustment_factor"] - expected_factor) < 0.001
 
@@ -1297,6 +1323,81 @@ def test_active_flags_produce_nonzero_discount():
     _, wb = _wb([_flag("Short lease", "critical")])
     assert wb["risk_discount_pct"] > 0.0, (
         f"risk_discount_pct must be > 0 with active critical flag; got {wb['risk_discount_pct']}"
+    )
+
+
+# ── TEST 38a: filter_active_flags — the actual missing integration ───────────
+# S38-RESOLVED-FLAG-FILTER (2026-07-03): tests 33-37 above all call
+# calculate_workbench_ceiling with a manually pre-filtered flags list
+# (e.g. flags[1:], []) constructed BY THE TEST ITSELF. They correctly prove
+# the engine honours whatever list it's given — they never prove anything
+# about whether the real _resolved_flags persisted state is what actually
+# produces that list in production. It wasn't: app.py passed every flag
+# regardless of resolved status until this fix. These tests close that
+# specific, previously-untested gap.
+
+from services.ceiling_engine import filter_active_flags
+
+
+def test_filter_active_flags_excludes_resolved_by_index():
+    """A flag whose index key is true in resolved_map must be excluded."""
+    flags = [_flag("Short lease", "critical"), _flag("Defective title", "high")]
+    resolved_map = {"0": True}
+    active = filter_active_flags(flags, resolved_map)
+    assert len(active) == 1
+    assert active[0]["title"] == "Defective title"
+
+
+def test_filter_active_flags_keeps_all_when_none_resolved():
+    """Empty or missing resolved_map must keep every flag active — the
+    OLD (buggy) behaviour as a safe default, never the reverse."""
+    flags = [_flag("Short lease", "critical"), _flag("Defective title", "high")]
+    assert filter_active_flags(flags, {}) == flags
+    assert filter_active_flags(flags, None) == flags
+
+
+def test_filter_active_flags_all_resolved_returns_empty():
+    """Every flag resolved must return an empty list, not drop silently to
+    None or raise — calculate_workbench_ceiling already handles [] correctly
+    per test_active_risk_uses_unresolved_flags_only above."""
+    flags = [_flag("Short lease", "critical"), _flag("Defective title", "high")]
+    resolved_map = {"0": True, "1": True}
+    assert filter_active_flags(flags, resolved_map) == []
+
+
+def test_filter_active_flags_false_and_missing_keys_stay_active():
+    """resolved_map values that are false, or indices absent from the map
+    entirely, must NOT be treated as resolved — only an explicit truthy
+    value excludes a flag. Prevents a missing-key bug silently zeroing out
+    a deal's entire legal risk."""
+    flags = [_flag("A", "critical"), _flag("B", "high"), _flag("C", "high")]
+    resolved_map = {"0": False}  # index 1 and 2 absent entirely
+    active = filter_active_flags(flags, resolved_map)
+    assert len(active) == 3, "false and missing keys must both mean 'still active'"
+
+
+def test_filter_active_flags_end_to_end_moves_the_ceiling():
+    """The actual production gap, reproduced directly: real flags + a real
+    resolved_map (the exact shape /api/deals/<id>/flags-resolved persists)
+    fed through filter_active_flags into calculate_workbench_ceiling must
+    produce a HIGHER ceiling than the unfiltered set — proving resolving a
+    flag in the UI would actually move the number this fix is meant to
+    connect it to."""
+    flags = [_flag("Short lease", "critical"), _flag("Defective title", "high")]
+    resolved_map = {"0": True}  # user resolved the short lease flag
+
+    comps = _rpc_comps_5(200_000)
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+
+    wb_before = calculate_workbench_ceiling(verdict, flags)
+    active_after = filter_active_flags(flags, resolved_map)
+    wb_after = calculate_workbench_ceiling(verdict, active_after)
+
+    m_before = wb_before["valuation_range"]["midpoint"]
+    m_after  = wb_after["valuation_range"]["midpoint"]
+    assert m_after > m_before, (
+        f"Resolving a flag must raise the ceiling once wired through "
+        f"filter_active_flags: before={m_before} after={m_after}"
     )
 
 
