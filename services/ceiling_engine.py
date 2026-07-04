@@ -228,6 +228,30 @@ VALUE_RISK_SEVERITY_ADJ: dict[str, float] = {
 }
 MAX_TOTAL_VALUE_RISK_ADJ = 0.35
 
+# S37-SEGMENT-CAPS (2026-07-03): per-segment sub-caps, added because a real
+# 32-deal audit showed residual_marketability_risk and lender_certifiability_
+# risk — the two catch-all segments almost every _SEGMENT_RULES entry routes
+# into — accumulate near-unbounded across 20-30+ flags per deal (observed:
+# residual median 31.5%, max 40%; lender median 19.8%, max 34.9% — EITHER ONE
+# ALONE already exceeds the old 35% global cap on a typical real deal, before
+# any other segment is even added). direct_cure_cost and indemnity_insurance_
+# cost stayed bounded by comparison (median 5.6% and 3.6%), because far fewer
+# rules route into them.
+#
+# These specific cap VALUES are a calibration proposal, not a derived fact —
+# data shows what the current system produces, not what the correct ceiling
+# is. Grounded near the observed median/p75 for the two overloaded segments
+# (constraining them well below their runaway max) and left close to the
+# already-bounded range for the other three. Flagged for review before this
+# is treated as final, not asserted as settled.
+_SEGMENT_CAPS: dict[str, float] = {
+    "direct_cure_cost":           0.10,
+    "delay_finance_drag":         0.15,
+    "indemnity_insurance_cost":   0.08,
+    "lender_certifiability_risk": 0.20,
+    "residual_marketability_risk": 0.20,
+}
+
 VALUE_RISK_CATEGORIES = {
     "short_lease", "defective_lease", "defective_title", "missing_title",
     "missing_lease", "missing_management_pack", "restrictive_covenant",
@@ -337,14 +361,42 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
       "indemnity available"],
      {"indemnity_insurance_cost": 0.012, "residual_marketability_risk": 0.008}),
 
-    # ── Restrictive covenant ─────────────────────────────────────────────────
-    # "covenant" added (2026-07-01) to catch LLM flag titles formatted as
-    # "YEAR Covenant — [restriction]" e.g. "1984 Covenant — No Back-to-Back
-    # Dwellinghouses" which share the same market-consequence profile as an
-    # explicit restrictive covenant but lack "restrictive" in the title.
-    (["restrictive covenant", "restrictive covenants", "covenant"],
+    # ── Restrictive covenant — UNKNOWN CONTENT or UNUSUAL OBLIGATION ─────────
+    # (S37-COVENANT-SPLIT, 2026-07-03): the single most-firing rule in the
+    # engine (58/660 real flags, 8.8%) was matching one flat 5% fraction to
+    # both genuinely uncertain/onerous covenants AND fully-disclosed standard
+    # estate-restriction wording. Split on real observed vocabulary: content
+    # that is unknown, undisclosed, or incomplete carries genuine title/
+    # insurability uncertainty; a named obligation with real financial/value
+    # consequence (clawback, minimum resale value, land surrender, ongoing
+    # cost-share) is not standard regardless of disclosure. This branch is
+    # checked FIRST — an ambiguous covenant defaults to elevated scrutiny,
+    # not to the standard tier. Fractions unchanged from the original rule.
+    (["content unknown", "content not visible", "not disclosed", "not provided",
+      "not yet provided", "unknown scope", "unknown content", "extent unknown",
+      "full effect unknown", "schedule d unknown", "redacted",
+      "document incomplete", "pages missing", "copy incomplete", "missing copy",
+      "clawback", "minimum house value", "minimum value restriction",
+      "land surrender", "structural complexity", "maintenance costs",
+      "boundary wall maintenance", "personal obligation",
+      "undisclosed encumbrances", "transfer of part", "retained land",
+      "covenants not disclosed", "covenants binding", "historic covenants",
+      "multiple restrictive covenants"],
      {"indemnity_insurance_cost": 0.010, "lender_certifiability_risk": 0.020,
       "residual_marketability_risk": 0.020}),
+
+    # ── Restrictive covenant — STANDARD, NAMED, FULLY DISCLOSED ──────────────
+    # Ordinary estate-restriction covenants with fully known, named content
+    # (no trade, no nuisance, residential-only, detached-only) are present on
+    # the large majority of English residential titles and do not
+    # differentiate this property from any other. Fraction reused verbatim
+    # from Rule 8 (indemnity insurance available) — same segments, same
+    # "known, low-cost, routinely insurable" profile. Not invented.
+    (["no trade or business", "no business use", "no nuisance", "no annoyance",
+      "residential use only", "private dwellinghouse", "detached or semi-detached",
+      "no right to light", "no alcohol licence", "building line", "setback",
+      "restrictive covenant", "restrictive covenants", "covenant"],
+     {"indemnity_insurance_cost": 0.012, "residual_marketability_risk": 0.008}),
 
     # ── Rights of way / easement defects ─────────────────────────────────────
     (["right of way", "rights of way", "easement", "right to light", "access rights",
@@ -432,18 +484,23 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
      {"direct_cure_cost": 0.015, "delay_finance_drag": 0.015,
       "residual_marketability_risk": 0.035}),
 
-    # ── LPA receiver / no title guarantee / limited title guarantee ───────────
-    # LPA receivers, attorneys without direct ownership, limited/good leasehold
-    # title, seller gives no warranties. Primary risk: lender certifiability
-    # (most lenders require full title guarantee) and resale (buyer cannot
-    # pass on the warranty they never received).
-    # Fractions: flying_freehold rule (lender 0.030, residual 0.025).
-    (["lpa receiver", "lpa receivership", "no title guarantee",
-      "limited title guarantee", "good leasehold title",
-      "seller gives no warranty", "attorney sale", "title guarantee",
-      "minimal warranty", "not absolute", "not original owner",
-      "structural complexity"],
+    # ── Distress-sale title risk — receiver / attorney / unverified authority ─
+    # (S37-COVENANT-SPLIT, 2026-07-03): genuine distress/verification signals,
+    # not standard auction practice. Checked FIRST. Fractions unchanged.
+    (["lpa receiver", "lpa receivership", "attorney sale",
+      "power of attorney validity unverified", "seller lacks direct ownership",
+      "tupe liability", "not original owner"],
      {"lender_certifiability_risk": 0.030, "residual_marketability_risk": 0.025}),
+
+    # ── Standard limited/no title guarantee — routine auction practice ────────
+    # The large majority of auction sellers give limited title guarantee; on
+    # its own this is not a distress signal. Fraction reused verbatim from
+    # Rule 8 (same segments, same "known, low-cost, routinely insurable"
+    # profile) rather than inventing a new figure.
+    (["no title guarantee", "limited title guarantee", "good leasehold title",
+      "seller gives no warranty", "title guarantee", "minimal warranty",
+      "not absolute", "structural complexity"],
+     {"indemnity_insurance_cost": 0.012, "residual_marketability_risk": 0.008}),
 
     # ── Registered mortgage / lender's charge outstanding ────────────────────
     # Registered charges that require lender consent or discharge on completion.
@@ -467,26 +524,39 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
       "ground stability", "mine entry"],
      {"lender_certifiability_risk": 0.025, "residual_marketability_risk": 0.035}),
 
-    # ── Seller will not answer buyer enquiries ────────────────────────────────
-    # A blanket refusal to answer enquiries removes the buyer's ability to
-    # obtain pre-completion warranties. Lenders require specific answers;
-    # resale is harder without disclosed property information.
-    # Fractions: rights_of_way rule (lender 0.020, residual 0.025).
+    # ── Seller will not answer buyer enquiries — STANDARD, solicitor-handled ──
+    # (S37-COVENANT-SPLIT, 2026-07-03): reclassified per direct product
+    # decision — a routine solicitor due-diligence matter at auction, not a
+    # value-differentiating defect. Already captured separately via
+    # CAP_SUBJECT... confidence reduction (line ~812) when this clause is
+    # present, so the uncertainty signal is not lost, only removed from the
+    # price. Fraction reused verbatim from Rule 8/17's admin tier.
     (["will not answer buyer enquiries", "seller will not answer",
       "replies qualified", "enquiries not answered",
       "will not answer enquiries"],
-     {"lender_certifiability_risk": 0.020, "residual_marketability_risk": 0.025}),
+     {"indemnity_insurance_cost": 0.012, "residual_marketability_risk": 0.008}),
 
-    # ── Short / extreme completion / buyer insures from exchange ──────────────
-    # 14-day completions require expensive bridging; buyer-insures-from-exchange
-    # clauses transfer total loss risk pre-completion; blank completion dates
-    # create legal uncertainty. Market consequence: finance drag and residual.
-    # Fractions: section_20 rule (delay 0.015, residual 0.020).
-    (["buyer insures from exchange", "buyer bears risk from exchange",
-      "seller insurance excluded", "14-day completion", "seven-day completion",
-      "28-day completion", "short completion", "completion date blank",
-      "notice to complete"],
+    # ── Genuinely compressed completion — below the standard auction window ──
+    # (S37-COVENANT-SPLIT, 2026-07-03): 20-28 days is the standard UK auction
+    # completion window (Common Auction Conditions default); buyer-insures-
+    # from-exchange is the CAC default position, not a distress signal on its
+    # own. What's genuinely compressed/unusual: sub-14-day completion,
+    # shortened notice-to-complete periods, and blank/uncertain dates.
+    # Checked FIRST. Fractions unchanged.
+    (["14-day completion", "seven-day completion", "5 business days",
+      "five business days", "shortened notice to complete",
+      "completion date blank", "extremely short completion"],
      {"delay_finance_drag": 0.015, "residual_marketability_risk": 0.020}),
+
+    # ── Standard completion terms / notice-to-complete fee ────────────────────
+    # Standard 20-28 day completion, buyer-insures-from-exchange (CAC
+    # default), and routine notice-to-complete fee clauses are present on the
+    # large majority of auction lots. Fraction reused verbatim from Rule 17
+    # (missing standard docs) — same admin/timing profile, not invented.
+    (["buyer insures from exchange", "buyer bears risk from exchange",
+      "seller insurance excluded", "28-day completion", "non-refundable deposit",
+      "notice to complete", "short completion"],
+     {"direct_cure_cost": 0.008, "delay_finance_drag": 0.012}),
 
     # ── Building Safety Act / fire safety certification ───────────────────────
     # Missing EWS1 / BSA leaseholder certificates render affected flats
@@ -586,6 +656,35 @@ def _flag_routing_source(flag: dict) -> str:
         if any(kw in text for kw in keywords):
             return "matched_rule"
     return "fallback"
+
+
+def filter_active_flags(all_flags: list[dict], resolved_map: dict) -> list[dict]:
+    """
+    Return only the flags NOT marked resolved in resolved_map.
+
+    S38-RESOLVED-FLAG-FILTER (2026-07-03): calculate_workbench_ceiling's own
+    docstring says it expects "each active (unresolved) legal-pack value
+    risk" — but nothing in the codebase ever actually filtered by resolved
+    status before calling it. /api/deals/<id>/flags-resolved persists
+    resolved state to summary_json._resolved_flags as an index -> bool map
+    (see app.py save_flags_resolved), but that map was never read anywhere
+    except by its own GET endpoint. Verified by grep: zero other references
+    before this fix. Extracted into its own function specifically so it has
+    a direct unit test — the earlier gap was untestable inline logic in a
+    12,000-line route function, not a wrong implementation once written.
+
+    resolved_map keys are strings (JSON object keys), matching the format
+    the frontend already sends: {"0": true, "3": true}. A flag is treated
+    as resolved only if its index key maps to a truthy value — missing keys,
+    false, and non-boolean-truthy values all mean "still active", which is
+    the safe default (never silently drops a flag's risk without an
+    explicit resolved=true).
+    """
+    resolved_map = resolved_map or {}
+    return [
+        f for i, f in enumerate(all_flags or [])
+        if not resolved_map.get(str(i))
+    ]
 
 
 def _flag_to_segments(flag: dict) -> dict[str, float]:
@@ -896,6 +995,56 @@ _TIME_COST_LOOKUP = (
     (("environmental search",), (1, 3), (35, 60),
      "LegalSmegal Risk-Pricing Engine report, 2026: standard search-provider turnaround.",
      None),
+    # S39-TIME-COST-GAP-CLOSE (2026-07-03): three entries closing named gaps
+    # found via live screenshot audit — flags that were rendering "Unknown —
+    # not yet researched" despite the 71-entry table. Sourced via targeted
+    # research, not generic web search, per standing instruction. Time is
+    # left as TIME_COST_UNRESEARCHED on all three: a real, named cost source
+    # was found for each, but no source meeting the same evidentiary bar
+    # covered turnaround time — left honestly unresearched rather than
+    # estimated, per explicit "no fabrication" standard. Cost and time are
+    # never forced to resolve together (see lookup_time_cost docstring).
+    (("former landfill", "contaminated land", "landfill site",
+      "historic landfill", "waste site"),
+     TIME_COST_UNRESEARCHED, (550, 800),
+     "Phase 1 contaminated-land desk study, £550-£800 +VAT (Earth "
+     "Environmental, published 2025/2026 rates) — the standard follow-up "
+     "investigation where an environmental search flags historic landfill "
+     "or waste-site proximity. This is a SEPARATE, ADDITIONAL cost to the "
+     "environmental search fee itself, not a replacement for it.",
+     "If findings from the Phase 1 desk study warrant a Phase 2 intrusive "
+     "site investigation, cost and time both increase substantially beyond "
+     "this figure — not covered here. Turnaround time for the Phase 1 study "
+     "itself was not found from a source meeting the same evidentiary bar "
+     "as the cost figure and is left unresearched rather than estimated."),
+    (("structural issues disclaimer", "structural risk disclaimer",
+      "accepts all structural risk", "buyer accepts all structural"),
+     TIME_COST_UNRESEARCHED, (400, 1500),
+     "Independent RICS survey typically commissioned by the buyer where a "
+     "contract disclaims seller responsibility for structural condition: "
+     "RICS Level 2 (HomeBuyer) Report from ~£400, RICS Level 3 (Building "
+     "Survey) up to ~£1,500 depending on property age/size/value "
+     "(HomeOwners Alliance, published 2025/2026 guidance). Range reflects "
+     "survey-tier choice, not one fixed fee.",
+     "Older, larger, or non-standard-construction properties typically "
+     "warrant the higher Level 3 tier, not the Level 2 minimum. Turnaround "
+     "time depends on local surveyor availability and was not sourced to "
+     "the same evidentiary bar as the cost figure — left unresearched."),
+    (("will not answer buyer enquiries", "seller will not answer",
+      "will not answer enquiries", "enquiries not answered",
+      "replies qualified"),
+     TIME_COST_UNRESEARCHED, (429, 429),
+     "Where a seller declines to answer pre-contract enquiries, the "
+     "buyer's solicitor must independently verify matters a responsive "
+     "seller would normally confirm directly — benchmarked against a "
+     "published UK auction legal-pack review fee of ~£429 +VAT (Property "
+     "Solvers, published 2025/2026 pricing), used here as an indicative "
+     "floor for the additional diligence burden this clause creates.",
+     "This is a benchmark for independent review effort, not a quote from "
+     "any specific solicitor firm, and not a guarantee that this is what "
+     "the buyer's actual solicitor will charge for this specific item. "
+     "Turnaround time depends on solicitor workload and was not sourced to "
+     "the same evidentiary bar as the cost figure — left unresearched."),
     # S33-RESEARCH-COVERAGE-v2 (2026-06-27): upgraded from a generic
     # internal-citation stub to named-source data. Markers cover coal
     # mining, CON29M, and generic ground-stability — coal-specific phrasings
@@ -2438,34 +2587,55 @@ def risk_routing_coverage(risks: list[dict]) -> dict:
 
 def _legal_pack_adjustment_factor(risks: list[dict]) -> float:
     """
-    legal_pack_value_risk_adjustment_factor = product(1 - value_adjustment_i)
-    across ALL active risks, unconditionally.
+    S37-SEGMENT-CAPS (2026-07-03): three-part restructure from the research
+    recommendation — (1) boilerplate vs property-specific classification
+    [see _SEGMENT_RULES covenant/title-guarantee/completion splits],
+    (2) per-segment sub-caps [see _SEGMENT_CAPS], (3) diminishing-marginal
+    combination across segments [this function]. An earlier version of this
+    fix implemented only (1) and (2) and was verified NOT to work: even with
+    every segment individually capped, straight multiplication of 5 bounded
+    terms still produced a 55% worst-case combined reduction — because
+    multiplicative combination was itself still the naive-stacking mechanism
+    the research identified as the problem, regardless of what feeds into it.
+    That gap is what part (3) closes.
 
-    S-FIX (2026-06-28): previously used a running additive sum of the inputs
-    to decide when to stop multiplying ("if running_sum > 0.35: break"). That
-    mixed two different units -- an additive gate checked against a
-    multiplicative output -- and meant whichever risks happened to be listed
-    last (an artifact of LLM extraction order, not severity or significance)
-    were silently dropped from the calculation entirely, with no record of
-    having been excluded. Verified on a real deal (39 Main Street,
-    Marston Trussell): 21 active risks, additive sum 67.5%, but the old logic
-    only ever multiplied in the first 11 before breaking -- the other 10,
-    including "No Mining/Ground Stability Search" (0.06) and "No Seller's
-    Enquiries TA6/CPSE" (0.05), never contributed at all.
-
-    Fix: multiply every active risk's fraction in unconditionally, then cap
-    the *result* (1 - factor, the actual reduction) at MAX_TOTAL_VALUE_RISK_ADJ
-    via a floor clamp on factor. This is order-independent by construction
-    (multiplication commutes) and no risk is ever excluded from the product --
-    only the final total is capped, which is what "35% cap" is supposed to mean.
+    Method:
+      1. Sum each risk's segment contributions into per-segment totals
+         (unchanged from the two-part version).
+      2. Clamp each segment total at _SEGMENT_CAPS[segment] (unchanged).
+      3. Sort the capped segment totals descending, then combine with
+         geometrically decaying weight (each subsequent segment contributes
+         half the marginal weight of the one before it):
+             total_reduction = sum(segment_i * 0.5**i) for i = 0, 1, 2, ...
+         This is the same underlying principle as trauma medicine's Injury
+         Severity Score, which sums only the top-ranked injury regions with
+         deliberately diminishing weight rather than summing all injuries
+         unconditionally — multiple simultaneous factors are real, but each
+         additional one should move the outcome less than the last, not
+         compound it. Verified worst case (all 5 segments simultaneously at
+         their cap): 35.5% — versus 55.0% under straight multiplication of
+         the same capped inputs, and versus the old flag-level method's
+         effectively unbounded growth with flag count.
+      4. MAX_TOTAL_VALUE_RISK_ADJ (35%) is retained as a final backstop —
+         now a genuine edge-case safeguard rather than the typical outcome.
     """
-    factor = 1.0
+    segment_totals: dict[str, float] = {}
     for r in risks:
-        adj = r.get("value_adjustment", 0.0)
-        if adj <= 0:
-            continue
-        factor *= (1.0 - adj)
-    return round(max(1.0 - MAX_TOTAL_VALUE_RISK_ADJ, factor), 6)
+        for seg, frac in r.get("segments", {}).items():
+            if frac <= 0:
+                continue
+            segment_totals[seg] = segment_totals.get(seg, 0.0) + frac
+
+    capped_totals = sorted(
+        (min(total, _SEGMENT_CAPS.get(seg, MAX_TOTAL_VALUE_RISK_ADJ))
+         for seg, total in segment_totals.items()),
+        reverse=True,
+    )
+
+    total_reduction = sum(c * (0.5 ** i) for i, c in enumerate(capped_totals))
+    total_reduction = min(total_reduction, MAX_TOTAL_VALUE_RISK_ADJ)
+
+    return round(1.0 - total_reduction, 6)
 
 
 # =============================================================================
