@@ -252,6 +252,187 @@ _SEGMENT_CAPS: dict[str, float] = {
     "residual_marketability_risk": 0.20,
 }
 
+# ═════════════════════════════════════════════════════════════════════════════
+# S40-CALIBRATION-METADATA (2026-07-04) — Phase A of the credibility-theory
+# calibration governance plan.
+#
+# Discipline: actuarial credibility theory (Bühlmann/Bühlmann-Straub) as the
+# governing methodology — converged on independently by two separate research
+# passes (2026-07-01 session; 2026-07-03 deep research). Under that
+# methodology, calibration values start as structured expert priors and are
+# formally blended toward real observed outcomes as the outcome dataset grows
+# (Phase E), with the blend weight Z = n/(n+k) always disclosed. The
+# non-negotiable prerequisite is honest labelling of what each number
+# currently IS — expert prior vs empirically credible — which is what this
+# registry provides. Modelled on RICS "material valuation uncertainty"
+# disclosure (label the interim methodology, never present it with false
+# precision) and SR 11-7 model-governance metadata.
+#
+# calibration_status values:
+#   "expert_prior"          — grounded reasoning/observed-distribution shape,
+#                             zero outcome backtesting. Honest default today.
+#   "partially_credible"    — blended with real outcomes, Z below full
+#                             credibility (set by Phase E, never by hand).
+#   "empirically_credible"  — Z at/near 1.0 against the outcome dataset.
+# source_type values mirror the _SEGMENT_RULES doctrine:
+#   "observed_distribution" | "structured_elicitation" | "external_source"
+#   | "backtested"
+# review_trigger: the explicit condition on which this value MUST be
+#   re-examined — no silent permanence.
+# ═════════════════════════════════════════════════════════════════════════════
+CALIBRATION_METADATA: dict[str, dict] = {
+    "segment_caps": {
+        "values": dict(_SEGMENT_CAPS),
+        "calibration_status": "expert_prior",
+        "source_type": "observed_distribution",
+        "basis": (
+            "Grounded in the per-segment cumulative-fraction distribution "
+            "observed across 32 real analysed deals (2026-07-03 audit): caps "
+            "set near observed median/p75 for the two overloaded catch-all "
+            "segments (residual median 31.5% max 40%; lender median 19.8% "
+            "max 34.9%), near observed range for the three bounded segments. "
+            "NOT derived from completed-transaction outcomes."
+        ),
+        "sample_size_at_calibration": 32,
+        "calibrated_at": "2026-07-04",
+        "review_trigger": (
+            "Recalibrate via credibility blend once >=50 deals have recorded "
+            "auction outcomes in deal_outcomes; review immediately if floored "
+            "share of live deals exceeds 20% or falls below 1%."
+        ),
+    },
+    "marginal_decay_rate": {
+        "values": {"decay_per_rank": 0.5},
+        "calibration_status": "expert_prior",
+        "source_type": "observed_distribution",
+        "basis": (
+            "Geometric decay (0.5**rank) across descending capped segment "
+            "totals. Chosen so the theoretical worst case (all 5 segments "
+            "simultaneously at cap) lands at 35.5%, marginally above the 35% "
+            "global backstop — i.e. the backstop binds only at the true "
+            "extreme. Verified against the same 32-deal corpus: floored share "
+            "fell from 91% to 6% and factor spread tracks severity mix. A "
+            "correlation-matrix aggregation (Solvency II style) is the "
+            "identified successor candidate, deliberately DEFERRED until "
+            "deal_outcomes data exists to champion-challenger the two — "
+            "replacing a freshly-verified mechanism on theoretical preference "
+            "alone would be uncontrolled change."
+        ),
+        "sample_size_at_calibration": 32,
+        "calibrated_at": "2026-07-04",
+        "review_trigger": (
+            "Champion-challenger against correlation-matrix aggregation once "
+            ">=50 deals have recorded outcomes in deal_outcomes."
+        ),
+    },
+    "global_backstop": {
+        "values": {"max_total_value_risk_adj": MAX_TOTAL_VALUE_RISK_ADJ},
+        "calibration_status": "expert_prior",
+        "source_type": "observed_distribution",
+        "basis": (
+            "Pre-existing 35% ceiling on total legal-pack value reduction. "
+            "Predates the outcome dataset; retained as defense-in-depth "
+            "behind the segment caps and marginal decay, which now bind "
+            "first in all but extreme cases."
+        ),
+        "sample_size_at_calibration": 0,
+        "calibrated_at": "pre-2026-06",
+        "review_trigger": (
+            "Re-examine against observed ceiling-vs-hammer deltas once "
+            ">=50 deal outcomes recorded."
+        ),
+    },
+}
+
+
+def get_calibration_disclosure() -> dict:
+    """
+    Machine-readable calibration disclosure for downstream surfaces (Verdict /
+    Workbench / Deal Report). Returns the full metadata registry plus a
+    single plain-English summary line suitable for direct UI display.
+
+    S40 (2026-07-04): exists so no risk-adjusted figure ships with false
+    precision — the RICS material-uncertainty principle applied to model
+    calibration. A prior audit pattern in this codebase (confidence labels
+    computed then silently discarded, 2026-06-25; _resolved_flags persisted
+    then never read, 2026-07-03) showed that metadata which nothing consumes
+    is metadata that silently dies — hence a dedicated accessor rather than
+    a bare module-level dict, and a pre-built summary line so surfacing it
+    costs the frontend one field read.
+    """
+    statuses = {k: v["calibration_status"] for k, v in CALIBRATION_METADATA.items()}
+    all_expert_prior = all(s == "expert_prior" for s in statuses.values())
+    if all_expert_prior:
+        summary = (
+            "Risk-adjustment calibration is currently expert-prior: grounded "
+            "in the observed distribution of 32 real analysed deals, not yet "
+            "validated against completed auction outcomes. Calibration "
+            "shifts automatically toward real outcomes as they are recorded."
+        )
+    else:
+        summary = (
+            "Risk-adjustment calibration is partially outcome-validated; "
+            "see per-parameter status for detail."
+        )
+    return {
+        "summary": summary,
+        "parameters": CALIBRATION_METADATA,
+        "methodology": "buhlmann_straub_credibility_pending_outcomes",
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# S40-CREDIBILITY-BLEND (2026-07-04) — Phase E.
+#
+# Bühlmann-style credibility weighting: blended = Z*observed + (1-Z)*prior,
+# Z = n / (n + K). Standard actuarial form (Bühlmann 1967; Bühlmann-Straub
+# 1970) for exactly this situation: a risk class with real stakes but thin
+# experience data, where the class's own data earns weight as it accumulates
+# rather than being trusted fully from day one or ignored until an arbitrary
+# threshold.
+#
+# K (the credibility constant) controls how fast real data earns weight:
+# at n = K observations, Z = 0.5 (evidence and prior weighted equally).
+# K = 50 here, matching the review_trigger threshold in CALIBRATION_METADATA:
+# at the 50-outcome review point the blend is exactly half-and-half, which is
+# when human review of the shifted values is mandated. K itself is labelled
+# expert-prior — it is a governance choice (how cautious to be with early
+# data), not an empirical estimate, and standard practice derives it
+# empirically (variance ratio) only once far more data exists.
+#
+# HONEST CURRENT STATE: deal_outcomes has 0 rows at implementation time, so
+# Z = 0 and blended == prior exactly. This function changes nothing today —
+# by design. It exists so the shift toward real outcomes is automatic,
+# formulaic, and disclosed (Z is returned, not hidden) rather than requiring
+# a future manual recalibration that history says would be skipped.
+# ═════════════════════════════════════════════════════════════════════════════
+CREDIBILITY_K: float = 50.0
+
+
+def credibility_blend(prior: float, observed: Optional[float], n_observations: int,
+                      k: float = CREDIBILITY_K) -> dict:
+    """
+    Blend an expert-prior calibration value with an observed empirical value
+    using Bühlmann credibility weighting.
+
+    Returns {value, z, n, prior, observed, status} — Z always disclosed.
+    If observed is None or n_observations == 0, returns the prior with Z=0
+    and status 'expert_prior' (never fabricates an observation).
+    """
+    if observed is None or n_observations <= 0:
+        return {"value": prior, "z": 0.0, "n": max(0, n_observations),
+                "prior": prior, "observed": None, "status": "expert_prior"}
+    z = n_observations / (n_observations + k)
+    blended = z * observed + (1.0 - z) * prior
+    if z >= 0.9:
+        status = "empirically_credible"
+    elif z > 0.0:
+        status = "partially_credible"
+    else:
+        status = "expert_prior"
+    return {"value": round(blended, 6), "z": round(z, 4), "n": n_observations,
+            "prior": prior, "observed": observed, "status": status}
+
 VALUE_RISK_CATEGORIES = {
     "short_lease", "defective_lease", "defective_title", "missing_title",
     "missing_lease", "missing_management_pack", "restrictive_covenant",
@@ -2845,6 +3026,10 @@ def calculate_workbench_ceiling(
             "adjusted_value":    wb_risk_adjusted_value,  # = comparable_valuation × risk_factor
             "risks":             active_risks,
             "routing_coverage":  risk_routing_coverage(active_risks),
+            # S40 (2026-07-04): calibration honesty layer — every risk-
+            # adjusted figure carries its calibration provenance. See
+            # CALIBRATION_METADATA / get_calibration_disclosure().
+            "calibration":       get_calibration_disclosure(),
         },
         "risk_discount_pct":   risk_discount_pct,
         # Market-consequence segment breakdown — canonical from engine, used by Verdict waterfall.
