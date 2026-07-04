@@ -7051,6 +7051,104 @@ def get_flags_resolved(deal_id: str):
 
 
 
+# ── DEAL OUTCOMES (S40, 2026-07-04) ──────────────────────────
+# Phase C of the credibility-theory calibration plan: records real auction
+# outcomes per deal so the risk-adjustment calibration (segment caps, decay
+# rate) can be formally validated against reality (Bühlmann-Straub blend,
+# Phase E) instead of remaining expert priors forever. System-side estimates
+# are SNAPSHOTTED at record time from the deal's current summary_json —
+# never retro-edited — so estimate-vs-outcome comparisons are always against
+# what the engine actually said, not what a later engine version would say.
+
+@app.route("/api/deals/<deal_id>/outcome", methods=["POST", "OPTIONS"])
+@require_auth
+def save_deal_outcome(deal_id: str):
+    """Record (or update, per source) the real auction outcome for a deal.
+    Body: {
+      outcome_type: 'sold_at_auction'|'sold_prior'|'sold_post'|'unsold'
+                    |'withdrawn'|'user_purchased'|'unknown',   (required)
+      achieved_price: number|null, guide_price: number|null,
+      reserve_met: bool|null, auction_date: 'YYYY-MM-DD'|null,
+      auctioneer: str|null, outcome_source: 'manual'|'eig'|'scraper'|'other',
+      outcome_notes: str|null
+    }
+    Upserts on (deal_id, outcome_source)."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        body = request.get_json(silent=True) or {}
+        outcome_type = body.get("outcome_type")
+        _valid_types = {"sold_at_auction", "sold_prior", "sold_post",
+                        "unsold", "withdrawn", "user_purchased", "unknown"}
+        if outcome_type not in _valid_types:
+            return jsonify({"error": f"outcome_type must be one of {sorted(_valid_types)}"}), 400
+        outcome_source = body.get("outcome_source") or "manual"
+        if outcome_source not in {"manual", "eig", "scraper", "other"}:
+            return jsonify({"error": "invalid outcome_source"}), 400
+
+        # Ownership check + snapshot of what the system said at record time.
+        row = supabase.table("deals").select("summary_json") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not row.data:
+            return jsonify({"error": "Deal not found"}), 404
+        sj = row.data.get("summary_json") or {}
+        wb = sj.get("workbench_ceiling") or {}
+        vc = sj.get("verdict_ceiling") or {}
+        lpr = wb.get("legal_pack_value_risks") or {}
+        calib = (lpr.get("calibration") or {}).get("parameters", {})
+        calib_status = (calib.get("segment_caps") or {}).get("calibration_status")
+
+        record = {
+            "deal_id":                            deal_id,
+            "outcome_type":                       outcome_type,
+            "achieved_price":                     body.get("achieved_price"),
+            "guide_price":                        body.get("guide_price"),
+            "reserve_met":                        body.get("reserve_met"),
+            "auction_date":                       body.get("auction_date"),
+            "auctioneer":                         body.get("auctioneer"),
+            "outcome_source":                     outcome_source,
+            "outcome_notes":                      body.get("outcome_notes"),
+            # Snapshot — never retro-edited:
+            "ceiling_estimate_at_analysis":       (wb.get("valuation_range") or {}).get("midpoint"),
+            "verdict_valuation_at_analysis":      vc.get("comparable_valuation"),
+            "risk_adjustment_factor_at_analysis": lpr.get("adjustment_factor"),
+            "engine_version_at_analysis":         wb.get("version") or vc.get("version"),
+            "calibration_status_at_analysis":     calib_status,
+            "active_flag_count_at_analysis":      wb.get("active_flag_count"),
+            "updated_at":                         now_iso(),
+        }
+        supabase.table("deal_outcomes").upsert(
+            record, on_conflict="deal_id,outcome_source"
+        ).execute()
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        app.logger.exception("save_deal_outcome failed")
+        app.logger.error("Unhandled exception: %s", e, exc_info=True)
+        return jsonify({"error": "An internal error occurred"}), 500
+
+
+@app.route("/api/deals/<deal_id>/outcome", methods=["GET"])
+@require_auth
+def get_deal_outcome(deal_id: str):
+    """Return recorded outcome(s) for a deal, all sources."""
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    try:
+        # Ownership check via deals table (deal_outcomes has no user_id).
+        row = supabase.table("deals").select("id") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not row.data:
+            return jsonify({"error": "Deal not found"}), 404
+        res = supabase.table("deal_outcomes").select("*") \
+            .eq("deal_id", deal_id).execute()
+        return jsonify({"ok": True, "outcomes": res.data or []}), 200
+    except Exception as e:
+        app.logger.error("Unhandled exception: %s", e, exc_info=True)
+        return jsonify({"error": "An internal error occurred"}), 500
+
+
 # ── DOCUMENT UPLOAD ─────────────────────────────────────────
 # Hard cap: 20MB. Render free plan has 512MB RAM; pymupdf can 3-5× a PDF in
 # memory during extraction — a 50MB PDF could exhaust the worker and cause 502.

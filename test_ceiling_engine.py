@@ -1401,6 +1401,83 @@ def test_filter_active_flags_end_to_end_moves_the_ceiling():
     )
 
 
+# ── S40 CALIBRATION GOVERNANCE TESTS (2026-07-04) ─────────────────────────────
+# Phase A (metadata + disclosure) and Phase E (credibility blend). The
+# recurring failure class these guard against: values computed then silently
+# never consumed (confidence labels 2026-06-25, _resolved_flags 2026-07-03).
+
+from services.ceiling_engine import (
+    CALIBRATION_METADATA,
+    get_calibration_disclosure,
+    credibility_blend,
+    CREDIBILITY_K,
+    _SEGMENT_CAPS,
+)
+
+
+def test_calibration_metadata_covers_every_calibrated_parameter():
+    """Every segment cap value must appear in the metadata registry, and the
+    registry's copy must equal the live value — no drift between the number
+    used and the number disclosed."""
+    meta_caps = CALIBRATION_METADATA["segment_caps"]["values"]
+    assert meta_caps == _SEGMENT_CAPS, "disclosed caps must equal live caps"
+    for key in ("marginal_decay_rate", "global_backstop"):
+        assert key in CALIBRATION_METADATA
+    for entry in CALIBRATION_METADATA.values():
+        # Mandatory-reason-code doctrine: no calibration value without status,
+        # basis, and an explicit review trigger.
+        assert entry["calibration_status"] in (
+            "expert_prior", "partially_credible", "empirically_credible")
+        assert entry["basis"], "every calibrated value needs a stated basis"
+        assert entry["review_trigger"], "every calibrated value needs a review trigger"
+
+
+def test_calibration_disclosure_is_wired_into_workbench_output():
+    """The disclosure must be CONSUMED by the workbench output, not orphaned —
+    the exact failure class of the discarded confidence labels."""
+    comps   = _rpc_comps_5(200_000)
+    verdict = calculate_verdict_ceiling(sold_comps=comps, subject=_subj())
+    wb      = calculate_workbench_ceiling(verdict, [_flag("Short lease", "critical")])
+    calib = wb["legal_pack_value_risks"].get("calibration")
+    assert calib is not None, "workbench output must carry calibration disclosure"
+    assert calib["summary"], "disclosure must include a UI-ready summary line"
+    assert "segment_caps" in calib["parameters"]
+    assert calib["methodology"] == "buhlmann_straub_credibility_pending_outcomes"
+
+
+def test_credibility_blend_zero_observations_returns_prior_exactly():
+    """With no outcome data, the blend must return the prior with Z=0 —
+    never a fabricated observation. This is the honest current state."""
+    r = credibility_blend(prior=0.20, observed=None, n_observations=0)
+    assert r["value"] == 0.20 and r["z"] == 0.0 and r["status"] == "expert_prior"
+    r2 = credibility_blend(prior=0.20, observed=0.30, n_observations=0)
+    assert r2["value"] == 0.20 and r2["z"] == 0.0, "n=0 must ignore any observed value"
+
+
+def test_credibility_blend_weight_grows_with_data():
+    """Z must grow monotonically with n; at n=K, evidence and prior weigh
+    equally; blended value must sit between prior and observed."""
+    prior, observed = 0.20, 0.30
+    z_prev = -1.0
+    for n in (1, 10, 25, 50, 200, 1000):
+        r = credibility_blend(prior, observed, n)
+        assert r["z"] > z_prev, "Z must be strictly increasing in n"
+        assert prior < r["value"] < observed, "blend must lie between prior and observed"
+        z_prev = r["z"]
+    at_k = credibility_blend(prior, observed, int(CREDIBILITY_K))
+    assert abs(at_k["z"] - 0.5) < 1e-9, "at n=K, Z must be exactly 0.5"
+    assert abs(at_k["value"] - 0.25) < 1e-9, "at Z=0.5, blend is the midpoint"
+
+
+def test_credibility_blend_status_transitions():
+    """Status labels must track Z honestly: expert_prior at 0, partially_
+    credible in between, empirically_credible only at Z >= 0.9 (n >= 9K)."""
+    assert credibility_blend(0.2, None, 0)["status"] == "expert_prior"
+    assert credibility_blend(0.2, 0.3, 10)["status"] == "partially_credible"
+    n_full = int(9 * CREDIBILITY_K)  # Z = 9K/(9K+K) = 0.9
+    assert credibility_blend(0.2, 0.3, n_full)["status"] == "empirically_credible"
+
+
 # ── TEST 38: Workbench never exceeds verdict ──────────────────────────────────
 
 def test_workbench_never_exceeds_verdict_any_resolution_state():
