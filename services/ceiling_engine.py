@@ -1213,6 +1213,9 @@ _TIME_COST_LOOKUP = (
      "the same evidentiary bar as the cost figure — left unresearched."),
     (("will not answer buyer enquiries", "seller will not answer",
       "will not answer enquiries", "enquiries not answered",
+      # S42-NEAR-MISS (2026-07-05): "Seller Will Not Answer Pre-Contract
+      # Enquiries" (2 book occurrences) missed while sibling phrasings hit.
+      "will not answer pre-contract", "not answer pre-contract enquiries",
       "replies qualified"),
      TIME_COST_UNRESEARCHED, (429, 429),
      "Where a seller declines to answer pre-contract enquiries, the "
@@ -1615,7 +1618,13 @@ _TIME_COST_LOOKUP = (
      "valuation item, not a fixable cost. Reasonableness can be challenged "
      "at the FTT but that is a dispute route, not a standard cost."),
     (("notice to complete", "completion default", "completion penalty",
-      "default interest", "interest penalty"), (0, 10), TIME_COST_NO_RESOLUTION,
+      "default interest", "interest penalty",
+      # S42-NEAR-MISS (2026-07-05): evidenced on live deal 7fee78d8 — flag
+      # titled "10% Interest Rate on Late Completion" fell to UNRESEARCHED
+      # while this exact entry (SCS 6.8.2 / Law Society rate) sat here
+      # unmatched. Book-wide: 2 occurrences. Same category, new phrasings.
+      "interest rate on late completion", "interest on late completion",
+      "% interest rate on late", "late completion interest"), (0, 10), TIME_COST_NO_RESOLUTION,
      "Notice to complete = 10 working days under Standard Conditions of Sale "
      "5th ed. condition 6.8.2 (time of the essence). Default interest = the "
      "'contract rate' = Law Society interest rate, currently 7.75% effective "
@@ -1676,7 +1685,12 @@ _TIME_COST_LOOKUP = (
     (('absence of easement', 'no right of access', 'missing easement', 'no easement', 'inadequate rights of access', 'landlocked', 'no right of way'), (0, 90), (100, 500),
      "Missing/defective access right: absence-of-easement indemnity insurance is the standard route, premium value-banded (CLS; Severn Trent Searches; Moore Barlow) — broadly aligned with the road-adoption / restrictive-covenant indemnity bands (low hundreds). Issued days. Alternative: a deed of easement (needs the servient owner's agreement) or a prescriptive-easement application to Land Registry — the latter has a ~3-month wait and costs that rise with objections (Michelmores; Sherrards). MEDIUM confidence — premium is value-banded, not a single published figure.",
      "Indemnity covers a CHALLENGE to using an existing route, NOT the ongoing cost of maintaining it — every absence-of-easement policy explicitly excludes the insured failing to pay their share of access-way / shared-path maintenance (Today's Conveyancer; Moore Barlow). A genuinely landlocked property with an uncooperative neighbour may have no affordable fix — see the cost-sharing and right-of-way-burden entries, which are handled differently."),
-    (('right of way burden', 'easement burden', 'right of way over', 'third party right of way', 'burden over property'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+    (('right of way burden', 'easement burden', 'right of way over', 'third party right of way', 'burden over property',
+      # S42-NEAR-MISS (2026-07-05): "Charges Register Easements — Broad
+      # Encumbrances" (live deal 7fee78d8, 3 book occurrences of the sewer/
+      # easement family) — unknown-extent easement burdens from an old
+      # conveyance are exactly this entry's accepted-and-priced class.
+      'charges register easements', 'broad encumbrances', 'quasi easements', 'quasi-easements'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
      "Existing easement/right-of-way BURDEN (someone else has a right over this property) — generally no resolution cost: it is a permanent feature of the title to be accepted and priced, not a clearable defect (Michelmores; Napthens). An easement runs with the land and binds successors. Removal requires the beneficiary's agreement (a negotiated release at their price) or proof of abandonment — neither has a researchable fixed figure. Handling = factor the burden into value.",
      None),
     (('shared easement', 'cost sharing', 'cost-sharing', 'passageway cost', 'easements over passageway', 'shared access maintenance', 'shared drive'), (2, 5), (500, 1500),
@@ -1708,7 +1722,14 @@ _TIME_COST_LOOKUP = (
     # against the real audit before splicing. Remaining UNRESEARCHED after
     # this are the probate/seller-silence confidence-cap items only, which
     # correctly carry no time/cost figure.
-    (('absolute — no mortgage', 'no mortgage registered', 'absolute class confirmed', 'absolute — no charges', 'no charges registered', 'freehold title absolute', 'leasehold title absolute', 'title absolute'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
+    (('absolute — no mortgage', 'no mortgage registered', 'absolute class confirmed', 'absolute — no charges', 'no charges registered', 'freehold title absolute', 'leasehold title absolute', 'title absolute',
+      # S42-NEAR-MISS (2026-07-05): "Freehold Title — Absolute Title
+      # Confirmed" appeared fully-unresearched SIX times across the live
+      # book — the same CONFIRMED finding as this entry, missed purely on
+      # word order ("absolute title" vs "title absolute"). Conservative
+      # additions only: both variants require the confirming context word,
+      # never bare "absolute title" (which could sit inside a negation).
+      'absolute title confirmed', 'freehold title — absolute'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
      'Confirmed clean: an absolute title class with no adverse entries is the best-quality title and a positive finding — nothing to resolve, no cost, no delay. Noted for completeness, not as a risk.',
      None),
     (('no disputes', 'no complaints declared', 'no disputes or complaints'), TIME_COST_CONFIRMED, TIME_COST_CONFIRMED,
@@ -1816,7 +1837,177 @@ _TIME_COST_LOOKUP = (
      "discloses only — it does not resolve. Impact is a valuation / risk-"
      "acceptance judgement, not a cost to clear.",
      None),
+    # ── S42 NEW ENTRIES (2026-07-05) — researched to the named-source bar
+    # or honestly classified; identified from live deal 7fee78d8 (77 Neville
+    # Road) where 11/29 flags fell to UNRESEARCHED. ──
+    (('public sewer within', 'sewer within property boundary', 'sewer within the boundary',
+      'public sewer running within', 'sewer crosses the property', 'build over agreement', 'build-over agreement'),
+     (10, 20), (200, 500),
+     "Public sewer within the boundary: no cost to OWN — the cost arises "
+     "only if building within 3m of / over the sewer, which requires a "
+     "build-over agreement from the water company (Severn Trent statutory "
+     "guidance: formal agreement mandatory, fee varies by pipe size and "
+     "development type; illegal to build over without approval). Industry "
+     "benchmark for a standard build-over agreement: £200-500 and ~2-4 "
+     "weeks' approval (published 2025/26 guidance). MEDIUM confidence — "
+     "fee structure is tiered, not a single national figure.",
+     "Costs rise materially if the pipe is ≥300mm, pressurised, or an "
+     "inspection chamber must be relocated; Severn Trent may also require "
+     "pre/post CCTV surveys at the applicant's cost, and can require "
+     "alteration or removal of unauthorised structures. This prices the "
+     "AGREEMENT for future works — the development-restriction impact on "
+     "value is a separate judgement, not covered by this figure."),
+    (('trust corporation restriction', 'sole proprietor restriction', 'potential probate issue',
+      'probate may be needed', 'probate required before', 'grant of probate required'),
+     (22, 80), TIME_COST_UNRESEARCHED,
+     "CONDITIONAL: applies only IF a joint proprietor has died — while all "
+     "registered proprietors are alive and consenting, this restriction "
+     "costs nothing and adds no delay. If probate IS needed: HMCTS grant "
+     "waiting time averaged ~4.3 weeks for digital applications and ~16 "
+     "weeks for paper as of June 2026 (HMCTS via ICAEW Probate "
+     "Professional User Group, June 2026; corroborated by Institute of "
+     "Legacy Management, June 2026) — expressed here as ~22-80 working "
+     "days. Legal costs of probate/court-order routes vary too widely for "
+     "a defensible single range and are left unresearched rather than "
+     "estimated.",
+     "'Stopped' applications (missing documents, mismatched details) add "
+     "months beyond these averages — HMCTS reported a material share of "
+     "cases stopped/unworkable as of mid-2026. For an auction purchase the "
+     "practical exposure is the seller's ability to complete at all: "
+     "verify proprietor status BEFORE bidding, since this timeline sits on "
+     "the seller's side of completion, not the buyer's."),
+    (('indemnifies seller for all covenant', 'covenant breaches post-transfer',
+      'indemnity covenant in the transfer', 'buyer shall covenant to indemnify',
+      'indemnify the seller against'),
+     TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Standard transfer-indemnity covenant — no resolution cost. A buyer "
+     "covenanting in the TR1 to observe existing Charges Register "
+     "obligations and indemnify the seller for post-transfer breaches is "
+     "the routine conveyancing mechanism by which covenant chains pass "
+     "with the land; it creates no new liability beyond the underlying "
+     "covenants themselves (which are separately flagged and priced where "
+     "they appear). Accepted and priced, not a clearable defect.",
+     None),
+    (('completion date fixed', 'fixed completion date', 'agreed completion date',
+      'completion is fixed', 'completion fixed at', 'fixed calendar completion'),
+     TIME_COST_UNRESEARCHED, TIME_COST_NO_RESOLUTION,
+     "Fixed calendar completion date — a completion TERM, not a defect: no "
+     "resolution cost. The time figure is deterministic (days remaining to "
+     "the stated date) and is computed from the date in the flag itself by "
+     "the document tier, not researched — see the fixed-date extraction in "
+     "lookup_time_cost. If no parseable date is present in the flag text, "
+     "time correctly remains unresearched rather than guessed.",
+     "The real exposure is FUNDING TIMELINE pressure: a fixed date gives "
+     "no flexibility if finance is delayed, and interacts with any default "
+     "interest / notice-to-complete terms priced separately. The computed "
+     "days-remaining figure shrinks in real time — it is relative to "
+     "today, not a fixed property of the deal."),
 )
+
+
+# ── S42-CATEGORY-REGISTRY (2026-07-05) ───────────────────────────────────────
+# Root cause evidenced on live deal 7fee78d8 (77 Neville Road) and the full
+# 36-deal book: 379/949 flags (39.9%) fully unresearched, ~stable across four
+# manual marker expansions (18→71→75→78 entries) — because flag titles are
+# UNBOUNDED LLM free text while markers are a finite literal-substring list.
+# Measured proof: "Freehold Title — Absolute Title Confirmed" missed 6× on
+# word order alone while its researched CONFIRMED entry sat in this table.
+# Fix: every entry gets a stable category slug; the extraction LLM assigns
+# `risk_category` from this CLOSED vocabulary while looking at the evidence —
+# semantic matching happens ONCE, at extraction, by the component built for
+# semantics. lookup_time_cost resolves category-first; markers remain as the
+# legacy fallback for deals extracted before this field existed.
+# INVARIANT (test-enforced): len(_TIME_COST_CATEGORIES) == len(_TIME_COST_LOOKUP),
+# positionally aligned. Slugs are FROZEN identifiers — never renumber or
+# reorder without migrating stored flags; append-only, like the table itself.
+_TIME_COST_CATEGORIES = (
+    'local_authority_search',
+    'environmental_search',
+    'former_landfill',
+    'structural_issues_disclaimer',
+    'will_not_answer_buyer_enquiries',
+    'mining',
+    'chancel_repair',
+    'road_adoption',
+    'common_drains',
+    'tree_and_shrub',
+    'road_making',
+    'restrictive_covenant',
+    'indemnity_insurance',
+    'no_epc',
+    'epc_rating',
+    'drainage',
+    'absent_landlord',
+    'hmo_licen',
+    'ground_rent_escalation',
+    'alter_access',
+    'multi_property_title',
+    'groundwater_flooding',
+    'surface_water_flooding',
+    'flood_risk',
+    'radon',
+    'japanese_knotweed',
+    'building_regulations_completion',
+    'planning_enforcement',
+    'lawful_development_certificate',
+    'eicr',
+    'gas_safety',
+    'possessory_title',
+    'flying_freehold',
+    'short_lease',
+    'service_charge',
+    'notice_to_complete',
+    'forfeiture',
+    'sitting_tenant',
+    'buyer_s_premium',
+    'seller_s_costs',
+    'nearby_planning',
+    'overage',
+    'vat_uncertain',
+    'ta6',
+    'party_wall',
+    'absence_of_easement',
+    'right_of_way_burden',
+    'shared_easement',
+    'listed_building_on_adjacent',
+    'listed_building_consent',
+    'conservation_area',
+    'smoke_control',
+    'air_quality_management',
+    'absolute_no_mortgage',
+    'no_disputes',
+    'vacant_possession_occupier_letter',
+    'epc_valid_until',
+    'designated_primarily_residential',
+    'furniture_and_effects_may_remain',
+    '21_day_completion',
+    'limited_title_guarantee',
+    'cannot_assign_contract',
+    'sold_as_seen',
+    'right_to_buy_covenant',
+    'buyer_bears_risk_from_exchange',
+    'discrepancy_in_seller_s_legal_fees',
+    'climateindex',
+    'special_conditions_of_sale_not_present',
+    'conveyance_document_incomplete',
+    'overhanging_structure',
+    'rooms_over_passageway',
+    'boundary_moved',
+    'epc_present_rating_appears_low',
+    'tenant_covenants_indemnity',
+    'no_buildings_insurance_details',
+    'deemed_to_have_full',
+    'title_covers_three_properties',
+    'nationally_significant',
+    'public_sewer_within',
+    'trust_corporation_restriction',
+    'indemnifies_seller_for_all_covenant',
+    'completion_date_fixed',
+)
+
+_CATEGORY_TO_LOOKUP = {slug: idx for idx, slug in enumerate(_TIME_COST_CATEGORIES)}
+
+RISK_CATEGORY_UNCATEGORISED = "uncategorised"
 
 import re
 
@@ -1867,6 +2058,46 @@ def _extract_stated_time(text: str):
             return extractor(m)
     return None
 
+
+# S42-FIXED-DATE (2026-07-05): deal-fact tier. Verified live on deal 7fee78d8:
+# "Completion Date Fixed — 20 August 2026" fell to UNRESEARCHED through all
+# three tiers, because every _TIME_PATTERNS regex matches DURATIONS ("N
+# working days") and every completion marker was duration-phrased ("21-day
+# completion") — a flag whose entire content IS a calendar date was
+# structurally invisible, despite the answer being pure arithmetic. This
+# tier converts an explicitly-stated calendar date into days-remaining from
+# today. It fires ONLY for the completion_date_fixed category (or its marker
+# match) — never as a general date scraper, since arbitrary dates in flag
+# text (charge dates, conveyance dates) are not deadlines.
+_FIXED_DATE_PATTERN = re.compile(
+    r'(\d{1,2})(?:st|nd|rd|th)?\s+'
+    r'(january|february|march|april|may|june|july|august|september|october|november|december)'
+    r'\s+(\d{4})', re.I
+)
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ("january", "february", "march", "april", "may", "june", "july",
+     "august", "september", "october", "november", "december"))}
+
+def _extract_fixed_completion_days(text: str):
+    """Returns (days, days, iso_date) to an explicitly-stated calendar date,
+    counted from today, or None if no parseable future-or-today date exists.
+    Deterministic arithmetic on a document-stated fact — never an estimate.
+    Past dates return (0, 0, iso): the deadline has arrived; zero days
+    remain (still a fact, not a guess)."""
+    if not text:
+        return None
+    m = _FIXED_DATE_PATTERN.search(text)
+    if not m:
+        return None
+    try:
+        import datetime as _dt
+        d = _dt.date(int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1)))
+        days = max(0, (d - _dt.date.today()).days)
+        return (days, days, d.isoformat())
+    except (ValueError, KeyError):
+        return None
+
+
 def _extract_stated_cost(text: str):
     """Returns (low, high) £ if an explicit cost figure is found in the
     given text, else None. Conservative — only matches unambiguous,
@@ -1915,13 +2146,41 @@ def lookup_time_cost(flag) -> dict:
     research_time, research_cost, methodology, outlier_note = (
         TIME_COST_UNRESEARCHED, TIME_COST_UNRESEARCHED, None, None
     )
-    for markers, t, c, m, o in _TIME_COST_LOOKUP:
-        if any(mk in title_l for mk in markers):
-            research_time, research_cost, methodology, outlier_note = t, c, m, o
-            break
+    # S42-CATEGORY-FIRST (2026-07-05): if the extraction stage assigned a
+    # risk_category from the closed vocabulary, resolve directly against
+    # that entry — no substring matching, no vocabulary drift. Marker
+    # scanning below remains as the legacy fallback for flags extracted
+    # before risk_category existed, and for 'uncategorised'.
+    _matched_lookup_idx = None
+    _flag_category = (
+        (flag.get("risk_category") or "").strip().lower()
+        if isinstance(flag, dict) else ""
+    )
+    if _flag_category and _flag_category != RISK_CATEGORY_UNCATEGORISED:
+        _idx = _CATEGORY_TO_LOOKUP.get(_flag_category)
+        if _idx is not None:
+            _mk, research_time, research_cost, methodology, outlier_note = _TIME_COST_LOOKUP[_idx]
+            _matched_lookup_idx = _idx
+    if _matched_lookup_idx is None:
+        for _i, (markers, t, c, m, o) in enumerate(_TIME_COST_LOOKUP):
+            if any(mk in title_l for mk in markers):
+                research_time, research_cost, methodology, outlier_note = t, c, m, o
+                _matched_lookup_idx = _i
+                break
 
     stated_time = _extract_stated_time(text_blob)
     stated_cost = _extract_stated_cost(text_blob)
+
+    # S42-FIXED-DATE: for the completion_date_fixed category ONLY, an
+    # explicitly-stated calendar date in the flag text is a document-stated
+    # time figure — days remaining computed deterministically. Takes the
+    # document tier's precedence slot for time, exactly as a stated
+    # duration would; if no parseable date exists, falls through honestly.
+    if (stated_time is None and _matched_lookup_idx is not None
+            and _TIME_COST_CATEGORIES[_matched_lookup_idx] == "completion_date_fixed"):
+        _fd = _extract_fixed_completion_days(text_blob)
+        if _fd is not None:
+            stated_time = (_fd[0], _fd[1])
 
     if stated_time is not None:
         final_time = stated_time
@@ -2000,16 +2259,33 @@ def lookup_time_cost(flag) -> dict:
         "outlier_note": outlier_note if show_methodology else None,
     }
 
-def attach_time_cost(flags: list[dict]) -> list[dict]:
+def attach_time_cost(flags: list[dict]) -> dict:
     """Mutates each flag dict in place, adding time_days, cost_gbp,
     time_cost_methodology, and time_cost_outlier_note via lookup_time_cost.
     Safe to call multiple times (idempotent). Does not touch severity,
-    value_adjustment, or any other existing field."""
+    value_adjustment, or any other existing field.
+
+    S42 (2026-07-05): now returns a coverage summary dict (previously
+    returned the flags list, which no production caller consumed —
+    verified by grep before changing). Also bridges risk_category into the
+    flag's `category` field, which _flag_to_segments ALREADY includes in
+    its match text — the slot existed in the router since S35 but nothing
+    ever populated it. Bridging is additive-only: never overwrites an
+    existing category value, so current behaviour is unchanged for every
+    stored flag."""
     if not isinstance(flags, list):
-        return flags
+        return {"total": 0, "unresearched": 0, "rate": 0.0}
+    _total, _unres = 0, 0
     for f in flags:
         if not isinstance(f, dict):
             continue
+        # S42 category→router bridge: runs BEFORE risk pricing in
+        # calculate_workbench_ceiling (attach is the first call), so the
+        # human-readable category phrase becomes part of the segment
+        # router's search text for newly-extracted flags.
+        _rc = (f.get("risk_category") or "").strip().lower()
+        if _rc and _rc != RISK_CATEGORY_UNCATEGORISED and not f.get("category"):
+            f["category"] = _rc.replace("_", " ")
         result = lookup_time_cost(f)
         f["time_days"] = result["time_days"]
         f["cost_gbp"] = result["cost_gbp"]
@@ -2019,7 +2295,21 @@ def attach_time_cost(flags: list[dict]) -> list[dict]:
         # this is a statement about the nature of the figure, not a hedge
         # added only when uncertain.
         f["time_cost_indicative"] = True
-    return flags
+        _total += 1
+        if (result["time_days"] == TIME_COST_UNRESEARCHED
+                and result["cost_gbp"] == TIME_COST_UNRESEARCHED):
+            _unres += 1
+    # S42-TELEMETRY: measurable drift instead of screenshot surprises.
+    # Same governance philosophy as CALIBRATION_METADATA — a number with a
+    # review trigger, persisted into the workbench output by the caller.
+    return {
+        "total": _total,
+        "unresearched": _unres,
+        "rate": round(_unres / _total, 4) if _total else 0.0,
+        "review_trigger": "investigate lookup coverage if rate exceeds 0.25 "
+                          "on newly analysed deals (book-wide baseline at "
+                          "S42 build: 0.399 across 949 flags / 36 deals)",
+    }
 
 def _category_a_only_active(evidence_tier_used: str) -> bool:
     """True when the comparable valuation was built from PPD Category A
@@ -2874,7 +3164,10 @@ def calculate_workbench_ceiling(
     # (legalsmegal-workbench.html, renderTimeCostRows) finally has real data
     # to render instead of nothing, without touching the LLM extraction
     # prompts in app.py at all.
-    attach_time_cost(active_legal_flags)
+    # S42 (2026-07-05): attach now also returns coverage telemetry —
+    # measured unresearched-rate for THIS deal's active flags, surfaced in
+    # the workbench output below so drift is a queryable number.
+    _time_cost_coverage = attach_time_cost(active_legal_flags)
 
     verdict_vr   = verdict_ceiling.get("valuation_range") or {}
     # Prefer explicit comparable_valuation (unambiguous). Fall back to midpoint for
@@ -3006,6 +3299,10 @@ def calculate_workbench_ceiling(
     return {
         "_ceiling_type": "workbench",
         "status": "all_flags_resolved" if all_resolved else verdict_ceiling.get("status", "ok"),
+        # S42-TELEMETRY (2026-07-05): per-deal time/cost lookup coverage —
+        # consumed, not orphaned (test enforces presence, same pattern as
+        # the S40 calibration disclosure).
+        "time_cost_coverage": _time_cost_coverage,
         # Explicit semantic fields (unambiguous).
         "comparable_valuation": verdict_comparable_valuation,  # from Verdict, unchanged
         "risk_adjusted_value":  wb_risk_adjusted_value,        # comparable_valuation × risk_factor
