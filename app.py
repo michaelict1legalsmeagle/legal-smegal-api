@@ -4560,6 +4560,44 @@ def _extract_epc_floor_area_from_text(text: Optional[str]) -> Optional[float]:
     return area
 
 
+def _extract_epc_assessment_date_from_text(text: Optional[str]) -> Optional[str]:
+    """Extract 'Date of assessment' from EPC-certificate document text.
+
+    S-EPC-AGE (2026-07-04): floor area sourced from an EPC certificate is only
+    as current as the EPC itself. EPCs do not regenerate when a property is
+    later extended or converted — only at a sale/let event — and are valid
+    for up to 10 years. Verified live: 656 Streetsbrook Road's own EPC
+    ("Total floor area 107 square metres") was traced end-to-end and found
+    to be a genuine, correctly-extracted certificate for the correct
+    address — not a bug — dated 20 October 2021, i.e. 4.7 years before this
+    auction, while the auctioneer's own current particulars for the same
+    property state 153 square metres. The extraction was never wrong; the
+    certificate was simply stale relative to the building's current state.
+    This function surfaces the EPC's own stated assessment date so that
+    staleness is disclosed as a fact, not silently absorbed into an
+    unqualified "high confidence" label.
+
+    Matches the standard gov.uk EPC certificate phrasing:
+      "Date of assessment\n20 October 2021"
+      "Date of assessment: 20 October 2021"
+    Returns an ISO date string (YYYY-MM-DD), or None if no match/unparseable.
+    """
+    if not text:
+        return None
+    _pat = re.compile(
+        r'date\s+of\s+assessment\s*[:\n]?\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})',
+        re.I
+    )
+    m = _pat.search(text)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(m.group(1).strip(), "%d %B %Y")
+        return dt.date().isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
 def _compute_gia_from_text(text: Optional[str]) -> Tuple[Optional[float], int, str]:
     """Deterministic gross internal area (m²) from auction-particulars room
     dimensions — the production-grade subject-size source.
@@ -5087,6 +5125,25 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                             _exact = _er
                             break
 
+                # Exact match path C — named property (no house number).
+                # S-EPC-NAMED (2026-07-04): addresses like "Bush House, Botley
+                # Road" (live deal SO50 7AN) carry no leading digit, so paths
+                # A/B can never fire regardless of whether the EPC is lodged —
+                # a structural false-negative, not a data gap. Match the
+                # property NAME (text before the first comma) against the EPC
+                # register's address1, which holds the same name for named
+                # properties. Guarded: only fires when the address genuinely
+                # has no house number and no flat designator, and the name is
+                # ≥4 chars (avoids matching bare street fragments).
+                if not _exact and not _subj_house and not _subj_flat_num:
+                    _name_part = _addr_str.split(",")[0].strip().lower()
+                    if len(_name_part) >= 4 and not _re_sepc.match(r"^\d", _name_part):
+                        for _er in _sepc_rows:
+                            _a1 = str(_er.get("address1") or "").lower().strip()
+                            if _a1 == _name_part or _a1.startswith(_name_part + ","):
+                                _exact = _er
+                                break
+
                 # Nearest neighbour — used ONLY for construction age band, which
                 # IS street-homogeneous (houses on a street were built together).
                 # For flats, _subj_house is the building number after the comma
@@ -5208,8 +5265,10 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # average_price is populated for every LAD back to 1995.
         _lad_code_for_hpi = _get_lad_code_for_postcode(_pc_norm)
         _hpi_yoy = None  # retained for downstream label compat only
-        _hpi_latest_avg   = None  # latest LAD average_price
-        _hpi_latest_month = None  # latest LAD date (for audit)
+        _hpi_latest_avg   = None  # latest average_price for the area used
+        _hpi_latest_month = None  # latest date (for audit)
+        _hpi_area_code_used = None   # actual area_code the ratio is computed on
+        _hpi_basis          = "none" # "lad" | "national_fallback" | "none"
         if _lad_code_for_hpi:
             try:
                 _hpi_latest_rows = supabase_data_query(
@@ -5220,8 +5279,47 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 if _hpi_latest_rows:
                     _hpi_latest_avg   = safe_float(_hpi_latest_rows[0].get("average_price"))
                     _hpi_latest_month = str(_hpi_latest_rows[0].get("date") or "")[:10]
+                    if _hpi_latest_avg:
+                        _hpi_area_code_used = _lad_code_for_hpi
+                        _hpi_basis = "lad"
             except Exception as _e:
                 _audit["warnings"].append(f"hpi_latest_lookup_failed: {_e}")
+        # S-HPI-FALLBACK (2026-07-04): verified live on 4 real deals (HP12 4LS,
+        # LE3 6DQ, LE16 9TY, CT10 2TX) that hit hpi_adjusted_count=0. Root cause
+        # is the postcode→LAD chain (postcode_to_lsoa miss or stale pre-
+        # reorganisation LAD code), NOT missing HPI data — all four areas have
+        # full 376-row current-code series in uk_hpi_monthly, and England
+        # (E92000001) has a 697-row series current to the same latest month.
+        # Old behaviour on chain failure: hpi_multiplier=1.0 for every comp —
+        # silently asserting zero market movement since each sale, which is
+        # false. New behaviour: fall back to the England national series,
+        # explicitly disclosed. National movement is a weaker signal than LAD
+        # movement but is real measured data; a disclosed approximation beats
+        # a silent falsehood. No regional tier is attempted because the only
+        # postcode→region mapping available is the same lookup that failed.
+        if _hpi_latest_avg is None:
+            try:
+                _hpi_nat_rows = supabase_data_query(
+                    "SELECT date, average_price FROM public.uk_hpi_monthly "
+                    "WHERE area_code = %s ORDER BY date DESC LIMIT 1",
+                    ("E92000001",)
+                )
+                if _hpi_nat_rows:
+                    _nat_avg = safe_float(_hpi_nat_rows[0].get("average_price"))
+                    if _nat_avg:
+                        _hpi_latest_avg     = _nat_avg
+                        _hpi_latest_month   = str(_hpi_nat_rows[0].get("date") or "")[:10]
+                        _hpi_area_code_used = "E92000001"
+                        _hpi_basis          = "national_fallback"
+                        _audit["warnings"].append(
+                            "hpi_national_fallback: LAD-level HPI unresolved for this "
+                            "postcode (lookup chain failure — LAD data itself may exist "
+                            "under a current code); temporal adjustment computed from "
+                            "the England national series (E92000001) instead. Weaker "
+                            "than LAD-level adjustment; disclosed, not silent."
+                        )
+            except Exception as _e:
+                _audit["warnings"].append(f"hpi_national_fallback_failed: {_e}")
 
         # ── STEP 1: PROPERTY TYPE FILTER ────────────────────────────────────
         _gst["B_subject_data"] = round(time.time() - _gst_ck, 3); _gst_ck = time.time()
@@ -5374,7 +5472,19 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _audit["methodology_degraded"] = True
                 _audit["warnings"].append(f"Room-size contamination: insufficient ±1-room matches ({len(_room_matched)}), bedroom filter skipped")
         else:
-            _audit["warnings"].append("subject_rooms_unknown: bedroom filter skipped — EPC not lodged or not found")
+            # S-EPC-NAMED (2026-07-04): the old text ("EPC not lodged or not
+            # found") was verified FALSE on a live deal — 656 Streetsbrook Road
+            # (B91 1LB) hit this branch while its lodged, in-validity EPC
+            # (cert 4090-5601-0822-5122-3093, valid to 2031) sat in the deal's
+            # own uploaded documents. What actually failed was the exact-
+            # address match against the LOCAL Hetzner epc_certificates copy
+            # (bulk-table coverage gap or address-form mismatch). State the
+            # checkable truth only.
+            _audit["warnings"].append(
+                "subject_rooms_unknown: bedroom filter skipped — no exact-address "
+                "match in local EPC register table (epc_certificates); this does "
+                "NOT confirm the property has no lodged EPC"
+            )
 
         # ── STEP 4: NEW BUILD ROUTING ────────────────────────────────────────
         if _subject_old_new == "N":
@@ -5473,15 +5583,18 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             if _sale_month_str:
                 _sale_month_set.add(_sale_month_str)
 
-        # Step 8b: batch-fetch sale-month average_price for the LAD (one IN() query)
+        # Step 8b: batch-fetch sale-month average_price for the resolved HPI
+        # area (LAD, or England on national fallback) — one IN() query.
+        # S-HPI-FALLBACK: keyed on _hpi_area_code_used, NOT _lad_code_for_hpi,
+        # so ratio numerator and denominator always come from the SAME series.
         _sale_month_avg: dict = {}
-        if _lad_code_for_hpi and _hpi_latest_avg and _sale_month_set:
+        if _hpi_area_code_used and _hpi_latest_avg and _sale_month_set:
             try:
                 _placeholders = ", ".join(["%s"] * len(_sale_month_set))
                 _sm_rows = supabase_data_query(
                     f"SELECT date, average_price FROM public.uk_hpi_monthly "
                     f"WHERE area_code = %s AND date IN ({_placeholders})",
-                    (_lad_code_for_hpi, *sorted(_sale_month_set))
+                    (_hpi_area_code_used, *sorted(_sale_month_set))
                 )
                 for _smr in (_sm_rows or []):
                     _smr_date = str(_smr.get("date") or "")[:10]
@@ -5535,12 +5648,19 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _audit["hpi_missing_count"]  = _hpi_missing_count
         _audit["hpi_skipped_count"]  = _hpi_skipped_count
         _audit["hpi_method"]         = "average_price_ratio"
+        _audit["hpi_basis"]          = _hpi_basis            # "lad" | "national_fallback" | "none"
+        _audit["hpi_area_code_used"] = _hpi_area_code_used
         _audit["hpi_latest_month"]   = _hpi_latest_month
         _audit["hpi_latest_avg"]     = _hpi_latest_avg
         if _hpi_missing_count > 0 and _hpi_adjusted_count == 0:
+            # S-HPI-FALLBACK: old text ("no LAD avg_price data available") was
+            # verified FALSE on all 4 live deals that hit this branch — the LAD
+            # data existed under current codes; the postcode→LAD lookup was
+            # what failed. State the precise, checkable condition instead.
             _audit["warnings"].append(
                 f"hpi_temporal_adjustment_skipped: {_hpi_missing_count} comps — "
-                f"no LAD avg_price data available"
+                f"no average_price rows resolved for hpi_basis={_hpi_basis} "
+                f"(area_code_used={_hpi_area_code_used or 'none'})"
             )
 
         # ── STEP 9: SIMILARITY SCORING ───────────────────────────────────────
@@ -9840,6 +9960,33 @@ def save_area(deal_id: str):
                 _prop["internal_area"] = _epc_text_area
                 _prop["internal_area_source"] = "epc_certificate_text"
                 _prop["internal_area_confidence"] = "high"
+                # S-EPC-AGE (2026-07-04): disclose EPC currency rather than
+                # silently trusting a possibly years-old certificate as
+                # unqualified truth. Extraction confidence ("high" above)
+                # reflects how cleanly the figure was read off the document —
+                # it says nothing about whether the building has since been
+                # extended or converted, which the EPC would not reflect.
+                # These are deliberately kept as separate fields, not
+                # conflated into one confidence label.
+                _epc_assessment_date = _extract_epc_assessment_date_from_text(_pack_text)
+                if _epc_assessment_date:
+                    _prop["internal_area_source_date"] = _epc_assessment_date
+                    try:
+                        _age_years = (
+                            datetime.utcnow().date()
+                            - datetime.strptime(_epc_assessment_date, "%Y-%m-%d").date()
+                        ).days / 365.25
+                        _prop["internal_area_source_age_years"] = round(_age_years, 1)
+                        _prop["internal_area_disclosure"] = (
+                            f"Floor area sourced from EPC certificate dated "
+                            f"{_epc_assessment_date} ({_age_years:.1f} years old). "
+                            f"EPCs do not update automatically if the property is "
+                            f"later extended or converted — this figure may "
+                            f"understate current floor area if building work has "
+                            f"occurred since assessment."
+                        )
+                    except (ValueError, TypeError) as _dte:
+                        print(f"[S-EPC-AGE parse warn] {deal_id}: {_dte}")
                 _summary["property"] = _prop
                 try:
                     supabase.table("deals").update({"summary_json": _summary}) \
