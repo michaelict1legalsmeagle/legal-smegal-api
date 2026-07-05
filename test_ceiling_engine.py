@@ -3536,3 +3536,161 @@ class TestPaonFixEpcFlatMatch:
     def test_empty_address1_no_match(self):
         assert _epc_flat_match("", "3") is False
         assert _epc_flat_match(None, "3") is False
+
+
+# ── S42 (2026-07-05): closed-vocabulary risk categories, fixed-date tier,
+# near-miss markers, coverage telemetry ─────────────────────────────────────
+from services.ceiling_engine import (
+    _TIME_COST_CATEGORIES, _CATEGORY_TO_LOOKUP, RISK_CATEGORY_UNCATEGORISED,
+    _TIME_COST_LOOKUP, TIME_COST_CONFIRMED, TIME_COST_NO_RESOLUTION,
+    lookup_time_cost, attach_time_cost, calculate_workbench_ceiling,
+    _extract_fixed_completion_days,
+)
+
+
+class TestS42CategoryRegistry:
+    def test_registry_aligned_with_lookup(self):
+        # INVARIANT: positionally aligned, same length, all unique.
+        assert len(_TIME_COST_CATEGORIES) == len(_TIME_COST_LOOKUP)
+        assert len(set(_TIME_COST_CATEGORIES)) == len(_TIME_COST_CATEGORIES)
+
+    def test_category_first_resolution(self):
+        # A flag whose TITLE matches nothing but whose risk_category is a
+        # known slug resolves through the category, not markers.
+        flag = {"title": "Wholly Novel Phrasing The Table Has Never Seen",
+                "severity": "note", "risk_category": "mining"}
+        r = lookup_time_cost(flag)
+        assert r["time_source"] == "research"
+        assert r["cost_source"] == "research"
+
+    def test_uncategorised_falls_back_to_markers(self):
+        flag = {"title": "Coal mining search absent from pack",
+                "severity": "missing",
+                "risk_category": RISK_CATEGORY_UNCATEGORISED}
+        r = lookup_time_cost(flag)
+        assert r["cost_source"] == "research"  # 'mining' marker still fires
+
+    def test_legacy_flag_without_category_unchanged(self):
+        flag = {"title": "No Mining or Ground Stability Search Present",
+                "severity": "missing"}
+        r = lookup_time_cost(flag)
+        assert r["cost_source"] == "research"
+
+    def test_bogus_category_does_not_crash_or_match(self):
+        flag = {"title": "Some Unknown Thing", "severity": "note",
+                "risk_category": "not_a_real_slug"}
+        r = lookup_time_cost(flag)
+        assert r["time_source"] == "unresearched"
+
+
+class TestS42FixedCompletionDate:
+    def test_live_deal_flag_resolves(self):
+        # The exact flag from live deal 7fee78d8 that fell through all
+        # three tiers on 2026-07-05.
+        flag = {"title": "Completion Date Fixed — 20 August 2026",
+                "severity": "note",
+                "summation": "Completion is fixed at 20 August 2026.",
+                "evidence": "The agreed completion date is 20th August 2026."}
+        r = lookup_time_cost(flag)
+        import datetime as _dt
+        expected = max(0, (_dt.date(2026, 8, 20) - _dt.date.today()).days)
+        assert r["time_days"] == (expected, expected)
+        assert r["time_source"] == "document"
+        assert r["cost_gbp"] == TIME_COST_NO_RESOLUTION
+
+    def test_date_extractor_ordinal_and_plain(self):
+        d1 = _extract_fixed_completion_days("completion on 20th August 2026")
+        d2 = _extract_fixed_completion_days("completion on 20 August 2026")
+        assert d1 is not None and d2 is not None and d1[:2] == d2[:2]
+        assert d1[2] == "2026-08-20"
+
+    def test_past_date_returns_zero_days_not_negative(self):
+        d = _extract_fixed_completion_days("completion was 1 January 2020")
+        assert d is not None and d[0] == 0 and d[1] == 0
+
+    def test_no_date_stays_unresearched(self):
+        flag = {"title": "Completion Date Fixed — see contract",
+                "severity": "note", "summation": "A fixed date applies."}
+        r = lookup_time_cost(flag)
+        assert r["time_source"] == "unresearched"
+
+    def test_date_tier_does_not_fire_for_other_categories(self):
+        # A date inside a non-completion flag must NOT become a time figure.
+        flag = {"title": "Bank of Scotland Charge Remains on Title",
+                "severity": "critical",
+                "evidence": "Charge dated 30 November 2006 in favour of Bank of Scotland"}
+        r = lookup_time_cost(flag)
+        assert r["time_source"] != "document"
+
+
+class TestS42NearMissMarkers:
+    # Every title below is a REAL stored title that was fully unresearched
+    # in production on 2026-07-05 (deal 7fee78d8 / book query).
+    def test_ten_pct_interest_late_completion(self):
+        r = lookup_time_cost({"title": "10% Interest Rate on Late Completion",
+                              "severity": "high"})
+        assert r["time_source"] == "research"
+
+    def test_freehold_absolute_word_order_variant(self):
+        r = lookup_time_cost({"title": "Freehold Title — Absolute Title Confirmed",
+                              "severity": "note"})
+        assert r["time_days"] == TIME_COST_CONFIRMED
+
+    def test_charges_register_easements(self):
+        r = lookup_time_cost({"title": "Charges Register Easements — Broad Encumbrances",
+                              "severity": "high"})
+        assert r["cost_gbp"] == TIME_COST_NO_RESOLUTION
+
+    def test_buyer_indemnifies_covenant_breaches(self):
+        r = lookup_time_cost({"title": "Buyer Indemnifies Seller for All Covenant Breaches Post-Transfer",
+                              "severity": "high"})
+        assert r["cost_gbp"] == TIME_COST_NO_RESOLUTION
+
+    def test_public_sewer_within_boundary(self):
+        r = lookup_time_cost({"title": "Public Sewer Within Property Boundary",
+                              "severity": "high"})
+        assert r["cost_source"] == "research"
+
+    def test_trust_corporation_probate(self):
+        r = lookup_time_cost({"title": "Trust Corporation Restriction — Joint Proprietors, Potential Probate Issue",
+                              "severity": "high"})
+        assert r["time_source"] == "research"
+        assert r["cost_source"] == "unresearched"  # deliberately: no defensible figure
+
+    def test_pre_contract_enquiries_variant(self):
+        r = lookup_time_cost({"title": "Seller Will Not Answer Pre-Contract Enquiries",
+                              "severity": "high"})
+        assert r["cost_source"] == "research"
+
+
+class TestS42CoverageTelemetryAndBridge:
+    def test_attach_returns_coverage(self):
+        flags = [
+            {"title": "No Mining or Ground Stability Search Present", "severity": "missing"},
+            {"title": "Totally Unknown Novel Risk Xyz", "severity": "note"},
+        ]
+        cov = attach_time_cost(flags)
+        assert cov["total"] == 2 and cov["unresearched"] == 1
+        assert cov["rate"] == 0.5 and "review_trigger" in cov
+
+    def test_workbench_output_carries_coverage(self):
+        # Minimal valid verdict object — only the fields the workbench
+        # derivation reads (same shape existing workbench tests rely on).
+        vc = {"comparable_valuation": 200000,
+              "valuation_range": {"low": 180000, "midpoint": 200000,
+                                  "high": 220000, "uncertainty_band": 0.10},
+              "status": "ok", "confidence": {"label": "Medium"}}
+        wb = calculate_workbench_ceiling(vc, [
+            {"title": "No Mining or Ground Stability Search Present",
+             "severity": "missing"}])
+        assert "time_cost_coverage" in wb
+        assert wb["time_cost_coverage"]["total"] == 1
+
+    def test_category_bridges_into_router_slot_additively(self):
+        f = {"title": "X", "severity": "note", "risk_category": "mining"}
+        attach_time_cost([f])
+        assert f["category"] == "mining"
+        f2 = {"title": "X", "severity": "note", "risk_category": "mining",
+              "category": "pre-existing"}
+        attach_time_cost([f2])
+        assert f2["category"] == "pre-existing"  # never overwritten

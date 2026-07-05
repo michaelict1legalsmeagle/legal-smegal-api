@@ -131,6 +131,7 @@ OUTPUT (STRICT JSON ONLY — no prose, no markdown):
       "severity": "critical | high | missing | note",
       "title": "string — one line, max 12 words",
       "summation": "string — one sentence, factual, clause-referenced",
+      "risk_category": "string — EXACTLY one value from RISK CATEGORY VOCABULARY below, or 'uncategorised'",
       "source_document": "string",
       "source_clause": "string or null",
       "source_page": number or null,
@@ -146,6 +147,14 @@ OUTPUT (STRICT JSON ONLY — no prose, no markdown):
   "viability_statement": "string — 2-3 sentences, factual, no verdict, no recommendation",
   "solicitor_questions": ["string"]
 }
+
+RISK CATEGORY VOCABULARY (closed list — S42, 2026-07-05):
+local_authority_search, environmental_search, former_landfill, structural_issues_disclaimer, will_not_answer_buyer_enquiries, mining, chancel_repair, road_adoption, common_drains, tree_and_shrub, road_making, restrictive_covenant, indemnity_insurance, no_epc, epc_rating, drainage, absent_landlord, hmo_licen, ground_rent_escalation, alter_access, multi_property_title, groundwater_flooding, surface_water_flooding, flood_risk, radon, japanese_knotweed, building_regulations_completion, planning_enforcement, lawful_development_certificate, eicr, gas_safety, possessory_title, flying_freehold, short_lease, service_charge, notice_to_complete, forfeiture, sitting_tenant, buyer_s_premium, seller_s_costs, nearby_planning, overage, vat_uncertain, ta6, party_wall, absence_of_easement, right_of_way_burden, shared_easement, listed_building_on_adjacent, listed_building_consent, conservation_area, smoke_control, air_quality_management, absolute_no_mortgage, no_disputes, vacant_possession_occupier_letter, epc_valid_until, designated_primarily_residential, furniture_and_effects_may_remain, 21_day_completion, limited_title_guarantee, cannot_assign_contract, sold_as_seen, right_to_buy_covenant, buyer_bears_risk_from_exchange, discrepancy_in_seller_s_legal_fees, climateindex, special_conditions_of_sale_not_present, conveyance_document_incomplete, overhanging_structure, rooms_over_passageway, boundary_moved, epc_present_rating_appears_low, tenant_covenants_indemnity, no_buildings_insurance_details, deemed_to_have_full, title_covers_three_properties, nationally_significant, public_sewer_within, trust_corporation_restriction, indemnifies_seller_for_all_covenant, completion_date_fixed
+
+RISK CATEGORY RULES:
+* risk_category MUST be exactly one slug from the vocabulary above, chosen by meaning against the flag's evidence — NOT by matching words in your own title.
+* If no category genuinely fits, use "uncategorised". NEVER guess or force the nearest-looking slug: a wrong category silently misprices the flag downstream; "uncategorised" is honest and reviewable.
+* The vocabulary is a fixed contract with the pricing engine. Never invent new slugs, never pluralise, never reword.
 
 SCORING RULES:
 * legal_risk_weight: 1-10. Critical findings that override contract obligations = 10. Financial exposure = 8-9. Restrictions = 6-7. Procedural = 4-5.
