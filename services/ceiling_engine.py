@@ -281,6 +281,50 @@ _SEGMENT_CAPS: dict[str, float] = {
 #   re-examined — no silent permanence.
 # ═════════════════════════════════════════════════════════════════════════════
 CALIBRATION_METADATA: dict[str, dict] = {
+    "size_adjustment_and_aggregation": {
+        "values": {
+            "size_adjustment": "linear_ratio_capped",
+            "size_adj_cap_lo": SIZE_ADJ_CAP_LO,
+            "size_adj_cap_hi": SIZE_ADJ_CAP_HI,
+            "aggregation_estimator": "weighted_median",
+            "size_elasticity_beta_measured": 0.47,
+            "size_elasticity_beta_ci95": [0.37, 0.58],
+        },
+        "calibration_status": "empirically_credible",
+        "source_type": "leave_one_out_backtest",
+        "basis": (
+            "S43 (2026-07-05): challenged and RETAINED after empirical "
+            "validation on real data — 315 cached comps across 37 deals. "
+            "Within-deal ln(price)~ln(area) regression measured size "
+            "elasticity beta=0.47 (SE 0.053), i.e. a pure linear ratio "
+            "overstates the size effect ~2x; HOWEVER leave-one-out "
+            "back-testing (predict each sold comp from its deal's other "
+            "comps) showed the EXISTING linear-ratio-with-[0.80,1.25]-caps + "
+            "weighted-median stack beats a beta-power + weighted-mean-"
+            "bracketed challenger on every headline metric: MdAPE 13.81% vs "
+            "14.72%, PPE10 39.7% vs 36.8%, and — decisively — median signed "
+            "bias on small-subject deals (subject area <0.85x comp median, "
+            "the class that looks anomalous on screen) of -0.08% (unbiased) "
+            "vs +6.79% for the challenger. The caps already perform the "
+            "dampening a fractional exponent would provide. Consequence: a "
+            "comparable valuation BELOW every raw comp price when the "
+            "subject is smaller than every comp is validated CORRECT "
+            "behaviour, not a defect (verified live: deal 58f37ac0, B13, "
+            "output within 0.1% bias class). Industry survey (Hometrack/"
+            "Zillow hedonic-ML; RICS adjust-then-reconcile; Fannie Mae "
+            "bracketing) informed the challenger design; own-data back-test "
+            "overrode the prior, per doctrine."
+        ),
+        "sample_size_at_calibration": 315,
+        "calibrated_at": "2026-07-05",
+        "review_trigger": (
+            "Re-run the LOO harness (tools/size_aggregation_backtest.py) "
+            "when the book reaches 75 deals or when subject-EPC floor areas "
+            "gain a second evidence source; champion-challenger any "
+            "estimator change through the same harness — never swap on "
+            "theoretical preference alone."
+        ),
+    },
     "segment_caps": {
         "values": dict(_SEGMENT_CAPS),
         "calibration_status": "expert_prior",
