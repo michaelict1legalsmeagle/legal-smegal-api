@@ -10344,6 +10344,64 @@ def save_area(deal_id: str):
                 "updated_at": now_iso(),
             }).eq("id", _deal_id).execute()
 
+            # ── S36-AREA-WRITEBACK (2026-07-07) ──────────────────────────────
+            # Reconcile the STORED subject floor area with the one the ceiling
+            # engine actually consumes.
+            #
+            # Root cause this closes: summary_json.property.internal_area is
+            # documented (see the S35-GIA block above) as the single
+            # authoritative subject floor area every downstream consumer reads.
+            # But the subject dicts built for the ceiling engine (see the three
+            # sites at the _subject / _wb_subject / recompute constructions)
+            # fall back to area_json.housing.subject_floor_area when
+            # summary.property.internal_area is null:
+            #     _prop.internal_area  →  _fins.internal_area  →  housing.subject_floor_area
+            # The two are resolved on separate code paths: the in-pack
+            # EPC-TEXT resolver writes summary.property.internal_area, while
+            # get_housing_data resolves the subject area independently
+            # (exact-EPC → listing GIA) and exposes it as subject_floor_area.
+            # When the text resolver finds nothing but get_housing_data does,
+            # the engine size-adjusts off a value that was NEVER written back to
+            # the "authoritative" field — leaving summary null while the live
+            # calc used a real area. That desync (a) makes the authoritative-
+            # field claim false, and (b) causes any audit keyed on
+            # summary.property.internal_area to miscount which deals were
+            # size-adjusted. Confirmed live on 4 of 39 deals; zero deals had two
+            # conflicting non-null values, so this only ever FILLS a null — it
+            # never overwrites an existing figure.
+            #
+            # Fix: after housing is resolved and BEFORE the ceiling recompute
+            # reads it, if summary.property.internal_area is still null but
+            # housing carries a subject_floor_area, write that value back to
+            # summary with an explicit source tag so the stored record equals
+            # what the engine consumes. Idempotent: only fires on null; leaves
+            # any already-resolved area untouched.
+            try:
+                _housing_res = _area_results.get("housing") if isinstance(_area_results, dict) else None
+                _hsfa = None
+                if isinstance(_housing_res, dict):
+                    _hsfa = safe_float(_housing_res.get("subject_floor_area"))
+                if _hsfa and _hsfa > 0 and not _prop.get("internal_area"):
+                    _prop["internal_area"] = _hsfa
+                    _prop["internal_area_source"] = "housing_subject_floor_area"
+                    # Provenance-only: extraction of the number is reliable, but
+                    # like the EPC-text path this says nothing about whether the
+                    # building was later altered. Kept "medium" to signal it was
+                    # resolved via the comp-side path, not a subject-specific
+                    # in-pack certificate read.
+                    _prop["internal_area_confidence"] = "medium"
+                    _summary["property"] = _prop
+                    supabase.table("deals").update({"summary_json": _summary}) \
+                        .eq("id", _deal_id).eq("user_id", request.user_id).execute()
+                    print(f"[S36-AREA-WRITEBACK] {_deal_id}: reconciled "
+                          f"summary.property.internal_area = {_hsfa} m² "
+                          f"(source=housing_subject_floor_area)")
+            except Exception as _wbe:
+                # Non-fatal: the runtime fallback in the subject dicts still
+                # feeds the engine the correct area even if this write-back
+                # fails, so a failure here degrades observability, not the calc.
+                print(f"[S36-AREA-WRITEBACK warn] {_deal_id}: {_wbe}")
+
             # D1 — area_json now carries fresh comps; recompute & persist the
             # ceiling that /api/analyze could not compute before area existed.
             _recompute_deal_ceiling(_deal_id, area_data)
