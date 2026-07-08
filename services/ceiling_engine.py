@@ -77,8 +77,18 @@ PREFERRED_COMPS      = 5
 # substrings in case the LLM ever emits a more specific category string
 # instead of the two schema values.
 COMMERCIAL_DIVERSION_KEYWORDS = (
+    # Generic commercial / mixed-use categories
     "commercial", "mixed use", "mixed-use",
     "retail", "office", "industrial", "warehouse", "leisure",
+    # Trade-related (RICS Profits Method) — same asset types named in
+    # commercial_valuation_engine.py's _calculate_profits_method docstring.
+    # 2026-07-08: added after confirming Hotel/Pub/Care Home/Petrol Station
+    # labels slipped through the earlier, narrower list undetected.
+    # NOTE: bare "pub" deliberately excluded — collides with "Public" (e.g.
+    # "Public Right of Way"). "public house" is the unambiguous match and
+    # is also the formal-language phrasing a legal pack would actually use.
+    "hotel", "public house", "care home", "nursing home",
+    "petrol station", "guest house", "restaurant",
 )
 
 # =============================================================================
