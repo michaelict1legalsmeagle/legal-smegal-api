@@ -67,6 +67,20 @@ MAX_RADIUS_MILES     = 3.0       # absolute outer bound — never search beyond 
 MIN_REQUIRED_COMPS   = 3
 PREFERRED_COMPS      = 5
 
+# S-COMM-GATE keyword list (2026-07-08): substring match, case-insensitive,
+# checked against strategy/property_type ONLY (never against free text like
+# addresses — "12 Commercial Road" must not false-positive). Kept identical
+# in spirit to legalsmegal-verdict.html's redirect check and
+# commercial_valuation_engine.py — if you extend this list, extend both.
+# "Commercial"/"Mixed Use" are extraction-schema values (see app.py property
+# type prompt); retail/office/industrial/warehouse/leisure are defensive
+# substrings in case the LLM ever emits a more specific category string
+# instead of the two schema values.
+COMMERCIAL_DIVERSION_KEYWORDS = (
+    "commercial", "mixed use", "mixed-use",
+    "retail", "office", "industrial", "warehouse", "leisure",
+)
+
 # =============================================================================
 # EVIDENCE TIER (S33-STEP3, 2026-06-21)
 # =============================================================================
@@ -3487,6 +3501,79 @@ def calculate_ceiling(
     financial_inputs = financial_inputs if isinstance(financial_inputs, dict) else {}
     sold_comps       = sold_comps if isinstance(sold_comps, list) else []
     subject          = subject if isinstance(subject, dict) else {}
+
+    # ── S-COMM-GATE (2026-07-08): Commercial scope gate ──────────────────────
+    # This engine computes a residential comparable-sales valuation only.
+    # RICS Red Book (VPS 2/3) requires commercial property be valued by the
+    # Investment Method — passing rent, market rent, lease terms (WAULT,
+    # breaks, reviews) and a market-derived yield — none of which this
+    # engine models. Previously "Commercial" strategy/property_type fell
+    # through with no check and silently received a residential-comp
+    # ceiling. This gate stops that: any Commercial signal returns an
+    # explicit manual_review_required result in the same schema shape as
+    # every other return path, so existing .get()-based callers (app.py)
+    # degrade gracefully with no code changes required on their side.
+    # 2026-07-08 update: broadened from an exact match on "commercial" to
+    # COMMERCIAL_DIVERSION_KEYWORDS — a Mixed Use, Retail, Office, or
+    # Industrial property is no more valuable via residential comps than a
+    # pure Commercial one, and the exact-match version would have let any
+    # of those slip through silently.
+    _scope_signal        = str(strategy or "").strip().lower()
+    _subject_type_signal = str(subject.get("property_type") or "").strip().lower()
+    if any(kw in _scope_signal for kw in COMMERCIAL_DIVERSION_KEYWORDS) \
+            or any(kw in _subject_type_signal for kw in COMMERCIAL_DIVERSION_KEYWORDS):
+        return {
+            "valuation_type":     "red_book_style_paper_valuation_similarity",
+            "not_rics_valuation": True,
+            "status":             "manual_review_required",
+            "base": {
+                "method":                   None,
+                "value":                    None,
+                "minimum_required_comps":   MIN_REQUIRED_COMPS,
+                "preferred_required_comps": PREFERRED_COMPS,
+                "valid_comparable_count":   0,
+                "excluded_comparable_count": 0,
+                "pre_iqr_trim_count":       0,
+                "post_iqr_trim_count":      0,
+                "evidence_tier":            None,
+            },
+            "comparable_valuation": None,
+            "risk_adjusted_value":  None,
+            "comparables": {
+                "radius_miles": MAX_RADIUS_MILES,
+                "valid":        [],
+                "excluded":     [],
+            },
+            "legal_pack_value_risks": {
+                "method":            "property_value_risk_adjustment_only",
+                "adjustment_factor": 1.0,
+                "adjusted_value":    None,
+                "risks":             [],
+            },
+            "valuation_range": {
+                "low": None, "midpoint": None, "high": None, "uncertainty_band": None,
+            },
+            "confidence": {
+                "raw": None, "caps": [], "final": None, "label": None,
+            },
+            "audit": {
+                "comparable_method":      "red_book_style_comparable_evidence",
+                "not_rics_valuation":     True,
+                "formal_valuation":       False,
+                "decision_support_only":  True,
+                "source_decision":        "manual_review_required_commercial",
+                "fallback_used":          False,
+                "assumptions":            [],
+                "evidence_gaps": [
+                    "Property identified as Commercial — residential comparable-sales "
+                    "engine is out of scope. Commercial valuation requires income-method "
+                    "data (rent, lease terms, yield) not modelled in this engine."
+                ],
+                "warnings":       [],
+                "formula_trace":  ["scope_gate: commercial — residential comps engine skipped"],
+                "version":        VERSION,
+            },
+        }
 
     assumptions: list[str] = []
     evidence_gaps: list[str] = []
