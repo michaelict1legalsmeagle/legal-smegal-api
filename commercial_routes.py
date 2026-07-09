@@ -54,7 +54,13 @@ _ALLOWED_COMMERCIAL_FIELDS = {
     "top_slice_yield_pct",
     "unexpired_term_years",
     "wault_years",
+    "wault_to_break_years",
     "tenant_name",
+    "rent_review_basis",
+    "nation",
+    "purchaser_fees_pct",
+    "void_months",
+    "rent_free_months",
     # Profits Method (trade_related)
     "fmop_pa",
     "profit_multiplier",
