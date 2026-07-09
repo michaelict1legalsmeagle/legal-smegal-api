@@ -68,11 +68,12 @@ LegalSmegal Technologies Ltd is not FCA-regulated.
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERSION = "commercial_multi_method_v2_phase1"
+VERSION = "commercial_multi_method_v2_1_costs_ey"
 
 RACK_RENT_TOLERANCE_PCT = 0.01  # within 1% treated as rack-rented (avoids float-equality edge cases) — an engineering judgement call, not a figure RICS specifies numerically.
 
@@ -84,6 +85,46 @@ YIELD_CONVENTION_NOTE = (
     "actually being received quarterly in advance), which would produce a "
     "slightly higher yield / slightly lower capital value. That refinement "
     "is not implemented in Phase 1."
+)
+
+# Purchaser's costs — v2.1. Deducting purchaser's costs to move from a
+# capital value gross of costs to a net price is standard UK institutional
+# practice (the London-market convention totals ~6.78% at large lot sizes:
+# ~1.78% fees incl. VAT + SDLT at the 5% top band). The FEES component is a
+# STATED, EDITABLE ASSUMPTION (default below); the SDLT component is COMPUTED
+# on the stepped England & NI non-residential freehold bands — never a flat
+# percentage, because the bands step at £150k/£250k and a flat 6.78% is only
+# right for large lots. Wales (LTT) and Scotland (LBTT) have different
+# non-residential bands NOT implemented here — those nations gate the
+# net-of-costs figure rather than computing it on the wrong nation's tax.
+DEFAULT_PURCHASER_FEES_PCT = 1.8  # agent ~1% + legal ~0.5% + VAT on fees — assumption, editable per deal
+
+# SDLT non-residential freehold consideration bands, England & Northern
+# Ireland: 0% to £150,000; 2% on £150,001–£250,000; 5% above £250,000.
+# Top rate capped at 5%; no 3% additional-dwelling surcharge (that is
+# residential-only). Stepped/marginal, not slab.
+_SDLT_NONRES_BAND_1_UPPER = 150_000
+_SDLT_NONRES_BAND_2_UPPER = 250_000
+_SDLT_NONRES_BAND_2_RATE = 0.02
+_SDLT_NONRES_BAND_3_RATE = 0.05
+
+# Upward-only rent review (UORR) legislative risk — England & Wales.
+# Facts as verified 2026-07: English Devolution and Community Empowerment
+# Act 2026, Royal Assent 29 April 2026, bans upward-only rent reviews in
+# new commercial leases in England and Wales. NOT yet in force — secondary
+# legislation expected 2027 (consultation on caps/collars pending) — but a
+# late retrospective amendment catches tenancy RENEWAL arrangements entered
+# into on or after 17 March 2026. Phrased below as legislative risk, never
+# as law currently in force.
+UORR_LEGISLATIVE_RISK_WARNING = (
+    "Rent review basis is upward-only: the English Devolution and Community "
+    "Empowerment Act 2026 (Royal Assent 29 April 2026) bans upward-only rent "
+    "reviews in new commercial leases in England and Wales. The ban is not "
+    "yet in force — secondary legislation is expected in 2027 — but renewal "
+    "arrangements entered into on or after 17 March 2026 may be caught by a "
+    "retrospective amendment. An upward-only review pattern supporting this "
+    "yield may not be replicable on re-letting or renewal — treat as a "
+    "legislative risk to reversionary value, not current law in force."
 )
 
 # Asset classes RICS values by a DIFFERENT method to the Investment Method
@@ -147,6 +188,130 @@ def _pct_to_decimal(pct: Optional[float]) -> Optional[float]:
     return v / 100 if v > 1 else v
 
 
+def _sdlt_non_residential_england_ni(price: float) -> float:
+    """Stepped SDLT on non-residential/mixed freehold consideration,
+    England & Northern Ireland only: 0% to £150,000; 2% on the portion
+    £150,001–£250,000; 5% on the portion above £250,000."""
+    if price is None or price <= 0:
+        return 0.0
+    tax = 0.0
+    if price > _SDLT_NONRES_BAND_1_UPPER:
+        tax += (min(price, _SDLT_NONRES_BAND_2_UPPER) - _SDLT_NONRES_BAND_1_UPPER) * _SDLT_NONRES_BAND_2_RATE
+    if price > _SDLT_NONRES_BAND_2_UPPER:
+        tax += (price - _SDLT_NONRES_BAND_2_UPPER) * _SDLT_NONRES_BAND_3_RATE
+    return tax
+
+
+def _net_of_purchasers_costs(gross_value: float, fees_pct: Optional[float], nation: str) -> dict:
+    """Solve the net price P such that P + SDLT(P) + fees%×P = gross capital
+    value, by bisection (SDLT is stepped on the net consideration, so the
+    relationship is circular and has no closed form). Convention: yields are
+    analysed against prices gross of costs, so the YP capitalisation output
+    is the GROSS value and the buyer-pays price is the NET value.
+
+    Wales/Scotland gate: LTT/LBTT non-residential bands are not implemented —
+    the net figure is withheld rather than computed on the wrong nation's tax."""
+    if nation in ("wales", "scotland"):
+        tax_name = "LTT (Wales)" if nation == "wales" else "LBTT (Scotland)"
+        return {
+            "status": "unavailable",
+            "nation": nation,
+            "reason": (
+                f"{tax_name} non-residential bands are not implemented in this "
+                "phase — the net-of-costs figure is not computed rather than "
+                "computed on the wrong nation's tax. The capital value shown "
+                "is gross of purchaser's costs."
+            ),
+        }
+    fees_rate = (fees_pct if fees_pct is not None and fees_pct >= 0 else DEFAULT_PURCHASER_FEES_PCT) / 100.0
+    lo, hi = 0.0, float(gross_value)
+    mid = gross_value
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        f = mid + _sdlt_non_residential_england_ni(mid) + fees_rate * mid - gross_value
+        if abs(f) < 0.5:
+            break
+        if f > 0:
+            hi = mid
+        else:
+            lo = mid
+    net = round(mid, 2)
+    sdlt = round(_sdlt_non_residential_england_ni(net), 2)
+    fees = round(fees_rate * net, 2)
+    return {
+        "status": "ok",
+        "nation": "england_ni",
+        "net_value_gbp": net,
+        "sdlt_gbp": sdlt,
+        "fees_pct": round(fees_rate * 100, 2),
+        "fees_gbp": fees,
+        "total_costs_gbp": round(sdlt + fees, 2),
+        "basis": (
+            "SDLT England & NI non-residential freehold bands (0% to £150,000; "
+            "2% on £150,001–£250,000; 5% above £250,000) computed on the net "
+            "price by bisection, plus purchaser's fees at the stated percentage "
+            "of net price. Net price + SDLT + fees = capital value gross of costs."
+        ),
+    }
+
+
+def _solve_yield_bisection(target_cv: float, value_at) -> Optional[float]:
+    """Find the single yield e (decimal) at which value_at(e) == target_cv.
+    value_at must be monotonically decreasing in e (true of every YP
+    capitalisation). Used for the equivalent yield — the single weighted
+    yield that, applied to all slices of the same cashflow structure,
+    reproduces the capital value. Returns None if no solution brackets
+    within (0.0001, 1.0) — never guesses."""
+    lo, hi = 1e-4, 1.0
+    v_lo, v_hi = value_at(lo), value_at(hi)
+    if v_lo is None or v_hi is None or not (v_lo >= target_cv >= v_hi):
+        return None
+    mid = (lo + hi) / 2
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        v = value_at(mid)
+        if v is None:
+            return None
+        if abs(v - target_cv) < 0.5:
+            return mid
+        if v > target_cv:
+            lo = mid
+        else:
+            hi = mid
+    return mid
+
+
+def _evidence_tier(inputs_used: dict) -> dict:
+    """Evidence tier — provenance grade for the supplied inputs, mapped by
+    ANALOGY to the RICS hierarchy of evidence (Category A: direct comparable
+    transactions; B: general/published market data; C: other sources).
+
+    Phase 1 structural fact: there is no legal-pack extraction or licensed
+    market-data path into the commercial input fields — every supplied value
+    arrived via the input form. So every field's source is user_entered and
+    the tier is C. This is NOT a statistical confidence score (no outcome
+    data exists to derive one); the tier rises only when inputs become
+    evidenced, never by assumption."""
+    sources = {
+        k: "user_entered"
+        for k, v in (inputs_used or {}).items()
+        if v is not None and k != "asset_class"
+    }
+    return {
+        "tier": "C",
+        "tier_label": "Evidence tier C — user-entered inputs, unverified",
+        "basis": (
+            "All supplied inputs are user-entered: this phase has no legal-pack "
+            "extraction or licensed market-data path into commercial fields. By "
+            "analogy to the RICS hierarchy of evidence (Category A: direct "
+            "comparable transactions; B: published market data; C: other "
+            "sources), unverified user inputs sit at Category C. This is a "
+            "provenance grade, not a statistical confidence score."
+        ),
+        "input_sources": sources,
+    }
+
+
 def _ok_result(
     *, valuation_type: str, method: str, inputs_used: dict, valuation_components: dict,
     capital_value: float, assumptions: list[str], evidence_gaps: list[str],
@@ -171,6 +336,15 @@ def _ok_result(
             "raw": None, "caps": [], "final": None,
             "label": "indicative — see assumptions and evidence_gaps",
         },
+        # Date this computation ran — VPS-style minimum reporting matter.
+        # Explicitly NOT a valuation "as at" an inspected date: inputs and
+        # market yields move, and nothing here was inspected.
+        "valuation_date": date.today().isoformat(),
+        "valuation_date_note": (
+            "Date this computation ran — not a valuation 'as at' an inspection "
+            "date; inputs and market yields move."
+        ),
+        "evidence_tier": _evidence_tier(inputs_used),
         "audit": {
             "comparable_method":      method,
             "not_rics_valuation":     True,
@@ -271,7 +445,26 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
                                 rent is rack-rented (== market rent).
         wault_years           : float — optional, informational only, not
                                 used in the valuation maths.
+        wault_to_break_years  : float — optional, informational only. WAULT
+                                to first break, alongside WAULT to expiry —
+                                break clauses cluster the income risk.
         tenant_name           : str  — optional, informational only.
+        rent_review_basis     : str  — optional: upward_only | open_market |
+                                fixed_stepped | index_linked. upward_only
+                                triggers the UORR legislative-risk warning.
+        nation                : str  — optional: england_ni (default, with
+                                assumption logged if absent) | wales |
+                                scotland. Governs the SDLT leg of purchaser's
+                                costs; wales/scotland gate the net figure.
+        purchaser_fees_pct    : float — optional, % of net price for agent/
+                                legal/VAT. Defaults to
+                                DEFAULT_PURCHASER_FEES_PCT with the default
+                                stated as an assumption.
+        void_months           : float — optional. Void period at reversion
+                                before market rent commences (term &
+                                reversion branch only).
+        rent_free_months      : float — optional. Rent-free incentive at
+                                reversion (term & reversion branch only).
     """
     assumptions: list[str] = []
     evidence_gaps: list[str] = []
@@ -346,11 +539,64 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "differentiated term/reversion/top-slice yields were not supplied"
         )
 
+    # ── v2.1 inputs: review basis, nation, purchaser's fees, void/rent-free ──
+    def _opt_num(key):
+        v = fi.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    review_basis = str(fi.get("rent_review_basis") or "").strip().lower() or None
+    if review_basis == "upward_only":
+        warnings.append(UORR_LEGISLATIVE_RISK_WARNING)
+
+    nation = str(fi.get("nation") or "").strip().lower() or None
+    if nation not in ("england_ni", "wales", "scotland"):
+        if nation is not None:
+            warnings.append(
+                f"Unrecognised nation '{nation}' — England & NI SDLT bands assumed."
+            )
+        nation = "england_ni"
+        if fi.get("nation") is None:
+            assumptions.append(
+                "nation not supplied — England & Northern Ireland SDLT "
+                "non-residential bands assumed for purchaser's costs. Select "
+                "Wales or Scotland if applicable (different tax: LTT/LBTT)."
+            )
+
+    purchaser_fees_pct = _opt_num("purchaser_fees_pct")
+    if purchaser_fees_pct is None:
+        assumptions.append(
+            f"purchaser's fees defaulted to {DEFAULT_PURCHASER_FEES_PCT}% of net "
+            "price (agent ~1% + legal ~0.5% + VAT — London-market convention "
+            "component). A stated assumption, editable per deal."
+        )
+    elif purchaser_fees_pct < 0:
+        warnings.append("Negative purchaser_fees_pct ignored — default applied.")
+        purchaser_fees_pct = None
+
+    void_months = _opt_num("void_months")
+    rent_free_months = _opt_num("rent_free_months")
+    if void_months is not None and void_months < 0:
+        warnings.append("Negative void_months ignored.")
+        void_months = None
+    if rent_free_months is not None and rent_free_months < 0:
+        warnings.append("Negative rent_free_months ignored.")
+        rent_free_months = None
+    extra_defer_years = ((void_months or 0.0) + (rent_free_months or 0.0)) / 12.0
+
+    wault_to_break = _opt_num("wault_to_break_years")
+
     # ── Investment Method ─────────────────────────────────────────────────
     components: dict = {}
+    waterfall: list[dict] = []
+    method_reasoning = ""
+    equivalent_yield: Optional[float] = None
     if is_rack_rented:
         method = "investment_method_rack_rented_perpetuity"
-        yp = _yp_perpetuity(yield_pct or term_yield)
+        rack_yield = yield_pct or term_yield
+        yp = _yp_perpetuity(rack_yield)
         if yp is None:
             evidence_gaps.append("Yield invalid (<=0) — cannot capitalise rack-rented income.")
             return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
@@ -359,11 +605,32 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             f"rack_rented: capital_value = passing_rent({passing_rent}) × YP_perp({yp:.4f})"
         )
         # No separate components to show — the headline figure IS the whole calculation.
+        method_reasoning = (
+            f"Passing rent (£{passing_rent:,.0f}/yr) is within "
+            f"{RACK_RENT_TOLERANCE_PCT * 100:.0f}% of market rent "
+            f"(£{market_rent:,.0f}/yr) — treated as rack-rented and capitalised "
+            f"in perpetuity at {rack_yield * 100:.2f}%."
+        )
+        equivalent_yield = rack_yield  # single slice — the yield IS the equivalent yield
+        waterfall.append({
+            "label": (
+                f"Passing rent £{passing_rent:,.0f}/yr × YP in perpetuity "
+                f"@ {rack_yield * 100:.2f}% ({yp:.4f})"
+            ),
+            "amount": round(capital_value, 2),
+        })
+        if extra_defer_years > 0:
+            warnings.append(
+                "void_months / rent_free_months supplied but not applied — "
+                "only modelled for the under-rented term & reversion case in "
+                "this phase."
+            )
 
     elif passing_rent < market_rent:
         method = "investment_method_term_and_reversion"
+        defer_years = n_years + extra_defer_years
         yp_term = _yp_years(n_years, term_yield)
-        yp_rev  = _yp_perpetuity_deferred(n_years, reversion_yld)
+        yp_rev  = _yp_perpetuity_deferred(defer_years, reversion_yld)
         if yp_term is None or yp_rev is None:
             evidence_gaps.append("Term or reversion yield invalid — cannot compute term & reversion.")
             return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
@@ -372,13 +639,63 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         capital_value   = term_value + reversion_value
         formula_trace.append(
             f"term_and_reversion: term={passing_rent}×YP_years({n_years}y,{term_yield:.4f})="
-            f"{term_value:.2f}; reversion={market_rent}×YP_perp_deferred({n_years}y,{reversion_yld:.4f})="
+            f"{term_value:.2f}; reversion={market_rent}×YP_perp_deferred({defer_years}y,{reversion_yld:.4f})="
             f"{reversion_value:.2f}"
         )
+        if extra_defer_years > 0:
+            formula_trace.append(
+                f"reversion deferment extended by void/rent-free: "
+                f"{n_years}y + {extra_defer_years:.4f}y "
+                f"(void {void_months or 0:g}m + rent-free {rent_free_months or 0:g}m) "
+                f"= {defer_years:.4f}y"
+            )
+            assumptions.append(
+                f"Reversion income deferred a further "
+                f"{(void_months or 0):g} void + {(rent_free_months or 0):g} "
+                f"rent-free months beyond the review/expiry date, per supplied inputs."
+            )
+        else:
+            assumptions.append(
+                "No void or rent-free period modelled on reversion (none "
+                "supplied) — reversion income assumed to commence immediately "
+                "at review/expiry. This can overstate value where re-letting "
+                "is required."
+            )
         components = {
             "Term value (secure income to reversion)": round(term_value, 2),
             "Reversion value (market rent, deferred)":  round(reversion_value, 2),
         }
+        method_reasoning = (
+            f"Passing rent (£{passing_rent:,.0f}/yr) is below market rent "
+            f"(£{market_rent:,.0f}/yr) with {n_years:g} years to the next "
+            f"review/expiry — term & reversion applied: the secure term income "
+            f"is capitalised to the reversion at {term_yield * 100:.2f}%, and "
+            f"the market rent is capitalised in perpetuity, deferred "
+            f"{defer_years:g} years, at {reversion_yld * 100:.2f}%."
+        )
+        equivalent_yield = _solve_yield_bisection(
+            capital_value,
+            lambda e: (
+                (passing_rent * (_yp_years(n_years, e) or 0))
+                + (market_rent * (_yp_perpetuity_deferred(defer_years, e) or 0))
+            ),
+        )
+        waterfall += [
+            {
+                "label": (
+                    f"Term: passing rent £{passing_rent:,.0f}/yr × YP "
+                    f"{n_years:g} yrs @ {term_yield * 100:.2f}% ({yp_term:.4f})"
+                ),
+                "amount": round(term_value, 2),
+            },
+            {
+                "label": (
+                    f"Reversion: market rent £{market_rent:,.0f}/yr × YP perp "
+                    f"deferred {defer_years:g} yrs @ {reversion_yld * 100:.2f}% ({yp_rev:.4f})"
+                ),
+                "amount": round(reversion_value, 2),
+            },
+        ]
 
     else:  # passing_rent > market_rent — over-rented
         method = "investment_method_hardcore_layer"
@@ -403,12 +720,107 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "Core value (market rent, perpetuity)":  round(core_value, 2),
             "Top-slice value (rent above market)":    round(top_slice_value, 2),
         }
+        method_reasoning = (
+            f"Passing rent (£{passing_rent:,.0f}/yr) is above market rent "
+            f"(£{market_rent:,.0f}/yr) with {n_years:g} years of the over-rent "
+            f"remaining — hardcore/layer applied: the market-rent core is "
+            f"capitalised in perpetuity at {reversion_yld * 100:.2f}%, and the "
+            f"top slice above market for {n_years:g} years at "
+            f"{top_yield * 100:.2f}%."
+        )
+        equivalent_yield = _solve_yield_bisection(
+            capital_value,
+            lambda e: (
+                (market_rent * (_yp_perpetuity(e) or 0))
+                + ((passing_rent - market_rent) * (_yp_years(n_years, e) or 0))
+            ),
+        )
+        waterfall += [
+            {
+                "label": (
+                    f"Core: market rent £{market_rent:,.0f}/yr × YP perpetuity "
+                    f"@ {reversion_yld * 100:.2f}% ({yp_core:.4f})"
+                ),
+                "amount": round(core_value, 2),
+            },
+            {
+                "label": (
+                    f"Top slice: £{passing_rent - market_rent:,.0f}/yr above market "
+                    f"× YP {n_years:g} yrs @ {top_yield * 100:.2f}% ({yp_top:.4f})"
+                ),
+                "amount": round(top_slice_value, 2),
+            },
+        ]
+        if extra_defer_years > 0:
+            warnings.append(
+                "void_months / rent_free_months supplied but not applied — "
+                "only modelled for the under-rented term & reversion case in "
+                "this phase."
+            )
 
     wault = fi.get("wault_years")
     try:
         wault = float(wault) if wault is not None else None
     except (TypeError, ValueError):
         wault = None
+
+    if wault is not None and wault_to_break is not None and wault_to_break > wault:
+        warnings.append(
+            "WAULT to break exceeds WAULT to expiry — a break cannot fall "
+            "after expiry; check the inputs."
+        )
+
+    # ── Gross capital value row, then purchaser's costs → net price ──────
+    waterfall.append({
+        "label": "Capital value (gross of purchaser's costs)",
+        "amount": round(capital_value, 2),
+        "emphasis": True,
+    })
+
+    purchasers_costs = _net_of_purchasers_costs(capital_value, purchaser_fees_pct, nation)
+    net_value = None
+    if purchasers_costs.get("status") == "ok":
+        net_value = purchasers_costs["net_value_gbp"]
+        formula_trace.append(
+            f"purchasers_costs: net({net_value}) + sdlt({purchasers_costs['sdlt_gbp']}) "
+            f"+ fees({purchasers_costs['fees_gbp']} @ {purchasers_costs['fees_pct']}%) "
+            f"= gross({capital_value:.2f}) — bisection on England & NI "
+            f"non-residential SDLT bands"
+        )
+        waterfall += [
+            {
+                "label": "SDLT (England & NI non-residential bands, on net price)",
+                "amount": -purchasers_costs["sdlt_gbp"],
+            },
+            {
+                "label": (
+                    f"Purchaser's fees ({purchasers_costs['fees_pct']:g}% of net "
+                    f"price — stated assumption)"
+                ),
+                "amount": -purchasers_costs["fees_gbp"],
+            },
+            {
+                "label": "Indicative value (net of purchaser's costs)",
+                "amount": net_value,
+                "emphasis": True,
+            },
+        ]
+
+    # ── Yields: NIY (rent ÷ gross-of-costs value), GIY (rent ÷ net price),
+    #    equivalent yield (single yield reproducing the capital value) ────
+    niy = round(passing_rent / capital_value * 100, 2) if capital_value > 0 else None
+    giy = round(passing_rent / net_value * 100, 2) if net_value else None
+    yields = {
+        "net_initial_yield_pct":   niy,
+        "gross_initial_yield_pct": giy,
+        "equivalent_yield_pct":    round(equivalent_yield * 100, 2) if equivalent_yield else None,
+        "note": (
+            "NIY = passing rent ÷ capital value gross of purchaser's costs; "
+            "GIY = passing rent ÷ net price. The gap between them is the "
+            "purchaser's costs. Equivalent yield is the single yield that, "
+            "applied to every slice of this cashflow, reproduces the capital value."
+        ),
+    }
 
     return _ok_result(
         valuation_type="commercial_investment_method",
@@ -422,13 +834,26 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "top_slice_yield_pct":  round(top_yield * 100, 3) if top_yield else None,
             "unexpired_term_years": n_years,
             "wault_years":          wault,
+            "wault_to_break_years": wault_to_break,
             "tenant_name":          fi.get("tenant_name"),
+            "rent_review_basis":    review_basis,
+            "nation":               nation,
+            "purchaser_fees_pct":   purchaser_fees_pct,
+            "void_months":          void_months,
+            "rent_free_months":     rent_free_months,
             "asset_class":          asset_class,
         },
         valuation_components=components,
         capital_value=capital_value,
         assumptions=assumptions, evidence_gaps=evidence_gaps, warnings=warnings, formula_trace=formula_trace,
-        extra={"yield_convention": YIELD_CONVENTION, "yield_convention_note": YIELD_CONVENTION_NOTE},
+        extra={
+            "yield_convention":      YIELD_CONVENTION,
+            "yield_convention_note": YIELD_CONVENTION_NOTE,
+            "method_reasoning":      method_reasoning,
+            "waterfall":             waterfall,
+            "purchasers_costs":      purchasers_costs,
+            "yields":                yields,
+        },
     )
 
 
@@ -525,6 +950,13 @@ def _calculate_profits_method(fi: dict, asset_class: str) -> dict:
         valuation_components={"Fair Maintainable Operating Profit (FMOP, £/yr)": round(fmop, 2)},
         capital_value=capital_value,
         assumptions=assumptions, evidence_gaps=evidence_gaps, warnings=warnings, formula_trace=formula_trace,
+        extra={
+            "method_reasoning": (
+                "Asset class stated as trade-related — valued by the Profits "
+                "Method: value derives from the maintainable profit of the "
+                "business the property hosts, not from rent."
+            ),
+        },
     )
 
 
@@ -703,6 +1135,14 @@ def _calculate_residual_method(fi: dict, asset_class: str) -> dict:
             "Total costs":         round(total_costs, 2),
         },
         capital_value=residual_value,
+        extra={
+            "method_reasoning": (
+                "Asset class stated as a development/redevelopment site — "
+                "valued by the Residual Method: completed value (GDV) less all "
+                "development costs and developer's profit leaves the residual "
+                "site value."
+            ),
+        },
         assumptions=assumptions, evidence_gaps=evidence_gaps, warnings=warnings, formula_trace=formula_trace,
     )
 
@@ -805,6 +1245,14 @@ def _calculate_drc_method(fi: dict, asset_class: str) -> dict:
         },
         capital_value=capital_value,
         assumptions=assumptions, evidence_gaps=evidence_gaps, warnings=warnings, formula_trace=formula_trace,
+        extra={
+            "method_reasoning": (
+                "Asset class stated as specialised owner-occupied — valued by "
+                "Depreciated Replacement Cost: land value plus reinstatement "
+                "cost less depreciation, used where no rental or sales market "
+                "exists for the asset."
+            ),
+        },
     )
 
 
@@ -839,7 +1287,13 @@ def _insufficient(
             "top_slice_yield_pct":  fi.get("top_slice_yield_pct"),
             "unexpired_term_years": fi.get("unexpired_term_years"),
             "wault_years":          fi.get("wault_years"),
+            "wault_to_break_years": fi.get("wault_to_break_years"),
             "tenant_name":          fi.get("tenant_name"),
+            "rent_review_basis":    fi.get("rent_review_basis"),
+            "nation":               fi.get("nation"),
+            "purchaser_fees_pct":   fi.get("purchaser_fees_pct"),
+            "void_months":          fi.get("void_months"),
+            "rent_free_months":     fi.get("rent_free_months"),
             "asset_class":          str(fi.get("asset_class") or ASSET_CLASS_INCOME_PRODUCING_LET).strip().lower(),
         }
     return {
