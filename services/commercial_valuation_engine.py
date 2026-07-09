@@ -73,7 +73,27 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERSION = "commercial_multi_method_v2_2_uncertainty_sensitivity"
+VERSION = "commercial_multi_method_v2_3_institutional"
+
+# Yield basis — v2.3. The nominal (annually in arrears) convention is the
+# Argus/market default; the TRUE equivalent yield basis (rent received
+# quarterly in advance, the actual UK payment convention) is now also
+# implemented — the person chooses which basis their entered yield is on.
+# The two are different interpretations of the same number: at the same
+# yield, quarterly-in-advance capitalisation produces a HIGHER value
+# (income arrives earlier).
+YIELD_BASIS_NOMINAL        = "nominal_annually_in_arrears"
+YIELD_BASIS_TRUE_QUARTERLY = "true_quarterly_in_advance"
+
+YIELD_CONVENTION_QUARTERLY = "true_equivalent_yield_quarterly_in_advance"
+YIELD_CONVENTION_NOTE_QUARTERLY = (
+    "Yield is capitalised on the TRUE equivalent yield basis — rent treated "
+    "as received quarterly in advance, the actual UK payment convention. At "
+    "the same yield figure this produces a higher value than the nominal "
+    "(annually in arrears) basis, because income arrives earlier. Make sure "
+    "the yield entered was analysed on this basis; a nominal yield entered "
+    "here will overstate value."
+)
 
 # Input-plausibility sanity bounds — v2.2. These are ENGINEERING-JUDGEMENT
 # thresholds for catching fat-finger input errors (a misplaced zero), NOT
@@ -164,31 +184,39 @@ ASSET_CLASS_SPECIALISED_OWNER_OCCUPIED = "specialised_owner_occupied" # -> RICS 
 ASSET_CLASS_MIXED_USE                 = "mixed_use"                  # -> gates: apportioned valuation not yet supported
 
 
-def _yp_years(n: float, i: float) -> Optional[float]:
+def _yp_years(n: float, i: float, quarterly: bool = False) -> Optional[float]:
     """Years' Purchase for n years at yield i (decimal). Capitalises a
     finite income stream — used for the term slice and the over-rented
-    top-slice."""
+    top-slice. quarterly=True uses the quarterly-in-advance convention:
+    YP = (1 − (1+i)^−n) / (4 × (1 − (1+i)^−0.25))."""
     if i is None or i <= 0 or n is None or n <= 0:
         return None
+    if quarterly:
+        return (1 - (1 + i) ** -n) / (4 * (1 - (1 + i) ** -0.25))
     return (1 - (1 + i) ** -n) / i
 
 
-def _yp_perpetuity(i: float) -> Optional[float]:
+def _yp_perpetuity(i: float, quarterly: bool = False) -> Optional[float]:
     """Years' Purchase in perpetuity at yield i (decimal). Capitalises an
     income stream assumed to continue indefinitely — used for rack-rented
-    and hardcore-layer core valuations."""
+    and hardcore-layer core valuations. quarterly=True uses the
+    quarterly-in-advance convention: YP = 1 / (4 × (1 − (1+i)^−0.25))."""
     if i is None or i <= 0:
         return None
+    if quarterly:
+        return 1 / (4 * (1 - (1 + i) ** -0.25))
     return 1 / i
 
 
-def _yp_perpetuity_deferred(n: float, i: float) -> Optional[float]:
+def _yp_perpetuity_deferred(n: float, i: float, quarterly: bool = False) -> Optional[float]:
     """Years' Purchase in perpetuity, deferred n years, at yield i
     (decimal). Used for the reversion slice in term & reversion — the
-    market rent is only received from year n onward."""
+    market rent is only received from year n onward. The deferment factor
+    (1+i)^−n discounts at the effective annual rate on both bases."""
     if i is None or i <= 0 or n is None or n < 0:
         return None
-    return (1 / i) * ((1 + i) ** -n)
+    base = _yp_perpetuity(i, quarterly)
+    return base * ((1 + i) ** -n) if base else None
 
 
 def _pct_to_decimal(pct: Optional[float]) -> Optional[float]:
@@ -536,6 +564,48 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
     warnings: list[str] = []
     formula_trace: list[str] = []
 
+    # ── v2.3: tenure gate — perpetuity capitalisation is a FREEHOLD
+    #    technique. A leasehold interest is valued as profit rent over the
+    #    unexpired head-lease term, a genuinely different calculation this
+    #    engine does not implement — so leasehold gates (same pattern as
+    #    mixed_use) rather than getting a freehold answer that is wrong,
+    #    not approximate, for a wasting asset. ──────────────────────────
+    tenure = str(fi.get("tenure") or "").strip().lower() or None
+    if tenure == "leasehold":
+        evidence_gaps.append(
+            "Tenure stated as leasehold — the Investment Method as "
+            "implemented here capitalises in perpetuity, which values a "
+            "FREEHOLD interest. A leasehold interest is valued as the profit "
+            "rent (rent received less head rent payable) over the unexpired "
+            "head-lease term only — a wasting asset, not a perpetuity. That "
+            "calculation is not built in this phase; this engine refuses to "
+            "produce a freehold number for a leasehold asset. Manual "
+            "valuation of the leasehold interest is required."
+        )
+        return _insufficient(
+            fi, evidence_gaps, warnings, assumptions, formula_trace,
+            status="manual_review_required",
+        )
+    if tenure is None:
+        assumptions.append(
+            "tenure not stated — FREEHOLD assumed (perpetuity capitalisation). "
+            "If the interest is leasehold this valuation basis is wrong, not "
+            "approximate: state the tenure."
+        )
+    elif tenure != "freehold":
+        warnings.append(f"Unrecognised tenure '{tenure}' — freehold assumed.")
+
+    # ── v2.3: yield basis — which convention the entered yield is on ────
+    yield_basis = str(fi.get("yield_basis") or "").strip().lower() or YIELD_BASIS_NOMINAL
+    if yield_basis not in (YIELD_BASIS_NOMINAL, YIELD_BASIS_TRUE_QUARTERLY):
+        warnings.append(
+            f"Unrecognised yield_basis '{yield_basis}' — nominal "
+            "(annually in arrears) assumed."
+        )
+        yield_basis = YIELD_BASIS_NOMINAL
+    q = yield_basis == YIELD_BASIS_TRUE_QUARTERLY
+    formula_trace.append(f"yield_basis: {yield_basis}")
+
     passing_rent = fi.get("passing_rent_pa")
     try:
         passing_rent = float(passing_rent) if passing_rent is not None else None
@@ -662,7 +732,7 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
     if is_rack_rented:
         method = "investment_method_rack_rented_perpetuity"
         rack_yield = yield_pct or term_yield
-        yp = _yp_perpetuity(rack_yield)
+        yp = _yp_perpetuity(rack_yield, q)
         if yp is None:
             evidence_gaps.append("Yield invalid (<=0) — cannot capitalise rack-rented income.")
             return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
@@ -695,8 +765,8 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
     elif passing_rent < market_rent:
         method = "investment_method_term_and_reversion"
         defer_years = n_years + extra_defer_years
-        yp_term = _yp_years(n_years, term_yield)
-        yp_rev  = _yp_perpetuity_deferred(defer_years, reversion_yld)
+        yp_term = _yp_years(n_years, term_yield, q)
+        yp_rev  = _yp_perpetuity_deferred(defer_years, reversion_yld, q)
         if yp_term is None or yp_rev is None:
             evidence_gaps.append("Term or reversion yield invalid — cannot compute term & reversion.")
             return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
@@ -742,8 +812,8 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         equivalent_yield = _solve_yield_bisection(
             capital_value,
             lambda e: (
-                (passing_rent * (_yp_years(n_years, e) or 0))
-                + (market_rent * (_yp_perpetuity_deferred(defer_years, e) or 0))
+                (passing_rent * (_yp_years(n_years, e, q) or 0))
+                + (market_rent * (_yp_perpetuity_deferred(defer_years, e, q) or 0))
             ),
         )
         waterfall += [
@@ -765,8 +835,8 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
 
     else:  # passing_rent > market_rent — over-rented
         method = "investment_method_hardcore_layer"
-        yp_core = _yp_perpetuity(reversion_yld)
-        yp_top  = _yp_years(n_years, top_yield)
+        yp_core = _yp_perpetuity(reversion_yld, q)
+        yp_top  = _yp_years(n_years, top_yield, q)
         if yp_core is None or yp_top is None:
             evidence_gaps.append("Core or top-slice yield invalid — cannot compute hardcore/layer.")
             return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
@@ -797,8 +867,8 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         equivalent_yield = _solve_yield_bisection(
             capital_value,
             lambda e: (
-                (market_rent * (_yp_perpetuity(e) or 0))
-                + ((passing_rent - market_rent) * (_yp_years(n_years, e) or 0))
+                (market_rent * (_yp_perpetuity(e, q) or 0))
+                + ((passing_rent - market_rent) * (_yp_years(n_years, e, q) or 0))
             ),
         )
         waterfall += [
@@ -876,15 +946,19 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
     #    equivalent yield (single yield reproducing the capital value) ────
     niy = round(passing_rent / capital_value * 100, 2) if capital_value > 0 else None
     giy = round(passing_rent / net_value * 100, 2) if net_value else None
+    ry  = round(market_rent / capital_value * 100, 2) if capital_value > 0 else None
     yields = {
         "net_initial_yield_pct":   niy,
+        "reversionary_yield_pct":  ry,
         "gross_initial_yield_pct": giy,
         "equivalent_yield_pct":    round(equivalent_yield * 100, 2) if equivalent_yield else None,
         "note": (
             "NIY = passing rent ÷ capital value gross of purchaser's costs; "
-            "GIY = passing rent ÷ net price. The gap between them is the "
-            "purchaser's costs. Equivalent yield is the single yield that, "
-            "applied to every slice of this cashflow, reproduces the capital value."
+            "reversionary yield = market rent ÷ the same gross value (the "
+            "institutional NIY/reversionary/equivalent trio); GIY = passing "
+            "rent ÷ net price — the NIY–GIY gap is the purchaser's costs. "
+            "Equivalent yield is the single yield that, applied to every "
+            "slice of this cashflow, reproduces the capital value."
         ),
     }
 
@@ -914,14 +988,14 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
     #    input (the user-supplied yield). Recomputation only, no new data. ─
     def _cv_at_shift(delta: float) -> Optional[float]:
         if method == "investment_method_rack_rented_perpetuity":
-            yp_s = _yp_perpetuity(((yield_pct or term_yield) or 0) + delta)
+            yp_s = _yp_perpetuity(((yield_pct or term_yield) or 0) + delta, q)
             return passing_rent * yp_s if yp_s else None
         if method == "investment_method_term_and_reversion":
-            t_s = _yp_years(n_years, term_yield + delta)
-            r_s = _yp_perpetuity_deferred(defer_years, reversion_yld + delta)
+            t_s = _yp_years(n_years, term_yield + delta, q)
+            r_s = _yp_perpetuity_deferred(defer_years, reversion_yld + delta, q)
             return passing_rent * t_s + market_rent * r_s if (t_s and r_s) else None
-        c_s = _yp_perpetuity(reversion_yld + delta)
-        p_s = _yp_years(n_years, top_yield + delta)
+        c_s = _yp_perpetuity(reversion_yld + delta, q)
+        p_s = _yp_years(n_years, top_yield + delta, q)
         return market_rent * c_s + (passing_rent - market_rent) * p_s if (c_s and p_s) else None
 
     sensitivity: list[dict] = []
@@ -962,6 +1036,10 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
     unc_parts.append(
         "Income is capitalised on the nominal (annually in arrears) "
         "convention, not the true equivalent yield."
+        if not q else
+        "Income is capitalised on the true (quarterly in advance) "
+        "convention — the entered yield must have been analysed on the same "
+        "basis or the value will be overstated."
     )
     unc_parts.append(
         "No inspection, lease reading, or covenant assessment has occurred — "
@@ -991,14 +1069,16 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "purchaser_fees_pct":   purchaser_fees_pct,
             "void_months":          void_months,
             "rent_free_months":     rent_free_months,
+            "tenure":               tenure or "freehold",
+            "yield_basis":          yield_basis,
             "asset_class":          asset_class,
         },
         valuation_components=components,
         capital_value=capital_value,
         assumptions=assumptions, evidence_gaps=evidence_gaps, warnings=warnings, formula_trace=formula_trace,
         extra={
-            "yield_convention":      YIELD_CONVENTION,
-            "yield_convention_note": YIELD_CONVENTION_NOTE,
+            "yield_convention":      YIELD_CONVENTION_QUARTERLY if q else YIELD_CONVENTION,
+            "yield_convention_note": YIELD_CONVENTION_NOTE_QUARTERLY if q else YIELD_CONVENTION_NOTE,
             "method_reasoning":      method_reasoning,
             "waterfall":             waterfall,
             "purchasers_costs":      purchasers_costs,
@@ -1472,6 +1552,8 @@ def _insufficient(
             "purchaser_fees_pct":   fi.get("purchaser_fees_pct"),
             "void_months":          fi.get("void_months"),
             "rent_free_months":     fi.get("rent_free_months"),
+            "tenure":               fi.get("tenure"),
+            "yield_basis":          fi.get("yield_basis"),
             "asset_class":          str(fi.get("asset_class") or ASSET_CLASS_INCOME_PRODUCING_LET).strip().lower(),
         }
     return {
