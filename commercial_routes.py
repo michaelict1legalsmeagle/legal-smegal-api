@@ -61,6 +61,8 @@ _ALLOWED_COMMERCIAL_FIELDS = {
     "purchaser_fees_pct",
     "void_months",
     "rent_free_months",
+    "tenure",
+    "yield_basis",
     # Profits Method (trade_related)
     "fmop_pa",
     "profit_multiplier",
@@ -177,12 +179,30 @@ def save_commercial_inputs(deal_id):
     inputs["commercial"] = merged_commercial
     fins["inputs"] = inputs
 
+    # v2.3: compute BEFORE persisting so the audit snapshot of this
+    # computation is stored in the same single write as the inputs —
+    # institutional record-keeping (what was computed, when, by which
+    # engine version). Additive key; nothing else reads it yet.
+    result = calculate_commercial_ceiling(merged_commercial)
+    result["deal_id"] = deal_id
+
+    from datetime import datetime, timezone
+    outputs = fins.get("outputs") or {}
+    outputs["commercial_last"] = {
+        "computed_at":         datetime.now(timezone.utc).isoformat(),
+        "engine_version":      (result.get("audit") or {}).get("version"),
+        "status":              result.get("status"),
+        "method":              result.get("method"),
+        "capital_value_gross": result.get("comparable_valuation"),
+        "net_value_gbp":       (result.get("purchasers_costs") or {}).get("net_value_gbp"),
+        "evidence_tier":       (result.get("evidence_tier") or {}).get("tier"),
+    }
+    fins["outputs"] = outputs
+
     try:
         supabase.table("deals").update({"financials_json": fins}).eq("id", deal_id).execute()
     except Exception as exc:
         logger.error("[commercial] failed to persist inputs for %s: %s", deal_id, exc)
         return jsonify({"error": "Failed to save commercial inputs"}), 500
 
-    result = calculate_commercial_ceiling(merged_commercial)
-    result["deal_id"] = deal_id
     return jsonify(result), 200
