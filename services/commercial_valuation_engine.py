@@ -73,7 +73,21 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERSION = "commercial_multi_method_v2_1_costs_ey"
+VERSION = "commercial_multi_method_v2_2_uncertainty_sensitivity"
+
+# Input-plausibility sanity bounds — v2.2. These are ENGINEERING-JUDGEMENT
+# thresholds for catching fat-finger input errors (a misplaced zero), NOT
+# market data and NOT figures RICS specifies. They only ever append a
+# warning; they never block, refuse, or alter the computed number — the
+# valuation is always computed honestly from the inputs as given.
+RENT_RATIO_SANITY_MULTIPLE = 3.0   # market vs passing rent ratio beyond which an input-check warning fires
+NIY_SANITY_FLOOR_PCT   = 1.0       # implied initial yield below this is far outside observed UK commercial trading
+NIY_SANITY_CEILING_PCT = 20.0      # implied initial yield above this likewise
+
+# Yield sensitivity display steps — v2.2. ARGUS-style sensitivity output:
+# the same formula recomputed with every slice yield shifted by these basis
+# points. Display steps only, not a forecast.
+SENSITIVITY_SHIFTS_BPS = (-50, -25, 25, 50)
 
 RACK_RENT_TOLERANCE_PCT = 0.01  # within 1% treated as rack-rented (avoids float-equality edge cases) — an engineering judgement call, not a figure RICS specifies numerically.
 
@@ -385,14 +399,65 @@ def calculate_commercial_ceiling(financial_inputs: dict) -> dict:
     asset_class = str(fi.get("asset_class") or ASSET_CLASS_INCOME_PRODUCING_LET).strip().lower()
 
     if asset_class == ASSET_CLASS_TRADE_RELATED:
-        return _calculate_profits_method(fi, asset_class)
+        return _attach_cross_check(_calculate_profits_method(fi, asset_class), fi, asset_class)
     if asset_class == ASSET_CLASS_DEVELOPMENT_SITE:
         return _calculate_residual_method(fi, asset_class)
     if asset_class == ASSET_CLASS_SPECIALISED_OWNER_OCCUPIED:
         return _calculate_drc_method(fi, asset_class)
     if asset_class == ASSET_CLASS_MIXED_USE:
         return _gate_mixed_use(fi, asset_class)
-    return _calculate_investment_method(fi, asset_class)
+    return _attach_cross_check(_calculate_investment_method(fi, asset_class), fi, asset_class)
+
+
+def _attach_cross_check(primary: dict, fi: dict, asset_class: str) -> dict:
+    """
+    Cross-check — v2.2. RICS practice: a second method 'may be used to
+    cross check or sense check the final valuation output', and the two
+    figures are RECONCILED, never averaged or blended. This attaches a
+    labelled secondary figure ONLY when the person has genuinely supplied
+    the second method's required inputs — it never fabricates them:
+      - income_producing_let primary + fmop_pa & profit_multiplier supplied
+        -> Profits Method cross-check (realistic for a let pub/hotel where
+        trading data is also known);
+      - trade_related primary + rent & yield supplied -> Investment Method
+        cross-check.
+    The primary figure is never altered by the presence of a cross-check.
+    """
+    if not isinstance(primary, dict) or primary.get("status") != "ok":
+        return primary
+
+    secondary = None
+    label = None
+    if asset_class == ASSET_CLASS_INCOME_PRODUCING_LET and fi.get("fmop_pa") and fi.get("profit_multiplier"):
+        secondary = _calculate_profits_method(fi, ASSET_CLASS_TRADE_RELATED)
+        label = "Profits Method (FMOP × multiplier)"
+    elif asset_class == ASSET_CLASS_TRADE_RELATED and fi.get("passing_rent_pa") and (
+        fi.get("yield_pct") or (fi.get("term_yield_pct") and fi.get("reversion_yield_pct"))
+    ):
+        secondary = _calculate_investment_method(fi, ASSET_CLASS_INCOME_PRODUCING_LET)
+        label = "Investment Method"
+
+    if not secondary or secondary.get("status") != "ok":
+        return primary
+
+    p = primary.get("comparable_valuation")
+    s = secondary.get("comparable_valuation")
+    diff_pct = round((s - p) / p * 100, 1) if p else None
+    primary["cross_check"] = {
+        "method_label": label,
+        "capital_value_gbp": s,
+        "difference_pct": diff_pct,
+        "note": (
+            "Sense-check only — RICS practice reconciles a second method's "
+            "figure against the primary; it never averages or blends them. "
+            "Figures compared before any purchaser's-costs deduction. The "
+            "primary method follows the stated asset class; a material gap "
+            "usually means the two methods are pricing different things "
+            "(trading potential vs lease income) — investigate which "
+            "assumption drives it."
+        ),
+    }
+    return primary
 
 
 def _gate_mixed_use(fi: dict, asset_class: str) -> dict:
@@ -593,6 +658,7 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
     waterfall: list[dict] = []
     method_reasoning = ""
     equivalent_yield: Optional[float] = None
+    defer_years: Optional[float] = None  # set in the term & reversion branch; used by the sensitivity recompute
     if is_rack_rented:
         method = "investment_method_rack_rented_perpetuity"
         rack_yield = yield_pct or term_yield
@@ -822,6 +888,90 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         ),
     }
 
+    # ── v2.2: input-plausibility sanity warnings ─────────────────────────
+    # Warnings only — never block, never alter the number. Thresholds are
+    # engineering judgement for catching fat-finger errors, not market data.
+    if passing_rent > 0 and market_rent > 0:
+        rent_ratio = market_rent / passing_rent
+        if rent_ratio >= RENT_RATIO_SANITY_MULTIPLE or rent_ratio <= 1 / RENT_RATIO_SANITY_MULTIPLE:
+            warnings.append(
+                f"Market rent is {rent_ratio:.1f}× passing rent — check for an "
+                "input error (e.g. a misplaced zero). The valuation is computed "
+                "honestly from the inputs as given; if the ratio is genuine, "
+                "expect the reversion (or top slice) to dominate the result."
+            )
+    if niy is not None and (niy < NIY_SANITY_FLOOR_PCT or niy > NIY_SANITY_CEILING_PCT):
+        warnings.append(
+            f"Implied initial yield of {niy}% is far outside typically "
+            "observed UK commercial trading ranges — check the rent and yield "
+            f"inputs. (Sanity bounds {NIY_SANITY_FLOOR_PCT:g}–"
+            f"{NIY_SANITY_CEILING_PCT:g}% are an engineering judgement for "
+            "catching input errors, not market data.)"
+        )
+
+    # ── v2.2: yield sensitivity — ARGUS-style, same formula at shifted
+    #    yields, showing how the output moves with the least-evidenced
+    #    input (the user-supplied yield). Recomputation only, no new data. ─
+    def _cv_at_shift(delta: float) -> Optional[float]:
+        if method == "investment_method_rack_rented_perpetuity":
+            yp_s = _yp_perpetuity(((yield_pct or term_yield) or 0) + delta)
+            return passing_rent * yp_s if yp_s else None
+        if method == "investment_method_term_and_reversion":
+            t_s = _yp_years(n_years, term_yield + delta)
+            r_s = _yp_perpetuity_deferred(defer_years, reversion_yld + delta)
+            return passing_rent * t_s + market_rent * r_s if (t_s and r_s) else None
+        c_s = _yp_perpetuity(reversion_yld + delta)
+        p_s = _yp_years(n_years, top_yield + delta)
+        return market_rent * c_s + (passing_rent - market_rent) * p_s if (c_s and p_s) else None
+
+    sensitivity: list[dict] = []
+    for bps in SENSITIVITY_SHIFTS_BPS:
+        cv_s = _cv_at_shift(bps / 10000.0)
+        if cv_s is None or cv_s <= 0:
+            continue
+        row = {"yield_shift_bps": bps, "gross_value_gbp": round(cv_s, 2), "net_value_gbp": None}
+        if purchasers_costs.get("status") == "ok":
+            pc_s = _net_of_purchasers_costs(cv_s, purchaser_fees_pct, nation)
+            if pc_s.get("status") == "ok":
+                row["net_value_gbp"] = pc_s["net_value_gbp"]
+        sensitivity.append(row)
+    sensitivity_note = (
+        "Same formula recomputed with every slice yield shifted by the stated "
+        "basis points — showing how sensitive the output is to the "
+        "least-evidenced input (the user-supplied yield). ±25/50 bps are "
+        "display steps, not a forecast."
+    )
+
+    # ── v2.2: uncertainty & limits statement — built from the ACTUAL state
+    #    of this computation, never boilerplate: each line appears only when
+    #    its condition is true on this deal. ──────────────────────────────
+    unc_parts = [
+        "Yield is user-supplied, not market-derived — no licensed benchmark "
+        "integration exists in this phase, and the yield is the single input "
+        "the output is most sensitive to (see sensitivity table).",
+    ]
+    if any("market_rent_pa not supplied" in a for a in assumptions):
+        unc_parts.append("Market rent was assumed equal to passing rent, not evidenced.")
+    if any("purchaser's fees defaulted" in a for a in assumptions):
+        unc_parts.append("Purchaser's fees are a stated default assumption, not a quoted figure.")
+    if any("No void or rent-free" in a for a in assumptions):
+        unc_parts.append(
+            "No void or rent-free period is modelled on the reversion, which "
+            "can overstate value where re-letting is required."
+        )
+    unc_parts.append(
+        "Income is capitalised on the nominal (annually in arrears) "
+        "convention, not the true equivalent yield."
+    )
+    unc_parts.append(
+        "No inspection, lease reading, or covenant assessment has occurred — "
+        "all inputs are unverified (Evidence tier C)."
+    )
+    unc_parts.append(
+        "Treat the figure as an indicative anchor, not a point of precision."
+    )
+    uncertainty_statement = " ".join(unc_parts)
+
     return _ok_result(
         valuation_type="commercial_investment_method",
         method=method,
@@ -853,6 +1003,9 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "waterfall":             waterfall,
             "purchasers_costs":      purchasers_costs,
             "yields":                yields,
+            "sensitivity":           sensitivity,
+            "sensitivity_note":      sensitivity_note,
+            "uncertainty_statement": uncertainty_statement,
         },
     )
 
@@ -955,6 +1108,14 @@ def _calculate_profits_method(fi: dict, asset_class: str) -> dict:
                 "Asset class stated as trade-related — valued by the Profits "
                 "Method: value derives from the maintainable profit of the "
                 "business the property hosts, not from rent."
+            ),
+            "uncertainty_statement": (
+                "FMOP and the profit multiplier are user-supplied and "
+                "unverified — no trading accounts have been inspected and the "
+                "multiplier has not been evidenced against comparable trading "
+                "transactions. The figure assumes a viable going concern (see "
+                "warnings). All inputs are unverified (Evidence tier C). Treat "
+                "the figure as an indicative anchor, not a point of precision."
             ),
         },
     )
@@ -1142,6 +1303,15 @@ def _calculate_residual_method(fi: dict, asset_class: str) -> dict:
                 "development costs and developer's profit leaves the residual "
                 "site value."
             ),
+            "uncertainty_statement": (
+                "GDV and cost inputs are user-supplied and unverified — no "
+                "cost-database (e.g. BCIS) or planning verification has "
+                "occurred, and residual outputs are highly sensitive to small "
+                "changes in GDV and build cost (see the assumptions list for "
+                "any cost element defaulted to £0, which understates true "
+                "cost). All inputs are unverified (Evidence tier C). Treat the "
+                "figure as an indicative anchor, not a point of precision."
+            ),
         },
         assumptions=assumptions, evidence_gaps=evidence_gaps, warnings=warnings, formula_trace=formula_trace,
     )
@@ -1251,6 +1421,14 @@ def _calculate_drc_method(fi: dict, asset_class: str) -> dict:
                 "Depreciated Replacement Cost: land value plus reinstatement "
                 "cost less depreciation, used where no rental or sales market "
                 "exists for the asset."
+            ),
+            "uncertainty_statement": (
+                "Land value, replacement cost, and depreciation are "
+                "user-supplied and unverified — no cost-database (e.g. BCIS) or "
+                "land-comparable verification has occurred, and the figure is "
+                "subject to the adequate-profitability condition in the "
+                "warnings. All inputs are unverified (Evidence tier C). Treat "
+                "the figure as an indicative anchor, not a point of precision."
             ),
         },
     )
