@@ -131,8 +131,9 @@ def get_commercial_valuation(deal_id):
 
     fins = deal.get("financials_json") or {}
     commercial_inputs = (fins.get("inputs") or {}).get("commercial") or {}
+    provenance = (fins.get("inputs") or {}).get("commercial_provenance") or {}
 
-    result = calculate_commercial_ceiling(commercial_inputs)
+    result = calculate_commercial_ceiling(commercial_inputs, provenance=provenance)
     result["deal_id"] = deal_id
     return jsonify(result), 200
 
@@ -177,16 +178,29 @@ def save_commercial_inputs(deal_id):
     merged_commercial = {**existing_commercial, **incoming}
 
     inputs["commercial"] = merged_commercial
+
+    # v2.4 provenance contract: every field arriving from the browser form
+    # is stamped user_entered, SERVER-SIDE — the client cannot assert
+    # "extracted" (any provenance in the request body is ignored: it is not
+    # in the allow-list). Fields the user did NOT touch keep whatever
+    # provenance they had, so extraction-pipeline citations survive until
+    # the person overrides that field, at which point the override is
+    # honestly re-stamped as user-entered.
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+    provenance = inputs.get("commercial_provenance") or {}
+    for field in incoming:
+        provenance[field] = {"source": "user_entered", "at": now_iso}
+    inputs["commercial_provenance"] = provenance
     fins["inputs"] = inputs
 
     # v2.3: compute BEFORE persisting so the audit snapshot of this
     # computation is stored in the same single write as the inputs —
     # institutional record-keeping (what was computed, when, by which
     # engine version). Additive key; nothing else reads it yet.
-    result = calculate_commercial_ceiling(merged_commercial)
+    result = calculate_commercial_ceiling(merged_commercial, provenance=provenance)
     result["deal_id"] = deal_id
 
-    from datetime import datetime, timezone
     outputs = fins.get("outputs") or {}
     outputs["commercial_last"] = {
         "computed_at":         datetime.now(timezone.utc).isoformat(),
