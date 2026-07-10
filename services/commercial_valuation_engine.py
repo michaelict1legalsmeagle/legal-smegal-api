@@ -73,7 +73,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERSION = "commercial_multi_method_v2_3_institutional"
+VERSION = "commercial_multi_method_v2_4_provenance_contract"
 
 # Yield basis — v2.3. The nominal (annually in arrears) convention is the
 # Argus/market default; the TRUE equivalent yield basis (rent received
@@ -323,41 +323,91 @@ def _solve_yield_bisection(target_cv: float, value_at) -> Optional[float]:
     return mid
 
 
-def _evidence_tier(inputs_used: dict) -> dict:
-    """Evidence tier — provenance grade for the supplied inputs, mapped by
-    ANALOGY to the RICS hierarchy of evidence (Category A: direct comparable
-    transactions; B: general/published market data; C: other sources).
+def _evidence_tier(inputs_used: dict, provenance: Optional[dict] = None) -> dict:
+    """Evidence tier — v2.4 two-layer model.
 
-    Phase 1 structural fact: there is no legal-pack extraction or licensed
-    market-data path into the commercial input fields — every supplied value
-    arrived via the input form. So every field's source is user_entered and
-    the tier is C. This is NOT a statistical confidence score (no outcome
-    data exists to derive one); the tier rises only when inputs become
-    evidenced, never by assumption."""
-    sources = {
-        k: "user_entered"
-        for k, v in (inputs_used or {}).items()
-        if v is not None and k != "asset_class"
-    }
-    return {
-        "tier": "C",
-        "tier_label": "Evidence tier C — user-entered inputs, unverified",
-        "basis": (
-            "All supplied inputs are user-entered: this phase has no legal-pack "
-            "extraction or licensed market-data path into commercial fields. By "
+    Layer 1 (the TIER, A/B/C by analogy to the RICS hierarchy of evidence):
+    keyed to the VALUATION-OPINION inputs — above all the yield. The tier
+    stays C while the yield is user-supplied rather than market-derived,
+    regardless of how well the factual inputs are documented, because the
+    hierarchy of evidence is about comparable evidence for the opinion,
+    not about subject-property facts.
+
+    Layer 2 (per-field VERIFICATION): factual inputs (rent, term, review
+    basis, tenure) can be verified against the legal pack by the
+    server-side extraction pipeline, which writes
+    {field: {"source": "extracted", "citation": "..."}} into the
+    provenance map. Anything else — including any value arriving from the
+    browser form, which the routes stamp as user_entered, and any
+    unrecognised source string — is treated as user-entered and
+    unverified. The client can never assert extraction.
+
+    This is a provenance grade, not a statistical confidence score; no
+    outcome data exists to derive one, and none is faked."""
+    prov = provenance if isinstance(provenance, dict) else {}
+    input_sources: dict = {}
+    citations: dict = {}
+    verified_fields: list[str] = []
+    for k, v in (inputs_used or {}).items():
+        if v is None or k == "asset_class":
+            continue
+        entry = prov.get(k)
+        src = entry.get("source") if isinstance(entry, dict) else None
+        if src == "extracted":
+            input_sources[k] = "extracted"
+            verified_fields.append(k)
+            cit = entry.get("citation") if isinstance(entry, dict) else None
+            if cit:
+                citations[k] = str(cit)
+        else:
+            input_sources[k] = "user_entered"
+
+    n_ver = len(verified_fields)
+    if n_ver:
+        tier_label = (
+            f"Evidence tier C — yield unverified; {n_ver} input"
+            f"{'s' if n_ver != 1 else ''} verified against documents"
+        )
+        basis = (
+            "The tier is keyed to the valuation-opinion inputs — above all "
+            "the yield, which is user-supplied, not market-derived, so the "
+            "tier remains C (by analogy to the RICS hierarchy of evidence: "
+            "Category A: direct comparable transactions; B: published market "
+            "data; C: other sources). Separately, the factual inputs listed "
+            "as 'extracted' were read from the uploaded legal pack by the "
+            "extraction pipeline, with citations — facts verified against "
+            "documents, distinct from evidence for the yield. This is a "
+            "provenance grade, not a statistical confidence score."
+        )
+    else:
+        tier_label = "Evidence tier C — user-entered inputs, unverified"
+        basis = (
+            "All supplied inputs are user-entered — none were verified "
+            "against the legal pack by the extraction pipeline, and no "
+            "licensed market-data path into commercial fields exists. By "
             "analogy to the RICS hierarchy of evidence (Category A: direct "
             "comparable transactions; B: published market data; C: other "
             "sources), unverified user inputs sit at Category C. This is a "
             "provenance grade, not a statistical confidence score."
-        ),
-        "input_sources": sources,
+        )
+    out = {
+        "tier": "C",
+        "tier_label": tier_label,
+        "basis": basis,
+        "input_sources": input_sources,
     }
+    if verified_fields:
+        out["verified_fields"] = verified_fields
+    if citations:
+        out["citations"] = citations
+    return out
 
 
 def _ok_result(
     *, valuation_type: str, method: str, inputs_used: dict, valuation_components: dict,
     capital_value: float, assumptions: list[str], evidence_gaps: list[str],
     warnings: list[str], formula_trace: list[str], extra: Optional[dict] = None,
+    provenance: Optional[dict] = None,
 ) -> dict:
     """Shared success-path schema builder. All four RICS method functions
     below call this — a single place the top-level shape is defined means
@@ -386,7 +436,7 @@ def _ok_result(
             "Date this computation ran — not a valuation 'as at' an inspection "
             "date; inputs and market yields move."
         ),
-        "evidence_tier": _evidence_tier(inputs_used),
+        "evidence_tier": _evidence_tier(inputs_used, provenance),
         "audit": {
             "comparable_method":      method,
             "not_rics_valuation":     True,
@@ -406,7 +456,7 @@ def _ok_result(
     return out
 
 
-def calculate_commercial_ceiling(financial_inputs: dict) -> dict:
+def calculate_commercial_ceiling(financial_inputs: dict, provenance: Optional[dict] = None) -> dict:
     """
     Router — dispatches to the RICS valuation method appropriate for the
     deal's asset_class. Each class is valued by a genuinely different RICS
@@ -424,6 +474,12 @@ def calculate_commercial_ceiling(financial_inputs: dict) -> dict:
     default), rather than silently gating a deal on a typo.
     """
     fi = financial_inputs if isinstance(financial_inputs, dict) else {}
+    # v2.4: provenance is server-supplied ONLY (routes stamp user_entered on
+    # every form save; the extraction pipeline writes extracted+citation).
+    # Reserved key is overwritten unconditionally so a value smuggled into
+    # stored inputs can never masquerade as verified provenance.
+    fi = dict(fi)
+    fi["_provenance"] = provenance if isinstance(provenance, dict) else {}
     asset_class = str(fi.get("asset_class") or ASSET_CLASS_INCOME_PRODUCING_LET).strip().lower()
 
     if asset_class == ASSET_CLASS_TRADE_RELATED:
@@ -1041,10 +1097,24 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         "convention — the entered yield must have been analysed on the same "
         "basis or the value will be overstated."
     )
-    unc_parts.append(
-        "No inspection, lease reading, or covenant assessment has occurred — "
-        "all inputs are unverified (Evidence tier C)."
+    _prov = fi.get("_provenance") or {}
+    _n_extracted = sum(
+        1 for _k, _e in _prov.items()
+        if isinstance(_e, dict) and _e.get("source") == "extracted"
     )
+    if _n_extracted:
+        unc_parts.append(
+            f"{_n_extracted} factual input"
+            f"{'s were' if _n_extracted != 1 else ' was'} read from the "
+            "uploaded legal pack with citations; no inspection or covenant "
+            "assessment has occurred, and the yield remains unverified "
+            "(Evidence tier C)."
+        )
+    else:
+        unc_parts.append(
+            "No inspection, lease reading, or covenant assessment has occurred — "
+            "all inputs are unverified (Evidence tier C)."
+        )
     unc_parts.append(
         "Treat the figure as an indicative anchor, not a point of precision."
     )
@@ -1052,6 +1122,7 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
 
     return _ok_result(
         valuation_type="commercial_investment_method",
+        provenance=fi.get("_provenance"),
         method=method,
         inputs_used={
             "passing_rent_pa":      passing_rent,
@@ -1172,6 +1243,7 @@ def _calculate_profits_method(fi: dict, asset_class: str) -> dict:
 
     return _ok_result(
         valuation_type="commercial_profits_method",
+        provenance=fi.get("_provenance"),
         method="profits_method_fmop_multiplier",
         inputs_used={
             "fmop_pa":           fmop,
@@ -1358,6 +1430,7 @@ def _calculate_residual_method(fi: dict, asset_class: str) -> dict:
 
     return _ok_result(
         valuation_type="commercial_residual_method",
+        provenance=fi.get("_provenance"),
         method="residual_method_development_appraisal",
         inputs_used={
             "gdv": gdv, "build_costs_gbp": build_costs,
@@ -1483,6 +1556,7 @@ def _calculate_drc_method(fi: dict, asset_class: str) -> dict:
 
     return _ok_result(
         valuation_type="commercial_drc_method",
+        provenance=fi.get("_provenance"),
         method="drc_contractors_method",
         inputs_used={
             "land_value_gbp": land_value, "gross_replacement_cost_gbp": grc,
