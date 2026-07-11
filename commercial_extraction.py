@@ -70,6 +70,21 @@ not theoretical):
      predates that fix and has no page markers, citations degrade to
      "<file>, page unknown" rather than a fabricated page number.
 
+  5. CROSS-DOCUMENT CONFLICT RULE (S-COMM-P1-CONFLICT, added same session,
+     proven live on a real deal) — a legal pack is not one document, it's
+     several, and they don't always agree. Once the OCR page-boundary fix
+     let the Tenancy Agreement's own scanned cover page actually be read
+     for 13 Harborne Park Road, it stated a materially different passing
+     rent from the pack's separate Rent Statement for the same property.
+     extract_deterministic() now scans every document for every field
+     before deciding anything, and if two documents disagree on the same
+     fact, NEITHER value is written — the field is left out and both
+     values (with citations) go into evidence_gaps instead. The same
+     applies to a pack that states vacant possession in one document while
+     another states a passing rent: that contradiction is surfaced rather
+     than quietly picking the rent figure. Resolving which of two real
+     documents is correct is a human decision, not an automated one.
+
 WHAT THIS MODULE DELIBERATELY DOES NOT DO
   - Does not extract yield, market_rent_pa, or any figure requiring market
     judgement — legal packs don't contain those; they must stay
@@ -92,11 +107,17 @@ STATUS: the deterministic layer (extract_deterministic, below) and the
 server-side term guard (compute_unexpired_term_years) were run against
 three real legal packs during this build and produced correct output
 including both trap cases, cited to the correct page in every case. The
-LLM layer (extract_via_llm) could not be live-tested in the build sandbox
-(no ANTHROPIC_API_KEY / no network path to api.anthropic.com there) — it
-follows the existing _llm_json_anthropic() calling convention from app.py
-exactly, but needs a real run against a live deal before being trusted the
-same way. Treat it as unverified until that happens.
+conflict-detection logic (rule 5) was added after a live deploy surfaced a
+genuine rent conflict on 13 Harborne Park Road, and was verified with two
+targeted tests: a synthetic second rent figure appended to the real Lot 4
+pack (correctly withheld passing_rent_pa, correctly cited both values),
+and a synthetic rent statement appended to the real vacant Lot 6 pack
+(correctly withheld passing_rent_pa, correctly flagged the vacant/let
+contradiction). The LLM layer (extract_via_llm) has since been run once
+live, against a real deal (73b21ec9-7064-432b-a772-7e3653bb1a01), and its
+own date-arithmetic guard fired correctly on that run — but its new
+conflicts-reporting addition (rule 6 in the system prompt) has not yet
+been proven live and should be treated as unverified until it has.
 """
 
 import re
@@ -121,7 +142,7 @@ _TENURE_PATTERNS = [
     (r"title\s*\n?\s*leasehold\s+title", "Leasehold"),
 ]
 _RENT_PATTERN = re.compile(
-    r"rent\s+of\s+£\s?([\d,]+(?:\.\d{2})?)\s+per\s+annum", re.IGNORECASE
+    r"rent\s*(?:of|:)\s*£\s?([\d,]+(?:\.\d{2})?)\s+per\s+annum", re.IGNORECASE
 )
 _REVIEW_PATTERN = re.compile(r"\(([^()]*review[^()]*)\)", re.IGNORECASE)
 _VACANT_PATTERN = re.compile(r"vacant\s+possession", re.IGNORECASE)
@@ -149,15 +170,30 @@ def extract_deterministic(documents: list) -> tuple:
     (text should carry '=== PAGE N ===' markers from the fixed extraction
     service, but degrades gracefully if it doesn't).
 
-    Returns (fields: dict, citations: dict). Stops at the first match per
-    field across documents — the Rent Statement / Special Conditions
-    document that carries these facts is a single-source-of-truth document
-    in every pack tested; a second, later match is far more likely to be
-    boilerplate than a genuinely different fact, so first-match wins
-    rather than silently overwriting with something less reliable.
+    S-COMM-P1-CONFLICT (2026-07-11): scans EVERY document for every field,
+    rather than stopping at the first match. Found by testing Lot 4 (13
+    Harborne Park Road) once the Tenancy document's scanned pages could
+    actually be OCR'd: the Rent Statement states one passing rent, and the
+    Tenancy Agreement's own cover page — once genuinely readable — states
+    a materially different figure for the same property. First-match-wins
+    would have silently picked whichever document happened to be iterated
+    first (an accident of list order, not a judgement about which document
+    is more reliable) and never surfaced that the pack disagrees with
+    itself. That is exactly the kind of silent wrong-number risk the
+    no-fabrication doctrine exists to prevent — a confidently-written
+    figure is worse than an absent one if it's the wrong one of two real
+    candidates.
+
+    Returns (fields: dict, citations: dict, conflicts: list[str]).
+    A field is only written when every document that states it agrees on
+    the same value. When two or more documents disagree, the field is
+    left OUT of `fields` entirely and a description of the conflict
+    (both values, both citations) is added to `conflicts` — never averaged,
+    never resolved by picking one, since neither this function nor an LLM
+    has the standing to decide which of two real documents is correct.
+    That decision belongs to a person looking at the actual pages.
     """
-    fields: dict = {}
-    citations: dict = {}
+    matches: dict = {}  # field -> list of (value, citation), in document order
     for doc in documents:
         fname = doc.get("file_name", "unknown")
         text = doc.get("text") or ""
@@ -165,39 +201,57 @@ def extract_deterministic(documents: list) -> tuple:
             continue
         low = text.lower()
 
-        if "tenure" not in fields:
-            for pat, val in _TENURE_PATTERNS:
-                m = re.search(pat, low)
-                if m:
-                    fields["tenure"] = val
-                    citations["tenure"] = _citation(fname, _find_page(text, m.start()))
-                    break
-
-        if "passing_rent_pa" not in fields:
-            m = _RENT_PATTERN.search(text)
+        for pat, val in _TENURE_PATTERNS:
+            m = re.search(pat, low)
             if m:
-                fields["passing_rent_pa"] = float(m.group(1).replace(",", ""))
-                page = _find_page(text, m.start())
-                citations["passing_rent_pa"] = _citation(fname, page)
-                window = text[m.end(): m.end() + 120]
-                rm = _REVIEW_PATTERN.search(window)
-                if rm:
-                    fields["rent_review_basis"] = rm.group(1).strip()
-                    citations["rent_review_basis"] = _citation(fname, page)
+                matches.setdefault("tenure", []).append(
+                    (val, _citation(fname, _find_page(text, m.start())))
+                )
+                break  # one tenure statement per document is enough
 
-        if "_vacant_possession" not in fields:
-            m = _VACANT_PATTERN.search(text)
-            if m:
-                # Internal signal only — not one of EXTRACTABLE_FIELDS, so
-                # it never gets written to financials_json. It exists so
-                # the LLM layer and the caller both know NOT to go looking
-                # for a passing rent that the deterministic layer correctly
-                # didn't find, rather than treating that absence as a gap
-                # to fill.
-                fields["_vacant_possession"] = True
-                citations["_vacant_possession"] = _citation(fname, _find_page(text, m.start()))
+        m = _RENT_PATTERN.search(text)
+        if m:
+            val = float(m.group(1).replace(",", ""))
+            page = _find_page(text, m.start())
+            matches.setdefault("passing_rent_pa", []).append((val, _citation(fname, page)))
+            window = text[m.end(): m.end() + 120]
+            rm = _REVIEW_PATTERN.search(window)
+            if rm:
+                matches.setdefault("rent_review_basis", []).append(
+                    (rm.group(1).strip(), _citation(fname, page))
+                )
 
-    return fields, citations
+        m = _VACANT_PATTERN.search(text)
+        if m:
+            matches.setdefault("_vacant_possession", []).append(
+                (True, _citation(fname, _find_page(text, m.start())))
+            )
+
+    fields: dict = {}
+    citations: dict = {}
+    conflicts: list = []
+
+    for field, found in matches.items():
+        distinct: list = []
+        for val, cite in found:
+            if val not in [v for v, _ in distinct]:
+                distinct.append((val, cite))
+        if len(distinct) == 1:
+            fields[field] = distinct[0][0]
+            citations[field] = distinct[0][1]
+        else:
+            # More than one distinct value found across documents for the
+            # same fact. _vacant_possession is boolean-only (True or
+            # nothing is ever recorded, so this branch can't fire for it)
+            # -- this is real for tenure / passing_rent_pa / rent_review_basis.
+            detail = "; ".join(f"{v!r} ({c})" for v, c in distinct)
+            conflicts.append(
+                f"Conflicting values found for {field} across documents: "
+                f"{detail} — needs manual review; nothing written "
+                f"automatically for this field."
+            )
+
+    return fields, citations, conflicts
 
 
 def compute_unexpired_term_years(lease_start_iso: str, lease_term_years: float,
@@ -247,12 +301,14 @@ CRITICAL RULES:
 3. Do NOT infer a fact from a document title or file name alone — extract only from the body text.
 4. If a document shows a registered leasehold title belonging to a TENANT (an "LH register" or similar), that is the tenant's own interest, not necessarily related to what is being sold. Only use it as a source for tenant_name / lease_start_date / lease_term_years, never for the tenure of the sale.
 5. If nothing in the provided text supports a field, omit it entirely. Do not guess, estimate, or use general market knowledge.
+6. If two documents state DIFFERENT values for the same fact (e.g. two different tenant names, or two different start dates for what appears to be the same tenancy), do NOT pick one — report it in "conflicts" instead, describing both values and which document/page each came from. Do not silently resolve a conflict yourself.
 
 Return ONLY valid JSON, no prose, no markdown fences:
 {
   "tenant_name": {"value": "...", "citation": "<file name>, page N"} or null,
   "lease_start_date": {"value": "YYYY-MM-DD", "citation": "<file name>, page N"} or null,
-  "lease_term_years": {"value": number, "citation": "<file name>, page N"} or null
+  "lease_term_years": {"value": number, "citation": "<file name>, page N"} or null,
+  "conflicts": ["description of any contradictory facts noticed, with both citations"]
 }"""
 
 
@@ -269,11 +325,14 @@ def extract_via_llm(documents: list, already_found: dict) -> tuple:
     left for it to usefully find (keeps cost down; the LLM never overrides
     a deterministic match, it only fills genuine gaps).
 
-    Returns (raw_facts: dict, citations: dict) where raw_facts may contain
-    tenant_name (final, allow-listed) and lease_start_date/lease_term_years
-    (intermediate only — consumed by compute_unexpired_term_years, never
-    written directly to financials_json since they aren't in the
-    engine's allow-list).
+    Returns (raw_facts: dict, citations: dict, conflicts: list[str]) where
+    raw_facts may contain tenant_name (final, allow-listed) and
+    lease_start_date/lease_term_years (intermediate only — consumed by
+    compute_unexpired_term_years, never written directly to
+    financials_json since they aren't in the engine's allow-list).
+    conflicts is the model's own report of contradictory facts it noticed
+    across documents (see rule 6 in _LLM_SYSTEM_PROMPT) — folded into the
+    caller's evidence_gaps alongside the deterministic layer's conflicts.
     """
     from app import _llm_json_anthropic  # lazy import — avoids circular import at load time
 
@@ -300,7 +359,7 @@ def extract_via_llm(documents: list, already_found: dict) -> tuple:
     combined = "".join(parts)
 
     if not combined.strip():
-        return {}, {}
+        return {}, {}, []
 
     try:
         result = _llm_json_anthropic(
@@ -312,7 +371,7 @@ def extract_via_llm(documents: list, already_found: dict) -> tuple:
         # Degrade gracefully — a failed LLM call must never block the
         # deterministic fields (tenure, passing rent) that already
         # succeeded. Caller proceeds with whatever it already has.
-        return {}, {}
+        return {}, {}, []
 
     fields: dict = {}
     citations: dict = {}
@@ -321,7 +380,9 @@ def extract_via_llm(documents: list, already_found: dict) -> tuple:
         if isinstance(entry, dict) and entry.get("value") is not None and entry.get("citation"):
             fields[key] = entry["value"]
             citations[key] = str(entry["citation"])
-    return fields, citations
+    conflicts = [str(c) for c in (result.get("conflicts") or []) if isinstance(result, dict)] \
+        if isinstance(result, dict) else []
+    return fields, citations, conflicts
 
 
 def extract_commercial_fields(documents: list, today: date = None) -> dict:
@@ -341,11 +402,33 @@ def extract_commercial_fields(documents: list, today: date = None) -> dict:
     """
     evidence_gaps: list = []
 
-    det_fields, det_citations = extract_deterministic(documents)
+    det_fields, det_citations, det_conflicts = extract_deterministic(documents)
     vacant = det_fields.pop("_vacant_possession", False)
-    det_citations.pop("_vacant_possession", None)
+    vacant_citation = det_citations.pop("_vacant_possession", None)
+    evidence_gaps.extend(det_conflicts)
 
-    llm_fields, llm_citations = extract_via_llm(documents, det_fields)
+    # S-COMM-P1-CONFLICT: a pack stating vacant possession while some
+    # document also states a passing rent is itself a contradiction —
+    # distinct from two documents disagreeing on the rent AMOUNT (handled
+    # above by the conflict-detection in extract_deterministic). This is
+    # "is there a tenancy at all", and it needs a person's eyes just as
+    # much as a numeric mismatch does.
+    vacant_rent_conflict = vacant and "passing_rent_pa" in det_fields
+    if vacant_rent_conflict:
+        withheld_rent = det_fields.pop("passing_rent_pa")
+        withheld_citation = det_citations.pop("passing_rent_pa", "unknown")
+        det_fields.pop("rent_review_basis", None)
+        det_citations.pop("rent_review_basis", None)
+        evidence_gaps.append(
+            f"Pack states vacant possession ({vacant_citation}) but a passing "
+            f"rent of £{withheld_rent:,.2f} was also found ({withheld_citation}) "
+            f"— these contradict each other, so passing_rent_pa was NOT "
+            f"written; needs a person to confirm whether the property is "
+            f"actually let or vacant before either figure is used."
+        )
+
+    llm_fields, llm_citations, llm_conflicts = extract_via_llm(documents, det_fields)
+    evidence_gaps.extend(llm_conflicts)
 
     # Deterministic never gets overridden — only fill genuine gaps.
     tenant_name = llm_fields.get("tenant_name")
@@ -362,7 +445,7 @@ def extract_commercial_fields(documents: list, today: date = None) -> dict:
     if "passing_rent_pa" in det_fields:
         fields["passing_rent_pa"] = det_fields["passing_rent_pa"]
         citations["passing_rent_pa"] = det_citations["passing_rent_pa"]
-    elif vacant:
+    elif vacant and not vacant_rent_conflict:
         evidence_gaps.append(
             "Pack states vacant possession and no passing rent was found — "
             "passing_rent_pa left unset rather than assumed."
