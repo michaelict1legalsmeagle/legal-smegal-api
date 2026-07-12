@@ -251,6 +251,48 @@ financials_json.inputs.commercial, blocking that deal from ever being
 usable as a genuine untouched test case for the write path per the
 never-overwrite-user_entered rule. Cleared directly in Supabase, not via
 this module (this module never touches the database itself).
+
+TWO MORE FIXES, same session, found by running the updated module
+against a brand new real deal (1 Oxford Street and 171 Stockton Road,
+Hartlepool — a receiver's sale, RICS Common Auction Conditions 4th
+Edition, Addleshaw Goddard template):
+
+  13. S-COMM-P1-TENURE3 — added "title to the lot is freehold/leasehold"
+      to _TENURE_PATTERNS. This exact RICS CAC template's Extra Special
+      Conditions clause 4 ("Title to the lot is freehold and is
+      registered at the Land Registry...") matched none of the existing
+      patterns — a third distinct real-world tenure phrasing, after the
+      "sold freehold" prose and the "Freehold/Leasehold:" particulars
+      field. This specific Addleshaw Goddard / RICS CAC 4th Edition
+      template is common enough that it will very likely recur.
+
+  14. S-COMM-P1-VACANT3 — added a negation guard (_VACANT_NEGATION_RE) to
+      vacant detection. Found live: the same Hartlepool pack's standard
+      conditions include "(b) in condition G1.2 the words ', but
+      otherwise with vacant possession on completion' are deleted" — a
+      clause confirming the property IS tenanted (that's precisely why
+      the standard vacant-possession term has to be struck from the
+      contract), but which contains the literal substring "vacant
+      possession" and would have been mismarked as an assertion of
+      vacancy. Now checks a bounded window after each match for
+      deletion/exclusion language ("are deleted", "does not apply",
+      "removed", "excluded") before accepting it. Verified against both
+      the real negated clause (correctly excluded) and a genuine
+      assertion ("the property is sold with vacant possession on
+      completion" — correctly still fires).
+
+  Full four-deal regression suite (Snow Hill, Brierley Hill, Smethwick,
+  13 Harborne Park Road) plus all PCM/AST/intra-document guard-rail tests
+  re-run clean after both fixes. The Hartlepool pack itself: tenure
+  correctly extracts "Freehold" (cited to the clause 4 sentence);
+  passing_rent_pa correctly stays absent (the pack's own tenancy and
+  arrears schedules are blank tables, and a full-text search confirms
+  zero "per annum" or monthly-rent mentions anywhere in the 19-document
+  pack) — consistent with the Receivers Note's own "occupied on terms
+  unknown ... no further information" disclosure. No fabrication either
+  way: a real, present tenancy with genuinely unknown terms correctly
+  produces no rent figure and no false vacancy flag, rather than either
+  guessing a number or wrongly implying the property is empty.
 """
 
 import re
@@ -273,6 +315,8 @@ _TENURE_PATTERNS = [
     (r"sold\s+leasehold", "Leasehold"),
     (r"title\s*\n?\s*freehold\s+title", "Freehold"),
     (r"title\s*\n?\s*leasehold\s+title", "Leasehold"),
+    (r"title\s+to\s+the\s+lot\s+is\s+freehold", "Freehold"),
+    (r"title\s+to\s+the\s+lot\s+is\s+leasehold", "Leasehold"),
 ]
 
 # S-COMM-P1-TENURE2 (2026-07-12): found by testing two real packs (Unit 12
@@ -295,6 +339,20 @@ _RENT_PATTERN = re.compile(
 )
 _REVIEW_PATTERN = re.compile(r"\(([^()]*review[^()]*)\)", re.IGNORECASE)
 _VACANT_PATTERN = re.compile(r"vacant\s+possession|currently\s+vacant\b", re.IGNORECASE)
+# A "vacant possession"/"currently vacant" match doesn't always assert
+# vacancy -- auction conditions routinely quote the STANDARD contract
+# wording only to delete or exclude it, e.g. "...the words ', but
+# otherwise with vacant possession on completion' are deleted" is a
+# receiver's-sale clause confirming the property is TENANTED (that's
+# precisely why the standard vacant-possession term has to be struck).
+# Checked in a bounded window immediately after the match, matching the
+# "nearest label" idiom already used for the monthly-rent check above.
+_VACANT_NEGATION_RE = re.compile(
+    r"\b(?:are|is|shall\s+be|were)\s+deleted\b|\bdoes\s+not\s+apply\b|"
+    r"\bnot\s+applicable\b|\bremoved\b|\bexcluded\b|\bstruck\s+out\b",
+    re.IGNORECASE,
+)
+_VACANT_NEGATION_WINDOW_CHARS = 80
 
 # S-COMM-P1-MONTHLY (2026-07-12): found by testing a real pack (28B Snow
 # Hill) where the only recurring-payment figure in the whole document set
@@ -539,11 +597,14 @@ def extract_deterministic(documents: list) -> tuple:
                         (True, _citation(fname, page))
                     )
 
-        m = _VACANT_PATTERN.search(text)
-        if m:
+        for vm in _VACANT_PATTERN.finditer(text):
+            lookahead = text[vm.end(): vm.end() + _VACANT_NEGATION_WINDOW_CHARS]
+            if _VACANT_NEGATION_RE.search(lookahead):
+                continue  # this occurrence describes the term being deleted/excluded, not asserted
             matches.setdefault("_vacant_possession", []).append(
-                (True, _citation(fname, _find_page(text, m.start())))
+                (True, _citation(fname, _find_page(text, vm.start())))
             )
+            break  # boolean field -- one confirmed (non-negated) hit is enough
 
     fields: dict = {}
     citations: dict = {}
