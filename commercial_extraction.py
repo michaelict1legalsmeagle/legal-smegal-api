@@ -85,6 +85,22 @@ not theoretical):
      than quietly picking the rent figure. Resolving which of two real
      documents is correct is a human decision, not an automated one.
 
+  6. MONTHLY-RENT RULE (S-COMM-P1-MONTHLY, added same session) — found by
+     testing a real pack (28B Snow Hill) where the only recurring-payment
+     figure in the whole document set was a Licence Fee stated as "£600.00
+     per calendar month" — a figure the per-annum-only pattern could never
+     see. Monthly figures are annualised (×12) and the citation says so
+     explicitly. Because a monthly figure's label is often several words
+     away from the amount (unlike the tightly-bound per-annum pattern),
+     this required a second check: a monthly SERVICE CHARGE reads almost
+     identically to monthly rent, so a figure is only accepted when the
+     NEAREST preceding label is "rent" or "licence/license fee" — not
+     "service charge", "insurance", "deposit", or "premium". If the
+     source document is itself a Licence (not a formal Lease), an
+     evidence_gap says so: a licence fee is not the same legal instrument
+     as lease passing rent and shouldn't be treated as equivalent income
+     security without that caveat.
+
 WHAT THIS MODULE DELIBERATELY DOES NOT DO
   - Does not extract yield, market_rent_pa, or any figure requiring market
     judgement — legal packs don't contain those; they must stay
@@ -113,10 +129,21 @@ targeted tests: a synthetic second rent figure appended to the real Lot 4
 pack (correctly withheld passing_rent_pa, correctly cited both values),
 and a synthetic rent statement appended to the real vacant Lot 6 pack
 (correctly withheld passing_rent_pa, correctly flagged the vacant/let
-contradiction). The LLM layer (extract_via_llm) has since been run once
-live, against a real deal (73b21ec9-7064-432b-a772-7e3653bb1a01), and its
-own date-arithmetic guard fired correctly on that run — but its new
-conflicts-reporting addition (rule 6 in the system prompt) has not yet
+contradiction). The monthly-rent logic (rule 6) was added after a real
+pack (28B Snow Hill) turned out to have no per-annum figure anywhere at
+all; verified against that real Licence document (correctly annualised
+£600pcm to £7,200pa with the licence caveat) plus four synthetic
+guard-rail tests: a monthly service charge is correctly NOT mistaken for
+rent; an ordinary monthly tenancy rent is correctly annualised WITHOUT the
+licence caveat; a document with both a monthly rent and a monthly service
+charge correctly picks the rent; and — the trickiest case — a document
+where "rent" is mentioned earlier in the text than a service-charge label
+still correctly excludes the service-charge figure, because the nearest
+preceding label governs, not the first-seen one. The LLM layer
+(extract_via_llm) has since been run once live, against a real deal
+(73b21ec9-7064-432b-a772-7e3653bb1a01), and its own date-arithmetic guard
+fired correctly on that run — but its conflicts-reporting addition (rule 6
+in the system prompt, unrelated numbering to rule 6 above) has not yet
 been proven live and should be treated as unverified until it has.
 """
 
@@ -146,6 +173,55 @@ _RENT_PATTERN = re.compile(
 )
 _REVIEW_PATTERN = re.compile(r"\(([^()]*review[^()]*)\)", re.IGNORECASE)
 _VACANT_PATTERN = re.compile(r"vacant\s+possession", re.IGNORECASE)
+
+# S-COMM-P1-MONTHLY (2026-07-12): found by testing a real pack (28B Snow
+# Hill) where the only recurring-payment figure in the whole document set
+# is a Licence Fee stated as "£600.00 per calendar month" -- the per-annum
+# pattern above can never match this, so the field was silently absent
+# even though a real, extractable figure was sitting right there. Unlike
+# the per-annum pattern, a monthly figure's label is often several words
+# or a line away from the amount (e.g. '"Licence Fee"\n£600.00 per
+# calendar month'), so this can't require strict adjacency the way the
+# per-annum pattern does -- it looks backward through a bounded window
+# instead. That widened search window is exactly why a second, disjoint
+# pattern for exclusions was needed: monthly SERVICE CHARGES are common in
+# the same documents and read almost identically ("...£150 per calendar
+# month...") -- mistaking one for rent would be a real fabrication risk,
+# not a cosmetic one.
+_RENT_MONTHLY_PATTERN = re.compile(
+    r"£\s?([\d,]+(?:\.\d{2})?)\s+per\s+(?:calendar\s+)?month\b", re.IGNORECASE
+)
+_MONTHLY_LABEL_RE = re.compile(r"\b(rent|licen[cs]e fee)\b", re.IGNORECASE)
+_MONTHLY_EXCLUDE_RE = re.compile(
+    r"\b(service charge|insurance|deposit|premium)\b", re.IGNORECASE
+)
+_MONTHLY_LOOKBACK_CHARS = 150
+
+
+def _find_monthly_rent(text: str) -> list:
+    """Find monthly rent/licence-fee figures in `text` and return the
+    regex match objects that pass the label/exclusion check (see
+    S-COMM-P1-MONTHLY above). For each "£X per (calendar) month" hit,
+    looks backward up to 150 chars for the nearest label word: if the
+    nearest is 'rent' or 'licence/license fee', the match is accepted; if
+    the nearest is 'service charge' / 'insurance' / 'deposit' / 'premium',
+    or no label word appears at all in that window, the match is rejected.
+    'Nearest' is deliberately by position, not by any keyword ranking --
+    whichever label word sits closest to the amount is the one describing
+    it, the same way a human reader would parse the sentence."""
+    accepted = []
+    for m in _RENT_MONTHLY_PATTERN.finditer(text):
+        window = text[max(0, m.start() - _MONTHLY_LOOKBACK_CHARS): m.start()]
+        labels = list(_MONTHLY_LABEL_RE.finditer(window))
+        excludes = list(_MONTHLY_EXCLUDE_RE.finditer(window))
+        if not labels:
+            continue
+        nearest_label_pos = labels[-1].start()
+        nearest_exclude_pos = excludes[-1].start() if excludes else -1
+        if nearest_exclude_pos > nearest_label_pos:
+            continue  # an exclusion word sits closer to the amount than a rent/fee word
+        accepted.append(m)
+    return accepted
 
 
 def _find_page(text_with_markers: str, match_start: int):
@@ -220,6 +296,33 @@ def extract_deterministic(documents: list) -> tuple:
                 matches.setdefault("rent_review_basis", []).append(
                     (rm.group(1).strip(), _citation(fname, page))
                 )
+        else:
+            # No per-annum figure in this document -- try the monthly
+            # fallback before giving up on it entirely (S-COMM-P1-MONTHLY).
+            monthly_hits = _find_monthly_rent(text)
+            if monthly_hits:
+                mm = monthly_hits[0]  # first accepted hit in this document
+                monthly_val = float(mm.group(1).replace(",", ""))
+                annual_val = round(monthly_val * 12, 2)
+                page = _find_page(text, mm.start())
+                cite = (
+                    f"{_citation(fname, page)} "
+                    f"(annualised from £{monthly_val:,.2f} per calendar month)"
+                )
+                matches.setdefault("passing_rent_pa", []).append((annual_val, cite))
+                # A Licence Fee is not the same legal instrument as lease
+                # passing rent -- a licence is a personal permission to
+                # occupy, generally easier to terminate and not binding on
+                # successors the way a lease is. Treating it as equivalent
+                # security of income without saying so would overstate
+                # what the figure actually represents. Checked against the
+                # start of THIS document only (not the whole pack) so the
+                # caveat is tied to the document the figure actually came
+                # from, not to a licence appearing elsewhere in the pack.
+                if re.search(r"\blicen[cs]e\b", text[:500], re.IGNORECASE):
+                    matches.setdefault("_licence_not_lease_gap", []).append(
+                        (True, _citation(fname, page))
+                    )
 
         m = _VACANT_PATTERN.search(text)
         if m:
@@ -405,6 +508,8 @@ def extract_commercial_fields(documents: list, today: date = None) -> dict:
     det_fields, det_citations, det_conflicts = extract_deterministic(documents)
     vacant = det_fields.pop("_vacant_possession", False)
     vacant_citation = det_citations.pop("_vacant_possession", None)
+    licence_not_lease = det_fields.pop("_licence_not_lease_gap", False)
+    licence_citation = det_citations.pop("_licence_not_lease_gap", None)
     evidence_gaps.extend(det_conflicts)
 
     # S-COMM-P1-CONFLICT: a pack stating vacant possession while some
@@ -429,6 +534,22 @@ def extract_commercial_fields(documents: list, today: date = None) -> dict:
 
     llm_fields, llm_citations, llm_conflicts = extract_via_llm(documents, det_fields)
     evidence_gaps.extend(llm_conflicts)
+
+    # S-COMM-P1-MONTHLY: a passing rent sourced from a Licence (not a
+    # formal Lease) needs saying so -- a licence is a personal permission
+    # to occupy, generally easier to terminate than a lease and not
+    # binding on successors in title the same way. Only relevant if the
+    # figure is actually going to be written (it won't be if the vacant/
+    # rent contradiction above already withheld it).
+    if licence_not_lease and "passing_rent_pa" in det_fields:
+        evidence_gaps.append(
+            f"passing_rent_pa was sourced from a Licence, not a formal Lease "
+            f"({licence_citation}) — a licence fee is not the same legal "
+            f"instrument as lease passing rent (generally easier to "
+            f"terminate, not binding on successors the same way); treat "
+            f"the income security accordingly, not as equivalent to a "
+            f"standard FRI lease."
+        )
 
     # Deterministic never gets overridden — only fill genuine gaps.
     tenant_name = llm_fields.get("tenant_name")
