@@ -11,6 +11,19 @@
 # STRIPE_SECRET_KEY     = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
 # STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
 
+# ── PRICE → PLAN MAPPING (single source of truth) ────────────────────────────
+# S-AUDIT-1 (Stripe entitlement fix): this map is the ONLY place plan names are
+# derived from. Neither checkout creation nor the webhook trust a client- or
+# metadata-supplied `plan` string anymore — plan is always looked up from the
+# Stripe price ID that was actually confirmed purchased.
+PRICE_TO_PLAN = {
+    "price_1SGKAuACdQXaNPBV6Sxywnd4":    "report",
+    "price_1TjH94ACdQXaNPBV4urMtc8o":    "starter",
+    "price_1TjHA7ACdQXaNPBVTEemQBvu":    "professional",
+    "price_1TjHAjACdQXaNPBVV6RUBg5q":    "portfolio",
+}
+
+
 # ── CREATE CHECKOUT SESSION ──────────────────────────────────────────────────
 @app.route("/api/billing/checkout", methods=["POST"])
 @require_auth
@@ -24,13 +37,22 @@ def create_checkout():
     data       = request.get_json(silent=True) or {}
     price_id   = data.get("price_id")
     mode       = data.get("mode", "subscription")   # "subscription" or "payment"
-    plan       = data.get("plan", "starter")
     deal_id    = data.get("deal_id")
     success_url = data.get("success_url", "https://legalsmegal-frontend.onrender.com/legalsmegal-dashboard.html?upgraded=1")
     cancel_url  = data.get("cancel_url",  "https://legalsmegal-frontend.onrender.com/legalsmegal-card.html")
 
     if not price_id:
         return jsonify({"error": "price_id required"}), 400
+
+    # S-AUDIT-1: price_id must be one we recognise. We no longer accept a
+    # client-supplied `plan` at all — it was possible to pair a cheap price_id
+    # with an expensive plan string and have the webhook trust it verbatim.
+    # The plan the user ends up on is derived exclusively from PRICE_TO_PLAN,
+    # both here (for logging/metadata only) and again at webhook time (for
+    # the actual entitlement write) using Stripe's own confirmed line items.
+    if price_id not in PRICE_TO_PLAN:
+        app.logger.warning(f"[STRIPE] checkout rejected — unrecognised price_id={price_id}")
+        return jsonify({"error": "Unrecognised price_id"}), 400
 
     try:
         # Get or create Stripe customer
@@ -58,7 +80,10 @@ def create_checkout():
             "cancel_url":       cancel_url,
             "metadata": {
                 "user_id":  request.user_id,
-                "plan":     plan,
+                # Informational only — the webhook does NOT trust this value.
+                # It re-derives the plan from the actual Stripe line items on
+                # the completed session before writing any entitlement.
+                "plan":     PRICE_TO_PLAN[price_id],
                 "deal_id":  deal_id or "",
             },
         }
@@ -96,24 +121,47 @@ def stripe_webhook():
     event_type = event["type"]
     app.logger.info(f"[STRIPE] event={event_type}")
 
-    # Map Stripe plan to internal plan name
-    PLAN_MAP = {
-        "price_1SGKAuACdQXaNPBV6Sxywnd4":       "report",
-        "price_1TjH94ACdQXaNPBV4urMtc8o":      "starter",
-        "price_1TjHA7ACdQXaNPBVTEemQBvu": "professional",
-        "price_1TjHAjACdQXaNPBVV6RUBg5q":    "portfolio",
-    }
-
     if event_type == "checkout.session.completed":
         session  = event["data"]["object"]
         user_id  = session.get("metadata", {}).get("user_id")
-        plan     = session.get("metadata", {}).get("plan", "starter")
         deal_id  = session.get("metadata", {}).get("deal_id") or None
         sub_id   = session.get("subscription")
         customer = session.get("customer")
 
         if not user_id:
             app.logger.warning("[STRIPE] checkout.session.completed missing user_id")
+            return jsonify({"received": True}), 200
+
+        # S-AUDIT-1: derive plan from what Stripe confirms was actually
+        # purchased on THIS session — never from metadata, which is
+        # attacker-influenceable at checkout-creation time. list_line_items
+        # hits Stripe's API directly, so this reflects the real charge.
+        plan = None
+        try:
+            line_items = _stripe.checkout.Session.list_line_items(session["id"], limit=10)
+            purchased_price_ids = {
+                item["price"]["id"] for item in line_items.get("data", [])
+                if item.get("price", {}).get("id")
+            }
+            resolved_plans = {PRICE_TO_PLAN[p] for p in purchased_price_ids if p in PRICE_TO_PLAN}
+            if len(resolved_plans) == 1:
+                plan = resolved_plans.pop()
+            else:
+                app.logger.error(
+                    f"[STRIPE] could not resolve a single plan for session={session['id']} "
+                    f"— purchased_price_ids={purchased_price_ids} resolved={resolved_plans}"
+                )
+        except Exception as e:
+            app.logger.error(f"[STRIPE] list_line_items failed for session={session['id']}: {e}")
+
+        if plan is None:
+            # Fail SAFE, not fail open: an unrecognised or ambiguous purchase
+            # must never silently grant entitlement. No plan is written; this
+            # event needs manual review in the Stripe dashboard.
+            app.logger.error(
+                f"[STRIPE] REFUSING to grant entitlement — session={session['id']} "
+                f"user={user_id} plan could not be verified from line items"
+            )
             return jsonify({"received": True}), 200
 
         try:

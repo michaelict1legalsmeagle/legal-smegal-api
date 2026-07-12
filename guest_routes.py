@@ -64,6 +64,17 @@ except ImportError:
 guest_bp = Blueprint("guest2", __name__)
 logger   = logging.getLogger(__name__)
 
+
+def _mask_email(email: str) -> str:
+    """S-AUDIT-3: guest email addresses were being written to production
+    logs in full plaintext. Log lines only need enough to correlate/debug
+    a specific event, not the full address."""
+    if not email or "@" not in email:
+        return "***"
+    local, _, domain = email.partition("@")
+    masked_local = (local[0] + "***") if local else "***"
+    return f"{masked_local}@{domain}"
+
 # ── Config ───────────────────────────────────────────────────────────────────
 STRIPE_SECRET       = (os.getenv("STRIPE_SECRET_KEY")            or "").strip()
 STRIPE_WH_SECRET    = (os.getenv("STRIPE_GUEST_WEBHOOK_SECRET")  or "").strip()
@@ -655,7 +666,7 @@ def _send_report_email(to_email: str, address: str, report_url: str, pdf_bytes: 
             }, timeout=30,
         )
         if resp.status_code in (200, 201):
-            logger.info(f"[guest2] Email sent to {to_email}"); return True
+            logger.info(f"[guest2] Email sent to {_mask_email(to_email)}"); return True
         logger.warning(f"[guest2] Resend {resp.status_code}: {resp.text[:200]}"); return False
     except Exception as e:
         logger.warning(f"[guest2] Email error: {e}"); return False
@@ -738,7 +749,7 @@ def guest2_create_session():
     session_id = secrets.token_hex(16)
     if not _session_create(session_id, email):
         return jsonify({"error": "Could not create session"}), 500
-    logger.info(f"[guest2] Session created: {session_id} for {email}")
+    logger.info(f"[guest2] Session created: {session_id} for {_mask_email(email)}")
     return jsonify({"ok": True, "session_id": session_id}), 201
 
 
