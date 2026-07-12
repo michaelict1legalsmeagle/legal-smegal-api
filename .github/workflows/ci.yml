@@ -1,0 +1,63 @@
+name: CI
+
+# S-AUDIT-7: the only existing workflow (main.yml) is a manually-triggered
+# data backfill — nothing ran on pushes or pull requests, so a broken commit
+# (e.g. the auction_scraper NameError, or a syntax error) could merge and
+# deploy with zero automated warning. This workflow is the gate that was
+# missing: it runs the real test suite, a compile check across every Python
+# file, and a dependency vulnerability scan on every push and PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest beautifulsoup4
+
+      - name: Compile check (catches syntax errors like the auction_scraper NameError class of bug)
+        run: |
+          python -m compileall -q . -x '(venv|\.venv|__pycache__)'
+
+      - name: Run test suite
+        run: python -m pytest -v
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Dependency vulnerability scan
+        # This is not decorative: a routine audit of this exact repo's pins
+        # turned up 9 real, current CVEs (flask, requests, flask-cors,
+        # pdfminer-six via pdfplumber) that predate this workflow existing.
+        # Fails the build on any known vulnerability in requirements.txt.
+        run: pip-audit -r requirements.txt
