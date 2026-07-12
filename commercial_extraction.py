@@ -174,6 +174,83 @@ NOT excluded. The LLM layer
 fired correctly on that run — but its conflicts-reporting addition (rule 6
 in the system prompt, unrelated numbering to rule 6 above) has not yet
 been proven live and should be treated as unverified until it has.
+
+THREE FURTHER FIXES ADDED 2026-07-12, verified against real document text
+pulled directly from Supabase for the three deals that had only ever been
+analysed locally (28B Snow Hill, Unit 12 Premier Partnership Estate
+Brierley Hill, 68 & 68A Three Shires Oak Road Smethwick) — not yet proven
+through a live /extract call, since that requires app.py/the Render
+route and wasn't reachable from the sandbox this fix was built in:
+
+  8. S-COMM-P1-PCM — "pcm" added to the monthly-rent pattern (deferred
+     until rule 7/AST landed; it now has, and the AST check runs before
+     this pattern on every document, so a residential PCM figure is
+     excluded before it's ever seen here). Verified: Snow Hill's real
+     licence fee ("£600.00 per calendar month") still annualises
+     correctly (unaffected — it already matched the spelled-out form);
+     confirmed the Smethwick pack's AST clause never reaches this pattern
+     regardless, since _is_residential_ast() already excludes the whole
+     document first.
+
+  9. S-COMM-P1-TENURE2 — new structured pattern for the Auction Contract
+     particulars field "Freehold/Leasehold:\n<value>", checked ahead of
+     the free-text _TENURE_PATTERNS. Verified against both real packs
+     named in the OPEN ITEMS note: Brierley Hill's Auction Contract
+     ("Freehold/Leasehold:\nLeasehold") and Smethwick's, a different
+     solicitor's template ("Freehold/Leasehold \n: \nFreehold") — both
+     previously extracted zero tenure, both now correctly extract it.
+
+  10. S-COMM-P1-SUBJECT — extract_commercial_fields() and extract_via_llm()
+      now accept a `subject_address` parameter forwarded into the LLM
+      prompt, plus a new rule 7 in _LLM_SYSTEM_PROMPT instructing the
+      model to ignore facts belonging to other units in a shared title's
+      schedule of leases. Built after confirming the concrete risk on two
+      real packs: Brierley Hill's title register schedule names 13 other
+      leases (Units 1-17) alongside the subject Unit 12, including
+      individual lease start dates and terms per unit; Snow Hill's
+      register similarly schedules "22 and 24 Convent Close", "32 Snow
+      Hill (Ground Floor)" etc. alongside the subject 28B. In both real
+      packs tested, neither the affected schedule document nor any other
+      document in the pack actually stated a £ rent figure for the
+      wrong unit, so this fix could not be verified against a real
+      wrong-value extraction — it is a documented, evidenced risk with a
+      targeted prompt fix, not yet observed causing an actual bad value.
+
+  11. S-COMM-P1-INTRADOC (closes the gap left open by #10 above) —
+      extract_deterministic() now uses finditer() instead of search() for
+      tenure and rent, so multiple distinct values found WITHIN a single
+      document (not just across documents) go through the same
+      conflict/no-write logic as S-COMM-P1-CONFLICT. This was flagged as
+      an unfixed theoretical exposure in the first version of this note;
+      closed the same session once it was clear it could be done by
+      reusing the already-tested cross-document conflict machinery rather
+      than inventing new subject-anchoring text-windowing logic — and
+      doing so is more consistent with this module's own doctrine (a
+      conflict is a person's decision, not this function's) than trying
+      to algorithmically guess which of two matches is "closer" to the
+      subject property. Verified: re-ran the full four-deal regression
+      suite (Snow Hill, Brierley Hill, Smethwick, 13 Harborne Park Road)
+      afterward with identical results — a document restating the same
+      value twice still writes once, exactly as before.
+
+  12. S-COMM-P1-VACANT2 — _VACANT_PATTERN broadened from the literal
+      "vacant possession" to also match "currently vacant", the actual
+      wording used in Brierley Hill's real CPSE.7 reply ("The Property is
+      currently vacant as the Seller was occupying"), which the original
+      pattern missed entirely. Deliberately narrow — added only the
+      specific phrase confirmed in a real reply, not a broad "is vacant"
+      match, which would also match the standard CPSE boilerplate
+      QUESTION text ("If the Property is vacant, when and why...") on
+      packs where the actual answer is "no" or "N/A", causing a false
+      vacancy flag on a genuinely let property.
+
+Also this session: cleared a batch of thirteen `user_entered` test values
+(tenant_name "lolod", passing_rent_pa £35,000, etc., all timestamped
+identically) that were sitting in 13 Harborne Park Road's live
+financials_json.inputs.commercial, blocking that deal from ever being
+usable as a genuine untouched test case for the write path per the
+never-overwrite-user_entered rule. Cleared directly in Supabase, not via
+this module (this module never touches the database itself).
 """
 
 import re
@@ -197,11 +274,27 @@ _TENURE_PATTERNS = [
     (r"title\s*\n?\s*freehold\s+title", "Freehold"),
     (r"title\s*\n?\s*leasehold\s+title", "Leasehold"),
 ]
+
+# S-COMM-P1-TENURE2 (2026-07-12): found by testing two real packs (Unit 12
+# Premier Partnership Estate, Brierley Hill; 68 & 68A Three Shires Oak Road,
+# Smethwick) -- different solicitors, same Auction Contract particulars
+# template field: "Freehold/Leasehold:" followed by the value on the same
+# or next line. Neither pack matched any pattern in _TENURE_PATTERNS above
+# (that list expects a free-text sentence like "sold freehold" or "Title:
+# Freehold Title", not a label/value particulars field), so both packs
+# extracted zero tenure -- correctly safe (no fabrication), but zero
+# coverage on a template two independent packs have now used. This is
+# checked FIRST, ahead of the free-text patterns, because it is a more
+# specific and reliable signal (a labelled particulars field naming the
+# sale itself) than a prose sentence that might describe something else.
+_TENURE_STRUCTURED_RE = re.compile(
+    r"freehold\s*/\s*leasehold\s*:\s*(freehold|leasehold)\b", re.IGNORECASE
+)
 _RENT_PATTERN = re.compile(
     r"rent\s*(?:of|:)\s*£\s?([\d,]+(?:\.\d{2})?)\s+per\s+annum", re.IGNORECASE
 )
 _REVIEW_PATTERN = re.compile(r"\(([^()]*review[^()]*)\)", re.IGNORECASE)
-_VACANT_PATTERN = re.compile(r"vacant\s+possession", re.IGNORECASE)
+_VACANT_PATTERN = re.compile(r"vacant\s+possession|currently\s+vacant\b", re.IGNORECASE)
 
 # S-COMM-P1-MONTHLY (2026-07-12): found by testing a real pack (28B Snow
 # Hill) where the only recurring-payment figure in the whole document set
@@ -218,7 +311,7 @@ _VACANT_PATTERN = re.compile(r"vacant\s+possession", re.IGNORECASE)
 # month...") -- mistaking one for rent would be a real fabrication risk,
 # not a cosmetic one.
 _RENT_MONTHLY_PATTERN = re.compile(
-    r"£\s?([\d,]+(?:\.\d{2})?)\s+per\s+(?:calendar\s+)?month\b", re.IGNORECASE
+    r"£\s?([\d,]+(?:\.\d{2})?)\s*(?:per\s+(?:calendar\s+)?month|pcm)\b", re.IGNORECASE
 )
 _MONTHLY_LABEL_RE = re.compile(r"\b(rent|licen[cs]e fee)\b", re.IGNORECASE)
 _MONTHLY_EXCLUDE_RE = re.compile(
@@ -352,14 +445,24 @@ def extract_deterministic(documents: list) -> tuple:
     figure is worse than an absent one if it's the wrong one of two real
     candidates.
 
+    S-COMM-P1-INTRADOC (2026-07-12): the same principle now also applies
+    WITHIN a single document, not just across documents. Tenure and rent
+    are matched with finditer() rather than search(), so a document that
+    states the same field more than once — e.g. a title register's
+    schedule of leases with a per-unit rent column — feeds every distinct
+    value into the conflict check below, rather than the first one
+    silently winning. A document restating the SAME value twice (the
+    common, harmless case) still dedupes to a single field write.
+
     Returns (fields: dict, citations: dict, conflicts: list[str]).
-    A field is only written when every document that states it agrees on
-    the same value. When two or more documents disagree, the field is
-    left OUT of `fields` entirely and a description of the conflict
-    (both values, both citations) is added to `conflicts` — never averaged,
-    never resolved by picking one, since neither this function nor an LLM
-    has the standing to decide which of two real documents is correct.
-    That decision belongs to a person looking at the actual pages.
+    A field is only written when every document — and every match within
+    each document — that states it agrees on the same value. When two or
+    more distinct values are found, the field is left OUT of `fields`
+    entirely and a description of the conflict (every value, every
+    citation) is added to `conflicts` — never averaged, never resolved by
+    picking one, since neither this function nor an LLM has the standing
+    to decide which of several real candidates is correct. That decision
+    belongs to a person looking at the actual pages.
     """
     matches: dict = {}  # field -> list of (value, citation), in document order
     conflicts: list = []
@@ -379,31 +482,41 @@ def extract_deterministic(documents: list) -> tuple:
 
         low = text.lower()
 
-        for pat, val in _TENURE_PATTERNS:
-            m = re.search(pat, low)
-            if m:
+        tenure_hits = list(_TENURE_STRUCTURED_RE.finditer(text))
+        if tenure_hits:
+            for tm in tenure_hits:
                 matches.setdefault("tenure", []).append(
-                    (val, _citation(fname, _find_page(text, m.start())))
+                    (tm.group(1).capitalize(), _citation(fname, _find_page(text, tm.start())))
                 )
-                break  # one tenure statement per document is enough
+        else:
+            for pat, val in _TENURE_PATTERNS:
+                pat_hits = list(re.finditer(pat, low))
+                if pat_hits:
+                    for m in pat_hits:
+                        matches.setdefault("tenure", []).append(
+                            (val, _citation(fname, _find_page(text, m.start())))
+                        )
+                    break  # one tenure-pattern family per document is enough
 
-        m = _RENT_PATTERN.search(text)
-        if m:
-            val = float(m.group(1).replace(",", ""))
-            page = _find_page(text, m.start())
-            matches.setdefault("passing_rent_pa", []).append((val, _citation(fname, page)))
-            window = text[m.end(): m.end() + 120]
-            rm = _REVIEW_PATTERN.search(window)
-            if rm:
-                matches.setdefault("rent_review_basis", []).append(
-                    (rm.group(1).strip(), _citation(fname, page))
-                )
+        annum_hits = list(_RENT_PATTERN.finditer(text))
+        if annum_hits:
+            for m in annum_hits:
+                val = float(m.group(1).replace(",", ""))
+                page = _find_page(text, m.start())
+                matches.setdefault("passing_rent_pa", []).append((val, _citation(fname, page)))
+                window = text[m.end(): m.end() + 120]
+                rm = _REVIEW_PATTERN.search(window)
+                if rm:
+                    matches.setdefault("rent_review_basis", []).append(
+                        (rm.group(1).strip(), _citation(fname, page))
+                    )
         else:
             # No per-annum figure in this document -- try the monthly
             # fallback before giving up on it entirely (S-COMM-P1-MONTHLY).
+            # Uses ALL accepted hits, not just the first, for the same
+            # S-COMM-P1-INTRADOC reason as the annum branch above.
             monthly_hits = _find_monthly_rent(text)
-            if monthly_hits:
-                mm = monthly_hits[0]  # first accepted hit in this document
+            for mm in monthly_hits:
                 monthly_val = float(mm.group(1).replace(",", ""))
                 annual_val = round(monthly_val * 12, 2)
                 page = _find_page(text, mm.start())
@@ -506,6 +619,7 @@ CRITICAL RULES:
 4. If a document shows a registered leasehold title belonging to a TENANT (an "LH register" or similar), that is the tenant's own interest, not necessarily related to what is being sold. Only use it as a source for tenant_name / lease_start_date / lease_term_years, never for the tenure of the sale.
 5. If nothing in the provided text supports a field, omit it entirely. Do not guess, estimate, or use general market knowledge.
 6. If two documents state DIFFERENT values for the same fact (e.g. two different tenant names, or two different start dates for what appears to be the same tenancy), do NOT pick one — report it in "conflicts" instead, describing both values and which document/page each came from. Do not silently resolve a conflict yourself.
+7. A "SUBJECT PROPERTY" is named below, if known. Documents in a legal pack — especially a freehold or leasehold title register's "schedule of leases" or "schedule of notices of leases" — very often list OTHER units, flats, or addresses within the same shared title, alongside the subject property. Only extract a fact that clearly belongs to the SUBJECT PROPERTY. Never extract a tenant name, lease start date, or lease term from a table row, schedule entry, or clause that names a different unit/flat/address, even if it is formatted identically to a row that does belong to the subject property. If a fact's ownership is ambiguous — you cannot tell which unit it belongs to — omit it entirely rather than guessing. If no SUBJECT PROPERTY is given below, apply this same caution using only the property address stated in the documents themselves.
 
 Return ONLY valid JSON, no prose, no markdown fences:
 {
@@ -516,18 +630,28 @@ Return ONLY valid JSON, no prose, no markdown fences:
 }"""
 
 
-def extract_via_llm(documents: list, already_found: dict) -> tuple:
+def extract_via_llm(documents: list, already_found: dict, subject_address: str = None) -> tuple:
     """LLM fallback layer for facts the regex layer can't reliably get
     (tenant_name, lease_start_date, lease_term_years). See module docstring
-    STATUS note — unverified in a live run as of this build (no API access
-    in the build sandbox). Uses app.py's existing _llm_json_anthropic()
-    helper via a lazy import, matching commercial_routes.py's own pattern
-    for avoiding a circular import at module load time.
+    STATUS note — proven live once (13 Harborne Park Road), unverified on a
+    genuinely untouched deal as of this build. Uses app.py's existing
+    _llm_json_anthropic() helper via a lazy import, matching
+    commercial_routes.py's own pattern for avoiding a circular import at
+    module load time.
 
     `already_found` is the deterministic layer's output — passed in only
     so this function can skip calling the LLM at all if there's nothing
     left for it to usefully find (keeps cost down; the LLM never overrides
     a deterministic match, it only fills genuine gaps).
+
+    `subject_address` — S-COMM-P1-SUBJECT (2026-07-12): the deal's own
+    address (e.g. deals.address), passed by the caller so the prompt can
+    tell the model which unit is actually being valued when a document
+    lists several (a shared title's schedule of leases). Optional —
+    degrades to a general caution instruction (system prompt rule 7) if
+    the caller doesn't have it, but the real protection needs the caller
+    (commercial_routes.py's /extract route) to pass the live deal address
+    in here.
 
     Returns (raw_facts: dict, citations: dict, conflicts: list[str]) where
     raw_facts may contain tenant_name (final, allow-listed) and
@@ -538,8 +662,6 @@ def extract_via_llm(documents: list, already_found: dict) -> tuple:
     across documents (see rule 6 in _LLM_SYSTEM_PROMPT) — folded into the
     caller's evidence_gaps alongside the deterministic layer's conflicts.
     """
-    from app import _llm_json_anthropic  # lazy import — avoids circular import at load time
-
     _PER_DOC = 12000   # generous vs the residential 6000-char cap: lease
                         # review clauses often sit deep in a 15-20 page
                         # document, and P1 only targets a handful of fields
@@ -565,16 +687,21 @@ def extract_via_llm(documents: list, already_found: dict) -> tuple:
     if not combined.strip():
         return {}, {}, []
 
+    subject_line = (
+        f"SUBJECT PROPERTY: {subject_address}\n\n" if subject_address else ""
+    )
     try:
+        from app import _llm_json_anthropic  # lazy import — avoids circular import at load time
         result = _llm_json_anthropic(
             system=_LLM_SYSTEM_PROMPT,
-            prompt=f"Extract from these documents:\n\n{combined}",
+            prompt=f"{subject_line}Extract from these documents:\n\n{combined}",
             temperature=0.1,
         )
     except Exception:
-        # Degrade gracefully — a failed LLM call must never block the
-        # deterministic fields (tenure, passing rent) that already
-        # succeeded. Caller proceeds with whatever it already has.
+        # Degrade gracefully — a failed LLM call (or a failed import of
+        # the helper itself; see S-COMM-P1-IMPORT-GUARD above) must never
+        # block the deterministic fields (tenure, passing rent) that
+        # already succeeded. Caller proceeds with whatever it already has.
         return {}, {}, []
 
     fields: dict = {}
@@ -589,11 +716,16 @@ def extract_via_llm(documents: list, already_found: dict) -> tuple:
     return fields, citations, conflicts
 
 
-def extract_commercial_fields(documents: list, today: date = None) -> dict:
+def extract_commercial_fields(documents: list, today: date = None,
+                               subject_address: str = None) -> dict:
     """Main entry point. `documents` — list of {"file_name": str,
     "text": str} for a deal (text = the documents table's extracted_text
     column, page-marked once the S-COMM-P1 extraction service fix is
-    deployed). Returns:
+    deployed). `subject_address` — S-COMM-P1-SUBJECT: the deal's own
+    address (deals.address), forwarded to the LLM layer so it can tell
+    the subject property apart from other units named in a shared title's
+    schedule of leases. Optional but should be passed by the caller
+    whenever available — see extract_via_llm's docstring. Returns:
       {
         "fields": {field: value, ...},          # allow-listed only
         "provenance": {field: {"source": "extracted", "citation": ..., "at": iso}},
@@ -633,7 +765,7 @@ def extract_commercial_fields(documents: list, today: date = None) -> dict:
             f"actually let or vacant before either figure is used."
         )
 
-    llm_fields, llm_citations, llm_conflicts = extract_via_llm(documents, det_fields)
+    llm_fields, llm_citations, llm_conflicts = extract_via_llm(documents, det_fields, subject_address)
     evidence_gaps.extend(llm_conflicts)
 
     # S-COMM-P1-MONTHLY: a passing rent sourced from a Licence (not a
