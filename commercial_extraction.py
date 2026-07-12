@@ -101,6 +101,23 @@ not theoretical):
      as lease passing rent and shouldn't be treated as equivalent income
      security without that caveat.
 
+  7. RESIDENTIAL-AST EXCLUSION RULE (S-COMM-P1-AST, added same session) —
+     found by testing a real Mixed Use pack (68 & 68A Three Shires Oak
+     Road) where the ONLY rent figure anywhere in the whole document set
+     was a residential Assured Shorthold Tenancy's £700 PCM for the flat
+     above, while the landlord's own CPSE.2 reply confirmed the commercial
+     shop unit was genuinely VACANT ("SHOP VACANT... FLAT LET TO TENANT").
+     A document that identifies itself as an AST (or otherwise invokes the
+     Housing Act 1988) within its own opening ~2000 chars is excluded
+     entirely from every field this module extracts — not just rent. An
+     AST is a residential letting regime with none of the security-of-
+     tenure or rent-review dynamics of a commercial lease; blending its
+     rent into a RICS Investment Method valuation input would be a
+     category error, not a quality-of-evidence issue, so it is excluded
+     outright rather than merely caveated the way a Licence Fee is. The
+     excluded figure is still named in an evidence_gap for transparency —
+     it's just never written to passing_rent_pa.
+
 WHAT THIS MODULE DELIBERATELY DOES NOT DO
   - Does not extract yield, market_rent_pa, or any figure requiring market
     judgement — legal packs don't contain those; they must stay
@@ -139,7 +156,19 @@ licence caveat; a document with both a monthly rent and a monthly service
 charge correctly picks the rent; and — the trickiest case — a document
 where "rent" is mentioned earlier in the text than a service-charge label
 still correctly excludes the service-charge figure, because the nearest
-preceding label governs, not the first-seen one. The LLM layer
+preceding label governs, not the first-seen one. The residential-AST
+exclusion (rule 7) was added after a real Mixed Use pack (68 & 68A Three
+Shires Oak Road) showed the risk concretely: its only rent figure was a
+residential AST's £700 PCM, safe under the code as it stood only because
+"PCM" wasn't yet a matched abbreviation -- extending monthly-rent matching
+to cover PCM without this safeguard first would have created a live
+fabrication risk. Verified against the real pack's AST/CPSE2/Auction
+Contract text (correctly excluded, correctly explained, £700 pcm named in
+the evidence_gap) plus two further tests: two ASTs in one pack produce two
+separate exclusion notes rather than a false same-field conflict, and a
+genuine commercial lease that merely cites "Housing Act 1988" deep in an
+unrelated clause (well outside the 2000-char opening window) is correctly
+NOT excluded. The LLM layer
 (extract_via_llm) has since been run once live, against a real deal
 (73b21ec9-7064-432b-a772-7e3653bb1a01), and its own date-arithmetic guard
 fired correctly on that run — but its conflicts-reporting addition (rule 6
@@ -240,6 +269,69 @@ def _citation(file_name: str, page) -> str:
     return f"{file_name}, page {page}" if page is not None else f"{file_name}, page unknown"
 
 
+# S-COMM-P1-AST (2026-07-12): found by testing a real pack (68 & 68A Three
+# Shires Oak Road, Smethwick) where the ONLY rent figure anywhere in the
+# whole document set was a residential Assured Shorthold Tenancy's £700
+# PCM for the flat above -- while the commercial shop unit was confirmed
+# genuinely VACANT by the landlord's own CPSE.2 reply ("SHOP VACANT...
+# FLAT LET TO TENANT"). The monthly-rent pattern didn't happen to match
+# "£700.00 PCM" (it only matched spelled-out "per calendar month" at the
+# time), so this specific pack was safe by accident, not by design --
+# extending that pattern to also catch the "PCM" abbreviation (a very
+# reasonable, likely next step) would have made this a live fabrication
+# risk: residential letting income, blended into a RICS Investment Method
+# commercial valuation, as if it were the same kind of thing. It isn't --
+# an AST is governed by the Housing Act 1988, not commercial lease law,
+# and has none of the same security-of-tenure or rent-review dynamics.
+_AST_SIGNAL_RE = re.compile(
+    r"assured\s+shorthold\s+tenancy|housing\s+act\s+1988\b", re.IGNORECASE
+)
+_AST_SIGNAL_WINDOW_CHARS = 2000
+# Deliberately more permissive than the commercial-rent patterns (matches
+# "pcm"/"pa" abbreviations too) -- there is no fabrication risk in merely
+# NAMING a figure that is about to be excluded outright, and abbreviations
+# are exactly what real residential tenancy templates use.
+_RAW_RENT_ANY_RE = re.compile(
+    r"£\s?([\d,]+(?:\.\d{2})?)\s*(per\s+annum|per\s+(?:calendar\s+)?month|pcm|pa)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_residential_ast(text: str) -> bool:
+    """True if this document identifies itself as an Assured Shorthold
+    Tenancy (or otherwise invokes the Housing Act 1988) within its own
+    opening ~2000 chars -- i.e. where a document declares what kind of
+    document it is, not a stray citation buried in an unrelated clause
+    deep in a genuinely commercial lease. See S-COMM-P1-AST above."""
+    return bool(_AST_SIGNAL_RE.search(text[:_AST_SIGNAL_WINDOW_CHARS]))
+
+
+def _describe_excluded_ast_rent(text: str, fname: str) -> str:
+    """Best-effort, transparency-only description of a rent figure found
+    in a document already identified as a residential AST. This value is
+    NEVER written to passing_rent_pa -- see S-COMM-P1-AST. There is
+    nothing to reduce or dedupe here (a pack can legitimately contain
+    several ASTs, e.g. flats above a parade of shops), so this returns a
+    plain string for the caller to append directly, rather than going
+    through the same-field distinct-value conflict logic used for real
+    commercial fields."""
+    m = _RAW_RENT_ANY_RE.search(text)
+    if not m:
+        return (
+            f"{fname}: identified as a residential AST — excluded from "
+            f"commercial rent extraction entirely (no parseable rent "
+            f"figure to quote)."
+        )
+    amount, period = m.group(1), m.group(2).lower()
+    page = _find_page(text, m.start())
+    return (
+        f"{_citation(fname, page)}: identified as a residential AST "
+        f"stating £{amount} {period} — this is Housing Act 1988 "
+        f"residential letting income, not commercial passing rent, and "
+        f"was excluded entirely rather than used for passing_rent_pa."
+    )
+
+
 def extract_deterministic(documents: list) -> tuple:
     """Regex-based extraction — see module docstring for what's covered
     and why. `documents` is a list of {"file_name": str, "text": str}
@@ -270,11 +362,21 @@ def extract_deterministic(documents: list) -> tuple:
     That decision belongs to a person looking at the actual pages.
     """
     matches: dict = {}  # field -> list of (value, citation), in document order
+    conflicts: list = []
     for doc in documents:
         fname = doc.get("file_name", "unknown")
         text = doc.get("text") or ""
         if not text.strip():
             continue
+
+        # S-COMM-P1-AST: an AST document contributes NOTHING to any field
+        # this function extracts -- not just rent. See helper docstrings
+        # above for why. This is checked before tenure/rent/vacant so a
+        # residential document can never leak into any of them.
+        if _is_residential_ast(text):
+            conflicts.append(_describe_excluded_ast_rent(text, fname))
+            continue
+
         low = text.lower()
 
         for pat, val in _TENURE_PATTERNS:
@@ -332,7 +434,6 @@ def extract_deterministic(documents: list) -> tuple:
 
     fields: dict = {}
     citations: dict = {}
-    conflicts: list = []
 
     for field, found in matches.items():
         distinct: list = []
