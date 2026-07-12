@@ -658,7 +658,7 @@ def _extract_listing_from_element(el: Any, selectors: dict, page_url: str, sourc
         "_raw_auction_date":   _text(selectors.get("auction_date")),
         "_raw_property_type":  _text(selectors.get("property_type")),
         "_raw_legal_pack_url": _href(selectors.get("legal_pack_link")),
-        "_raw_image_url":      _extract_lot_image(element),
+        "_raw_image_url":      _extract_lot_image(el),
         "_source_id":          source.get("id"),
         "_auction_house":      source.get("name"),
     }
