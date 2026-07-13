@@ -1818,6 +1818,16 @@ _TIME_COST_LOOKUP = (
     (('21-day completion', '21 day completion', 'non-standard 21-day', '21-day completion period'), (21, 21), TIME_COST_NO_RESOLUTION,
      "Stated in the pack: a 21-day completion period. The TIME is fixed by the contract (21 calendar days from exchange); there is no cost to 'clear' it — it is a deadline to meet, not a defect. The real consequence is FINANCING: a buyer who cannot complete in 21 days needs cash or bridging in place, and missing it risks deposit forfeiture and default interest (see notice-to-complete). Model the finance, don't price a fix.",
      None),
+    # S40-TIME-COST-GAP-CLOSE (2026-07-13): 28-day completion is the MOST
+    # common auction completion period (see the risk-scoring table's own
+    # comment: "Standard 20-28 day completion... present on the large
+    # majority of auction lots") yet had no _TIME_COST_LOOKUP entry — every
+    # such flag fell to UNRESEARCHED for both time and cost despite being
+    # the single most frequent case in the system. Found via live screenshot
+    # audit, same failure mode as S39. Mirrors the 21-day entry exactly.
+    (('28-day completion', '28 day completion', 'standard 28-day completion', '28-day completion period'), (28, 28), TIME_COST_NO_RESOLUTION,
+     "Standard auction completion period. The TIME is fixed by the contract (28 calendar days from exchange); there is no cost to 'clear' it — it is a deadline to meet, not a defect. The real consequence is FINANCING: a buyer who cannot complete in 28 days needs cash or bridging in place, and missing it risks deposit forfeiture and default interest (see notice-to-complete). Model the finance, don't price a fix.",
+     None),
     (('limited title guarantee', 'title guarantee covenants excluded', 'title guarantee excluded'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
      'Risk-acceptance / disclosure — no resolution cost. A limited title guarantee (common on probate, repossession and some auction sales) means the seller gives reduced assurances about the title; it is accepted and priced, not fixed. Title indemnity insurance can sometimes cover a SPECIFIC identified gap, but the limited guarantee itself is a feature of the sale, not a clearable defect.',
      None),
@@ -1828,7 +1838,29 @@ _TIME_COST_LOOKUP = (
      "Risk-acceptance — no resolution cost on the legal side. 'Sold as seen / no condition warranties' is the norm at auction: the buyer takes the property in its physical state with no recourse for defects. The 'handling' is a pre-bid survey to understand condition — a due-diligence step, not a cost to clear a legal defect. Any actual repairs are property-specific and outside this flag.",
      None),
     (('right-to-buy covenant', 'right to buy covenant', 'resale/subletting', 'resale restriction', 'subletting restriction'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
-     "Constraint / risk-acceptance — no standard resolution cost. Right-to-Buy covenants can restrict resale or subletting for a period and may trigger a discount-repayment liability if the property is sold within the restricted window. The figure depends entirely on the original RTB discount and timing — read the specific covenant; there is no generic cost to 'clear' it.",
+     "Constraint / risk-acceptance — no standard resolution cost. Right-to-Buy covenants can restrict resale or subletting for a period and may trigger a discount-repayment liability if the property is sold within the restricted window. The figure depends entirely on the original RTB discount and timing — read the specific covenant; there is no generic cost to 'clear' it. NOT the same issue as RTB-origin statutory easements (see 'right to buy origin' entry below) — that is a permanent title feature, not a time-limited resale restriction.",
+     None),
+    # S40-TIME-COST-GAP-CLOSE (2026-07-13): a genuinely separate entry, not
+    # a widened version of the covenant marker above. Right-to-Buy
+    # DISCOUNT/RESALE covenants are a time-limited contractual restriction
+    # tied to when the discount was given. Statutory EASEMENTS under the
+    # Housing Act 1980 are a permanent title feature on any property
+    # originally severed from a larger council estate via RTB — they never
+    # expire and there is nothing to 'clear'. Conflating the two would
+    # misapply "depends on discount timing" reasoning to a title question
+    # that has nothing to do with discount timing. Found unresearched on
+    # the same live deal as the 28-day gap above.
+    (('right to buy origin', 'rtb origin', 'housing act 1980 easements',
+      'easements from the housing act 1980'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
+     "Title feature, not a resale-restriction covenant — see the separate "
+     "right-to-buy covenant entry above for that distinct issue. Statutory "
+     "easements and reservations under the Housing Act 1980 are a "
+     "permanent feature of title on any property originally sold under "
+     "Right to Buy; they do not expire and there is nothing to 'clear'. "
+     "The real question is lender acceptance criteria, which varies by "
+     "lender — no generic cost or turnaround exists. Review the specific "
+     "Schedule 2 easements and confirm acceptance with the buyer's chosen "
+     "lender before bidding, rather than pricing this as a fixable defect.",
      None),
     (('buyer bears risk from exchange', 'risk from exchange', 'no seller insurance obligation', 'insurance from exchange'), TIME_COST_NO_RESOLUTION, TIME_COST_NO_RESOLUTION,
      "Acquisition/admin item — no resolution cost as a defect. Risk passing to the buyer on exchange (the standard position) means the buyer must have buildings insurance in force FROM exchange, not completion. The 'cost' is simply arranging a buildings policy (a few hundred £/yr) to start at exchange — an admin step, not a fix. The risk is being uninsured in the gap, which costs nothing to avoid if actioned.",
@@ -2049,10 +2081,12 @@ _TIME_COST_CATEGORIES = (
     'designated_primarily_residential',
     'furniture_and_effects_may_remain',
     '21_day_completion',
+    '28_day_completion',
     'limited_title_guarantee',
     'cannot_assign_contract',
     'sold_as_seen',
     'right_to_buy_covenant',
+    'right_to_buy_origin_easements',
     'buyer_bears_risk_from_exchange',
     'discrepancy_in_seller_s_legal_fees',
     'climateindex',
