@@ -3663,6 +3663,84 @@ class TestS42NearMissMarkers:
         assert r["cost_source"] == "research"
 
 
+class TestS40TimeCostGapClose:
+    # 28-day completion — found UNRESEARCHED (both time and cost) on a real
+    # live deal via screenshot audit on 2026-07-13, despite being the most
+    # common auction completion period (the risk-scoring table's own
+    # comment: "Standard 20-28 day completion... present on the large
+    # majority of auction lots"). The 21-day case had a full entry; 28-day
+    # did not. Mirrors S39's discovery method and TestS42NearMissMarkers'
+    # style exactly.
+    def test_exact_screenshot_title_resolves(self):
+        r = lookup_time_cost({"title": "28-Day Completion — Time Is of the Essence",
+                              "severity": "high"})
+        assert r["time_days"] == (28, 28)
+        assert r["cost_gbp"] == TIME_COST_NO_RESOLUTION
+        assert r["time_source"] == "research"
+        assert r["cost_source"] == "research"
+
+    def test_plain_marker_variant_resolves(self):
+        r = lookup_time_cost({"title": "Standard 28-Day Completion Period Applies",
+                              "severity": "note"})
+        assert r["time_days"] == (28, 28)
+
+    def test_category_first_resolution(self):
+        # A title the marker list wouldn't catch, but tagged with the
+        # correct risk_category, must still resolve via category-first.
+        flag = {"title": "Wholly Different Phrasing The Markers Miss",
+                "risk_category": "28_day_completion"}
+        r = lookup_time_cost(flag)
+        assert r["time_days"] == (28, 28)
+        assert r["cost_gbp"] == TIME_COST_NO_RESOLUTION
+
+    def test_does_not_regress_21_day_entry(self):
+        # The new entry sits immediately after 21-day in both parallel
+        # arrays — confirm that insertion didn't shift or corrupt it.
+        r = lookup_time_cost({"title": "21-Day Completion — Non-Standard",
+                              "severity": "high"})
+        assert r["time_days"] == (21, 21)
+
+    def test_28_day_category_slug_registered(self):
+        assert "28_day_completion" in _TIME_COST_CATEGORIES
+        assert "28_day_completion" in _CATEGORY_TO_LOOKUP
+
+    def test_category_and_marker_paths_agree(self):
+        # Category-first and marker-fallback must resolve to the SAME
+        # lookup entry (same index) — this is what "positionally aligned"
+        # actually buys you. If these ever disagree, the two arrays have
+        # drifted apart despite passing the length/uniqueness invariant.
+        by_marker = lookup_time_cost({"title": "28-day completion", "severity": "high"})
+        by_category = lookup_time_cost({"title": "Unrelated wording",
+                                         "risk_category": "28_day_completion"})
+        assert by_marker["time_days"] == by_category["time_days"]
+        assert by_marker["cost_gbp"] == by_category["cost_gbp"]
+
+    def test_rtb_origin_easements_exact_screenshot_title_resolves(self):
+        r = lookup_time_cost({"title": "Right to Buy Origin — Housing Act 1980 Easements Apply",
+                              "severity": "high"})
+        assert r["time_days"] == TIME_COST_NO_RESOLUTION
+        assert r["cost_gbp"] == TIME_COST_NO_RESOLUTION
+        assert r["time_source"] == "research"
+
+    def test_rtb_origin_easements_distinct_from_rtb_covenant(self):
+        # These are two different legal concepts (permanent title easement
+        # vs time-limited resale/discount-clawback covenant) — they must
+        # resolve to two DIFFERENT lookup entries, not collapse into one.
+        origin = lookup_time_cost({"title": "Right to Buy Origin — Housing Act 1980 Easements Apply",
+                                   "severity": "high"})
+        covenant = lookup_time_cost({"title": "Right-to-Buy Covenant Restricts Resale for 5 Years",
+                                     "severity": "high"})
+        assert origin["methodology"] != covenant["methodology"]
+        assert "easement" in origin["methodology"].lower()
+        assert "discount" in covenant["methodology"].lower()
+
+    def test_rtb_origin_easements_category_slug_registered(self):
+        assert "right_to_buy_origin_easements" in _TIME_COST_CATEGORIES
+        assert "right_to_buy_covenant" in _TIME_COST_CATEGORIES
+        assert (_CATEGORY_TO_LOOKUP["right_to_buy_origin_easements"]
+                != _CATEGORY_TO_LOOKUP["right_to_buy_covenant"])
+
+
 class TestS42CoverageTelemetryAndBridge:
     def test_attach_returns_coverage(self):
         flags = [
