@@ -175,21 +175,26 @@ def _session_claim_paid(session_id: str) -> bool:
         return False
 
 def _session_append_doc(session_id: str, doc: dict) -> bool:
-    """Append a document to the session's documents JSONB array."""
+    """Append a document to the session's documents JSONB array.
+
+    S41-CONCURRENT-UPLOAD-RACE: this used to SELECT the current array,
+    append locally, then UPDATE the whole thing back — a classic
+    read-then-write race. Two near-simultaneous uploads for the same
+    session (which is exactly what the bounded-concurrency upload pool
+    now does client-side) could both read the same starting array and
+    each write back a version missing the other's document, silently
+    losing an upload the client had already shown as successful.
+    guest_session_append_document() does the append (and the MAX_FILES
+    cap check) as a single atomic UPDATE in Postgres, which serialises
+    concurrent writers at the row level — no race window at all, not
+    just a smaller one.
+    """
     try:
-        # Fetch current docs then append — Supabase JSONB array append
-        r = _get_supa().table("guest_sessions")\
-            .select("documents")\
-            .eq("session_id", session_id)\
-            .single()\
-            .execute()
-        current = r.data.get("documents") or []
-        current.append(doc)
-        _get_supa().table("guest_sessions")\
-            .update({"documents": current})\
-            .eq("session_id", session_id)\
-            .execute()
-        return True
+        r = _get_supa().rpc(
+            "guest_session_append_document",
+            {"p_session_id": session_id, "p_doc": doc, "p_max_files": MAX_FILES},
+        ).execute()
+        return r.data is not None
     except Exception as e:
         logger.error(f"[guest2] session_append_doc {session_id}: {e}")
         return False
@@ -782,7 +787,18 @@ def guest2_upload():
                              "doc_type": doc_type, "page_count": pages})
             logger.info(f"[guest2] Upload: {f.filename} ({doc_type}) → {session_id}")
         else:
-            uploaded.append({"file_name": f.filename, "ok": False, "error": "Storage error"})
+            # Could be a genuine storage error, or the atomic append's own
+            # MAX_FILES check rejecting this one because a concurrent
+            # sibling upload (from the same bounded-concurrency batch)
+            # filled the last slot first. Re-check current count to give
+            # an accurate message either way.
+            _current = _session_get(session_id)
+            _count = len((_current or {}).get("documents") or [])
+            if _count >= MAX_FILES:
+                uploaded.append({"file_name": f.filename, "ok": False,
+                                  "error": f"Maximum {MAX_FILES} files per session"})
+            else:
+                uploaded.append({"file_name": f.filename, "ok": False, "error": "Storage error"})
 
     return jsonify({"ok": True, "uploaded": uploaded}), 200
 
