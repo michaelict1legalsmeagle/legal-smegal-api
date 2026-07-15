@@ -237,87 +237,85 @@ def _get_anthropic():
         return _anthropic_client
 
 # ── PDF text extraction ──────────────────────────────────────────────────────
-# S31 — Hard timeout on extraction. pdfplumber/pdfminer has no internal timeout
-# and can hang indefinitely on certain malformed/pathological PDFs (complex
-# embedded fonts, corrupted content streams). A single such file can block a
-# Gunicorn worker for up to the full 180s worker timeout — with only 2 workers
-# configured, that's enough to make every other concurrent request on this
-# service fail (observed live on 2026-06-20: WORKER TIMEOUT after 188s,
-# producing 502s on unrelated /api/guest2/upload and /api/deals/* requests
-# that browsers then misreport as CORS failures, since there's no response
-# to read CORS headers from). Run extraction in a daemon thread with a join
-# timeout; if it doesn't finish in time, give up on that file and return
-# empty text rather than hanging the worker. Callers already handle empty
-# text gracefully (doc_type falls back to "unknown", upload still succeeds).
-_EXTRACT_TEXT_TIMEOUT_SECONDS = 100
-# S33 — raised from 25s for the same reason as app.py's
-# _EXTRACT_PDF_TEXT_TIMEOUT_SECONDS: image-only PDFs now fall through to
-# Document AI's batchProcess OCR flow (docai_ocr.py, internal ceiling 90s),
-# a real network round-trip rather than a local hang. 25s would cut off an
-# OCR call that was about to succeed.
+# S31 (historical) — a daemon thread + join(timeout) was used here to bound
+# extraction time after a confirmed 2026-06-20 incident: pdfplumber hanging
+# indefinitely on a pathological PDF caused a 188s WORKER TIMEOUT, taking
+# down every other concurrent request on this 2-worker service (browsers
+# reported this as CORS failures, since there was no response to read CORS
+# headers from — no server response at all, not a CORS rejection).
+#
+# S42-GUEST-EXTRACT-UNIFY (2026-07-15): that fix only ever bounded the
+# *wait* — a daemon thread cannot be force-killed in Python, so a genuinely
+# stuck extraction kept running in the background indefinitely after the
+# handler "gave up" on it, still holding file_bytes and any partial PDF
+# parsing state in memory. Each one is a small, permanent leak. Guest
+# traffic accumulating enough of these over a few hours matches the
+# recurring "Ran out of memory (used over 512MB)" Render events showing up
+# every 1-2 hours — this is the exact same bug class app.py's
+# extract_pdf_text() was already rewritten to fix on H-KILL (2026-06-29):
+# "SIGTERM/SIGKILL can forcibly terminate a stuck pymupdf call; a thread
+# cannot be terminated." That fix was never ported to the guest pipeline.
+#
+# This also drops the local is_image_only_pdf() pre-check, which
+# docai_ocr.py's own docstring already flags as deprecated for routing
+# decisions ("the extraction service... no longer uses this function...
+# it triggers OCR on non-whitespace YIELD... instead") for the same reason
+# app.py's H4-ASYNC-OCR fix (2026-07-01) moved away from it: it calls
+# fitz.open() locally in the worker, parsing the full PDF structure in
+# process memory — itself a separately-confirmed OOM cause on this exact
+# 512MB instance. The signal used here now matches app.py exactly: empty
+# extraction (from Hetzner, or the safe spawn-process fallback) IS the
+# "needs OCR" signal, no separate expensive check required.
+_EXTRACT_TEXT_TIMEOUT_SECONDS = 100  # retained: passed through to extract_pdf_text
+_OCR_MAX_ATTEMPTS = 3
+_OCR_BACKOFF_SECONDS = [5, 15]  # matches app.py's H4-RETRY exactly
 
-def _extract_text_impl(file_bytes: bytes, filename: str, _result: dict) -> None:
-    text, pages = "", 0
-    if _pdfplumber:
-        try:
-            with _pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-                pages = len(pdf.pages)
-                parts = [pg.extract_text() or "" for pg in pdf.pages]
-                text  = "\n\n".join(p for p in parts if p.strip())
-        except Exception as e:
-            logger.warning(f"[guest2] pdfplumber: {e}")
-    if not text:
-        try:
-            import fitz as _fitz
-            doc = _fitz.open(stream=file_bytes, filetype="pdf")
-            pages = doc.page_count
-            text  = "\n\n".join(pg.get_text() for pg in doc if pg.get_text().strip())
-            doc.close()
-        except Exception as e:
-            logger.warning(f"[guest2] fitz: {e}")
-    if not text and _docai_ocr is not None:
-        # S33 — both standard extraction methods came back empty. Before
-        # accepting that as "scanned, no text available", check whether
-        # this is genuinely an image-only PDF (no text layer at all) and,
-        # if so, route it through Document AI OCR rather than silently
-        # giving up. Buyer-liability documents (e.g. Local Authority
-        # Searches) must be read, not skipped — see app.py's
-        # extract_pdf_text for the fuller rationale and the original
-        # discovery of this gap.
-        try:
-            if _docai_ocr.is_image_only_pdf(file_bytes):
-                logger.info(
-                    f"[guest2] {filename!r} detected as image-only PDF — "
-                    f"routing to Document AI OCR"
-                )
-                ocr_text = _docai_ocr.extract_text_via_docai(file_bytes)
-                if ocr_text.strip():
-                    text = ocr_text
-        except Exception as e:
-            logger.warning(f"[guest2] Document AI OCR failed for "
-                            f"{filename!r}: {e}")
-    _result["text"]  = text
-    _result["pages"] = pages
 
 def _extract_text(file_bytes: bytes, filename: str) -> tuple[str, int]:
-    result = {"text": "", "pages": 0}
-    t = threading.Thread(
-        target=_extract_text_impl,
-        args=(file_bytes, filename, result),
-        daemon=True,
-    )
-    t.start()
-    t.join(timeout=_EXTRACT_TEXT_TIMEOUT_SECONDS)
-    if t.is_alive():
-        # Extraction is still running in the background thread (it's a daemon
-        # thread, so it will not block process/worker shutdown). We give up
-        # waiting for it and return empty text so the request can complete.
-        logger.warning(
-            f"[guest2] _extract_text: TIMEOUT after {_EXTRACT_TEXT_TIMEOUT_SECONDS}s "
-            f"on {filename!r} — returning empty text, doc_type will fall back to 'unknown'."
-        )
-        return "", 0
-    return result["text"], result["pages"]
+    # Deferred import: guest_routes is imported BY app.py (see
+    # `from guest_routes import guest_bp` in app.py), so importing from
+    # app at module load time would be circular. By the time this function
+    # is actually called, app.py has finished loading and this resolves
+    # cleanly — a standard, safe pattern for this kind of mutual reference.
+    from app import extract_pdf_text
+
+    try:
+        text, pages = extract_pdf_text(file_bytes)
+    except Exception as e:
+        logger.warning(f"[guest2] extract_pdf_text failed for {filename!r}: {e}")
+        text, pages = "", 0
+
+    if text or _docai_ocr is None:
+        return text, pages
+
+    # Empty extraction + OCR available — same trigger app.py uses, no local
+    # fitz pre-check. Retried with backoff (H4-RETRY parity): a transient
+    # network blip or Document AI quota hiccup on attempt 1 previously had
+    # zero retry and went straight to empty text.
+    for attempt in range(1, _OCR_MAX_ATTEMPTS + 1):
+        try:
+            logger.info(
+                f"[guest2] {filename!r} — no extractable text layer, "
+                f"routing to Document AI OCR (attempt {attempt}/{_OCR_MAX_ATTEMPTS})"
+            )
+            ocr_text = _docai_ocr.extract_text_via_docai(file_bytes)
+            if ocr_text.strip():
+                return ocr_text, pages
+            break  # OCR succeeded but returned nothing — not a transient failure, don't retry
+        except Exception as e:
+            if attempt < _OCR_MAX_ATTEMPTS:
+                logger.warning(
+                    f"[guest2] Document AI OCR attempt {attempt} failed for "
+                    f"{filename!r}: {e} — retrying in {_OCR_BACKOFF_SECONDS[attempt-1]}s"
+                )
+                time.sleep(_OCR_BACKOFF_SECONDS[attempt - 1])
+                continue
+            logger.warning(
+                f"[guest2] Document AI OCR failed for {filename!r} after "
+                f"{_OCR_MAX_ATTEMPTS} attempts: {e}"
+            )
+    return text, pages
+
 
 def _infer_doc_type(filename: str, text: str) -> str:
     fn = filename.lower(); tx = text.lower()
