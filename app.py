@@ -9406,61 +9406,6 @@ def ceiling_endpoint():
                             f"status={verdict_result.get('status')}"
                         )
 
-                        # S44-INSUFFICIENT-EVIDENCE-RESCUE (2026-07-21): confirmed live on
-                        # deal c45787fa-275d-4f0c-87ae-c56d784f93c7 (25 real flags, 6
-                        # critical) — calculate_workbench_ceiling has its own guard: "if
-                        # verdict has no valid comparable_valuation, workbench is also
-                        # insufficient_evidence", which returns risks=[] and skips the
-                        # 25 flags entirely, regardless of how severe they are. Meanwhile
-                        # merged['comps_avg_value'] (computed earlier in this same
-                        # function, via ITS OWN broader 3-tier fallback — canonical
-                        # ceiling base, verdict_ceiling base, or raw area_json comps
-                        # average) had already successfully rescued a real prior value
-                        # (£122,432 in the confirmed case) for the Financial Model, but
-                        # that rescue was never applied to verdict_result, so the SAME
-                        # deal showed a correct comparable valuation elsewhere on the
-                        # page while its risk-adjustment silently zeroed out. Reusing
-                        # the already-proven merged['comps_avg_value'] rescue here — not
-                        # inventing a new one — means the flag-driven discount still
-                        # applies against the best available base, tagged clearly so
-                        # it's never mistaken for a freshly-recomputed figure.
-                        #
-                        # `merged` is set inside an outer try block (DB read for
-                        # financials_json/area_json) that can fail, or return no row,
-                        # before ever assigning it — guard with locals() rather than
-                        # assume it exists.
-                        _merged_safe = merged if "merged" in locals() else {}
-                        if (
-                            verdict_result.get("status") == "insufficient_evidence"
-                            and _merged_safe.get("comps_avg_value")
-                            and float(_merged_safe["comps_avg_value"]) > 5000
-                        ):
-                            _rescued_base = float(_merged_safe["comps_avg_value"])
-                            _rescued_ub   = 0.05
-                            verdict_result["comparable_valuation"] = _rescued_base
-                            verdict_result.setdefault("valuation_range", {})
-                            if not verdict_result["valuation_range"].get("midpoint"):
-                                verdict_result["valuation_range"].update({
-                                    "low":              round(_rescued_base * (1 - _rescued_ub), 2),
-                                    "midpoint":          round(_rescued_base, 2),
-                                    "high":             round(_rescued_base * (1 + _rescued_ub), 2),
-                                    "uncertainty_band": _rescued_ub,
-                                })
-                            _rescue_audit = verdict_result.setdefault("audit", {})
-                            _rescue_audit["base_valuation_source"] = "rescued_from_prior_persisted_value"
-                            _rescue_audit.setdefault("warnings", []).append(
-                                f"Live comp recompute returned insufficient_evidence; "
-                                f"base valuation (£{_rescued_base:,.0f}) rescued from "
-                                f"merged['comps_avg_value'] (source={_merged_safe.get('comps_source')}) "
-                                f"so flag-driven risk-adjustment can still be applied. "
-                                f"Not a fresh recomputation."
-                            )
-                            app.logger.warning(
-                                f"[ceiling] deal={deal_id} rescued comparable_valuation="
-                                f"£{_rescued_base:,.0f} from merged.comps_avg_value "
-                                f"(source={_merged_safe.get('comps_source')}) for risk-adjustment"
-                            )
-
             # Workbench ceiling = verdict × active flag risk product
             result = _calc_workbench_ceiling(
                 verdict_ceiling=verdict_result,
@@ -10279,21 +10224,32 @@ def save_area(deal_id: str):
                     continue
                 _code = _epc_built_form_to_code(_r.get("built_form"), _r.get("property_type"))
                 if _code:
-                    _cands.append((abs(int(_am.group(1)) - int(_house)), _code))
+                    _cands.append((abs(int(_am.group(1)) - int(_house)), _code, _am.group(1)))
             if _cands:
                 _cands.sort(key=lambda x: x[0])
                 _nearest = _cands[:5]
-                _codes = [c for _, c in _nearest]
+                _codes = [c for _, c, _h in _nearest]
+                _distinct_houses = len(set(_h for _, _c, _h in _nearest))
                 _top = max(set(_codes), key=_codes.count)
                 _agree = _codes.count(_top) / len(_codes)
+                # DUPLICATE-ADDRESS-GUARD (2026-07-22): a "5 nearest" vote can
+                # be entirely satisfied by one house's own duplicate/split EPC
+                # certificates (live: 25 Chapelfield Road B45 9NU — 2 records,
+                # both address1="25 Chapelfield Road", both property_type=Flat
+                # but disagreeing built_form — a genuinely semi-detached house
+                # wrongly EPC-registered as split flats). That's 100% "agree"
+                # from a single address, not real neighbour corroboration.
+                # Require evidence from >=2 distinct house numbers before
+                # trusting the vote; otherwise fall through to the LLM
+                # cross-check below, same as a low-agreement tie.
                 # On a mixed street, distance must beat majority: the single
                 # NEAREST house is a better signal than a tie-broken vote.
                 # (Live: 104 Village St neighbours 98=Semi@6 doors, 120=Det@16;
                 # a 1-1 vote wrongly tie-broke to Detached — nearest is 98=Semi.)
                 # Trust the majority only when it is a clear one (>=60% agree);
                 # otherwise defer to the nearest house and mark low confidence.
-                if _agree >= 0.6:
-                    _conf = "high" if _agree >= 0.8 else "medium"
+                if _agree >= 0.6 and _distinct_houses >= 2:
+                    _conf = "high" if (_agree >= 0.8 and _distinct_houses >= 3) else "medium"
                     return (_top, "epc_neighbour", _conf)
                 else:
                     _nearest_code = _nearest[0][1]
