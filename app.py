@@ -9406,6 +9406,61 @@ def ceiling_endpoint():
                             f"status={verdict_result.get('status')}"
                         )
 
+                        # S44-INSUFFICIENT-EVIDENCE-RESCUE (2026-07-21): confirmed live on
+                        # deal c45787fa-275d-4f0c-87ae-c56d784f93c7 (25 real flags, 6
+                        # critical) — calculate_workbench_ceiling has its own guard: "if
+                        # verdict has no valid comparable_valuation, workbench is also
+                        # insufficient_evidence", which returns risks=[] and skips the
+                        # 25 flags entirely, regardless of how severe they are. Meanwhile
+                        # merged['comps_avg_value'] (computed earlier in this same
+                        # function, via ITS OWN broader 3-tier fallback — canonical
+                        # ceiling base, verdict_ceiling base, or raw area_json comps
+                        # average) had already successfully rescued a real prior value
+                        # (£122,432 in the confirmed case) for the Financial Model, but
+                        # that rescue was never applied to verdict_result, so the SAME
+                        # deal showed a correct comparable valuation elsewhere on the
+                        # page while its risk-adjustment silently zeroed out. Reusing
+                        # the already-proven merged['comps_avg_value'] rescue here — not
+                        # inventing a new one — means the flag-driven discount still
+                        # applies against the best available base, tagged clearly so
+                        # it's never mistaken for a freshly-recomputed figure.
+                        #
+                        # `merged` is set inside an outer try block (DB read for
+                        # financials_json/area_json) that can fail, or return no row,
+                        # before ever assigning it — guard with locals() rather than
+                        # assume it exists.
+                        _merged_safe = merged if "merged" in locals() else {}
+                        if (
+                            verdict_result.get("status") == "insufficient_evidence"
+                            and _merged_safe.get("comps_avg_value")
+                            and float(_merged_safe["comps_avg_value"]) > 5000
+                        ):
+                            _rescued_base = float(_merged_safe["comps_avg_value"])
+                            _rescued_ub   = 0.05
+                            verdict_result["comparable_valuation"] = _rescued_base
+                            verdict_result.setdefault("valuation_range", {})
+                            if not verdict_result["valuation_range"].get("midpoint"):
+                                verdict_result["valuation_range"].update({
+                                    "low":              round(_rescued_base * (1 - _rescued_ub), 2),
+                                    "midpoint":          round(_rescued_base, 2),
+                                    "high":             round(_rescued_base * (1 + _rescued_ub), 2),
+                                    "uncertainty_band": _rescued_ub,
+                                })
+                            _rescue_audit = verdict_result.setdefault("audit", {})
+                            _rescue_audit["base_valuation_source"] = "rescued_from_prior_persisted_value"
+                            _rescue_audit.setdefault("warnings", []).append(
+                                f"Live comp recompute returned insufficient_evidence; "
+                                f"base valuation (£{_rescued_base:,.0f}) rescued from "
+                                f"merged['comps_avg_value'] (source={_merged_safe.get('comps_source')}) "
+                                f"so flag-driven risk-adjustment can still be applied. "
+                                f"Not a fresh recomputation."
+                            )
+                            app.logger.warning(
+                                f"[ceiling] deal={deal_id} rescued comparable_valuation="
+                                f"£{_rescued_base:,.0f} from merged.comps_avg_value "
+                                f"(source={_merged_safe.get('comps_source')}) for risk-adjustment"
+                            )
+
             # Workbench ceiling = verdict × active flag risk product
             result = _calc_workbench_ceiling(
                 verdict_ceiling=verdict_result,
