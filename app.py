@@ -13252,22 +13252,50 @@ def create_checkout():
     try:
         profile     = supabase.table("profiles").select("stripe_customer_id, email").eq("id", request.user_id).single().execute()
         customer_id = (profile.data or {}).get("stripe_customer_id")
+        email       = (profile.data or {}).get("email") or ""
 
         if not customer_id:
-            email       = (profile.data or {}).get("email") or ""
             customer    = _stripe.Customer.create(email=email, metadata={"user_id": request.user_id})
             customer_id = customer.id
             supabase.table("profiles").update({"stripe_customer_id": customer_id}).eq("id", request.user_id).execute()
 
-        session = _stripe.checkout.Session.create(
-            customer=customer_id,
-            payment_method_types=["card"],
-            line_items=[{"price": price_id, "quantity": 1}],
-            mode=mode,
-            success_url=success_url,
-            cancel_url=cancel_url,
-            metadata={"user_id": request.user_id, "plan": PRICE_TO_PLAN[price_id], "deal_id": deal_id or ""},
-        )
+        def _create_session(cust_id: str):
+            return _stripe.checkout.Session.create(
+                customer=cust_id,
+                payment_method_types=["card"],
+                line_items=[{"price": price_id, "quantity": 1}],
+                mode=mode,
+                success_url=success_url,
+                cancel_url=cancel_url,
+                metadata={"user_id": request.user_id, "plan": PRICE_TO_PLAN[price_id], "deal_id": deal_id or ""},
+            )
+
+        # S43-STALE-STRIPE-CUSTOMER (2026-07-21): a stripe_customer_id stored
+        # from an earlier session can stop existing on the currently-active
+        # Stripe account/mode (key rotation between test/live, or the
+        # customer deleted in the Stripe dashboard) — this previously hard-
+        # failed as a generic "An internal error occurred" with no recovery,
+        # confirmed live on the founder's own long-standing test account
+        # (the only profile in the database with a stripe_customer_id at
+        # all, dating from March 2026). Retrying once against a freshly
+        # created customer makes this self-healing instead of requiring
+        # manual DB cleanup every time the underlying Stripe account/mode
+        # changes.
+        try:
+            session = _create_session(customer_id)
+        except _stripe.error.InvalidRequestError as e:
+            if getattr(e, "code", None) == "resource_missing" and (getattr(e, "param", None) == "customer" or "customer" in str(e).lower()):
+                app.logger.warning(
+                    f"[STRIPE] stored customer {customer_id} no longer exists "
+                    f"({e}) — creating a fresh customer and retrying once"
+                )
+                customer = _stripe.Customer.create(email=email, metadata={"user_id": request.user_id})
+                customer_id = customer.id
+                supabase.table("profiles").update({"stripe_customer_id": customer_id}).eq("id", request.user_id).execute()
+                session = _create_session(customer_id)
+            else:
+                raise
+
         return jsonify({"ok": True, "session_id": session.id, "url": session.url}), 200
 
     except _stripe.error.StripeError as e:
