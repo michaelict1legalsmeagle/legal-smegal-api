@@ -5423,6 +5423,21 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _r["construction_age_band"] = _resolved["construction_age_band"]
                 _r["energy_rating"]         = _resolved["energy_rating"]
                 _r["floor_area_source"]     = _resolved["source"]
+                # F-03 (2026-07-23): £/sq ft is emitted ONLY where the comp's
+                # floor area came from its OWN EPC. comp_epc_nearest borrows a
+                # neighbour's certificate — publishing a precise-looking £/sq ft
+                # off a borrowed area would be a fabricated figure. A blank cell
+                # that means "we do not know this comp's size" is the honest
+                # output; the frontend already renders "—" when this is None.
+                if _resolved["source"] == "comp_epc_exact":
+                    try:
+                        _fa_sqft = float(_resolved["floor_area"]) * 10.7639
+                        _cp = float(_r.get("price") or 0)
+                        _r["price_per_sqft"] = round(_cp / _fa_sqft) if (_fa_sqft > 0 and _cp > 0) else None
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        _r["price_per_sqft"] = None
+                else:
+                    _r["price_per_sqft"] = None
                 _epc_matched_count += 1
         _uprn_enriched_count = _epc_matched_count  # downstream audit var name retained
 
@@ -5974,6 +5989,23 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # get_housing_data to discard valid comps via the except handler).
         enrich_meta = None
 
+        # F-03 (2026-07-23): median £/sq ft, computed ONLY over comps whose
+        # floor area came from their own EPC (price_per_sqft is None for any
+        # comp sized from a neighbour's certificate — see the emit above).
+        # A median spanning borrowed areas would look precise and be partly
+        # fabricated, so coverage is published alongside it in metrics.
+        _psf_vals = sorted(
+            float(_pr["price_per_sqft"]) for _pr in rows
+            if _pr.get("price_per_sqft") is not None
+        )
+        if not _psf_vals:
+            _psf_median = None
+        elif len(_psf_vals) % 2:
+            _psf_median = round(_psf_vals[len(_psf_vals) // 2])
+        else:
+            _mid = len(_psf_vals) // 2
+            _psf_median = round((_psf_vals[_mid - 1] + _psf_vals[_mid]) / 2)
+
         out = metric_ok(summary, rows, sources, retrieved, HOUSING_CONFIDENCE_VALUE)
         out["metrics"] = {
             "provider":                    "hetzner_direct",
@@ -5983,6 +6015,12 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             "limit":                       lim,
             "count":                       len(rows),
             "median_price":                med,
+            # F-03 (2026-07-23): median £/sq ft over ONLY those comps whose
+            # floor area came from their own EPC. Coverage is published beside
+            # it so the figure is never read as spanning all comps.
+            "median_price_per_sqft":       _psf_median,
+            "median_psf_comp_count":       len(_psf_vals),
+            "median_psf_total_comps":      len(rows),
             "avg":                         avg,   # T-3: arithmetic mean (was: median, mislabelled)
             "average_price":               avg,   # T-3: arithmetic mean (was: median, mislabelled)
             "area_normalisation_applied":  _use_normalised,
