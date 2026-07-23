@@ -4519,7 +4519,11 @@ def resolve_comp_size(comp_paon_or_address, candidate_epc_rows: list) -> dict:
             _chosen, _source = _best[1], "comp_epc_nearest"
 
     if _chosen is None:
-        _chosen, _source = candidate_epc_rows[0], "comp_epc_postcode_any"
+        # 2026-07-23 (F-14): was candidate_epc_rows[0] — an arbitrary EPC row
+        # with no ordering, type or size constraint. Returning no floor area is
+        # more honest than a stranger's: _size_adjustment() then returns 1.00
+        # and discloses that the comp was not size-adjusted.
+        _chosen, _source = None, "comp_epc_unresolved"
 
     if not _chosen:
         return _none_result
