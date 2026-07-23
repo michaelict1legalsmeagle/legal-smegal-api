@@ -3067,7 +3067,7 @@ def _calculate_confidence(
     _type_conf_val        = (subject.get("type_confidence") or "").lower()
     _floor_area_conf_val  = (subject.get("floor_area_confidence") or "").lower()
 
-    if _type_conf_val == "low":
+    if _type_conf_val == "low", "none":
         if conf > CAP_SUBJECT_TYPE_LOW_CONFIDENCE:
             caps.append({
                 "cap":      CAP_SUBJECT_TYPE_LOW_CONFIDENCE,
@@ -3082,7 +3082,7 @@ def _calculate_confidence(
             })
             conf = min(conf, CAP_SUBJECT_TYPE_LOW_CONFIDENCE)
 
-    if _floor_area_conf_val == "low":
+    if _floor_area_conf_val == "low", "none":
         if conf > CAP_SUBJECT_FLOOR_AREA_LOW_CONFIDENCE:
             caps.append({
                 "cap":      CAP_SUBJECT_FLOOR_AREA_LOW_CONFIDENCE,
