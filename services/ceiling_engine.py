@@ -3211,6 +3211,59 @@ def _legal_pack_adjustment_factor(risks: list[dict]) -> float:
     return round(1.0 - total_reduction, 6)
 
 
+def legal_pack_segment_contributions(risks: list[dict]) -> dict:
+    """
+    F-05 (2026-07-23): per-segment contributions AFTER caps and geometric
+    decay — i.e. what each segment actually contributed to the reduction.
+
+    The Verdict waterfall previously allocated the total pro-rata across the
+    RAW segment sums, which ignores both the caps and the decay rank. On a
+    deal where residual_marketability_risk came in at 0.345 against its 0.20
+    cap, that understated residual (49% shown vs 62.7% actual) and inflated
+    the small segments (indemnity 4.5% shown vs 0.6% actual). The total was
+    always correct; the attribution was not.
+
+    Emitted from here rather than recomputed in JS so _SEGMENT_CAPS stays a
+    single calibrated source of truth and cannot drift between layers.
+    """
+    segment_totals: dict[str, float] = {}
+    for r in (risks or []):
+        for seg, frac in (r.get("segments") or {}).items():
+            try:
+                frac = float(frac)
+            except (TypeError, ValueError):
+                continue
+            if frac <= 0:
+                continue
+            segment_totals[seg] = segment_totals.get(seg, 0.0) + frac
+    if not segment_totals:
+        return {}
+
+    ranked = sorted(
+        ((seg, min(total, _SEGMENT_CAPS.get(seg, MAX_TOTAL_VALUE_RISK_ADJ)))
+         for seg, total in segment_totals.items()),
+        key=lambda kv: kv[1], reverse=True,
+    )
+    contributions = {seg: capped * (0.5 ** i) for i, (seg, capped) in enumerate(ranked)}
+
+    # Mirror the global backstop: if MAX_TOTAL_VALUE_RISK_ADJ bound, scale
+    # contributions so they still sum to the reduction actually applied.
+    raw_total = sum(contributions.values())
+    applied   = min(raw_total, MAX_TOTAL_VALUE_RISK_ADJ)
+    if raw_total > 0 and applied < raw_total:
+        scale = applied / raw_total
+        contributions = {k: v * scale for k, v in contributions.items()}
+
+    return {
+        "contributions":  {k: round(v, 6) for k, v in contributions.items()},
+        "raw_totals":     {k: round(v, 6) for k, v in segment_totals.items()},
+        "capped_totals":  {seg: round(c, 6) for seg, c in ranked},
+        "decay_rank":     [seg for seg, _ in ranked],
+        "total_applied":  round(applied, 6),
+        "backstop_bound": applied < raw_total,
+    }
+
+
 # =============================================================================
 # VERDICT CEILING — comparable base only, NO legal-pack flag risks applied
 # =============================================================================
@@ -3423,6 +3476,10 @@ def calculate_workbench_ceiling(
             "method":            "property_value_risk_adjustment_only",
             "adjustment_factor": risk_factor,
             "adjusted_value":    wb_risk_adjusted_value,  # = comparable_valuation × risk_factor
+            # F-05 (2026-07-23): what each segment ACTUALLY contributed, after
+            # caps and decay. The waterfall must render these, not a pro-rata
+            # split of the raw sums.
+            "segment_attribution": legal_pack_segment_contributions(active_risks),
             "risks":             active_risks,
             "routing_coverage":  risk_routing_coverage(active_risks),
             # S40 (2026-07-04): calibration honesty layer — every risk-
