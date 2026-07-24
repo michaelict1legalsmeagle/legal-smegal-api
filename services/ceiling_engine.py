@@ -4454,12 +4454,26 @@ def ensure_ceiling_owned_objects(
         isinstance(_existing_wb, dict)
         and isinstance(_existing_wb.get("market_consequence_adjustments"), dict)
     )
+    # F-05 (2026-07-23): same rule as (c) above, for the same reason. A
+    # workbench persisted before segment_attribution existed must be
+    # recomputed, or the waterfall renders the legacy pro-rata split of the
+    # RAW segment sums forever — ignoring _SEGMENT_CAPS and the 0.5^rank
+    # decay. Without this clause the new field is written by
+    # calculate_workbench_ceiling but never reaches any existing deal.
+    _wb_has_attribution = (
+        isinstance(_existing_wb, dict)
+        and isinstance(
+            (_existing_wb.get("legal_pack_value_risks") or {}).get("segment_attribution"),
+            dict,
+        )
+    )
     _wb_valid = (
         isinstance(_existing_wb, dict)
         and isinstance(_existing_wb.get("valuation_range"), dict)
         and _wb_check_val <= _v_comparable + 1  # clamp tolerance £1
         and _wb_check_val > 0
-        and _wb_has_segments  # stale pre-r6 objects must be recomputed
+        and _wb_has_segments      # stale pre-r6 objects must be recomputed
+        and _wb_has_attribution   # stale pre-F-05 objects must be recomputed
     )
 
     if _wb_valid:
