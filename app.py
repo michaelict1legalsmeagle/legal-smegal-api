@@ -4523,7 +4523,10 @@ def resolve_comp_size(comp_paon_or_address, candidate_epc_rows: list) -> dict:
         # with no ordering, type or size constraint. Returning no floor area is
         # more honest than a stranger's: _size_adjustment() then returns 1.00
         # and discloses that the comp was not size-adjusted.
-        _chosen, _source = None, "comp_epc_unresolved"
+        # Return directly rather than falling through to _none_result, which
+        # reports source "none" — that would conflate "no EPC rows in this
+        # postcode at all" with "rows existed but none matched this comp".
+        return {**_none_result, "source": "comp_epc_unresolved"}
 
     if not _chosen:
         return _none_result
