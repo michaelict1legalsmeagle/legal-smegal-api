@@ -3640,7 +3640,7 @@ def _get_imd_for_lsoa(lsoa_code: str) -> Dict[str, Any]:
     if not lsoa_code:
         return {"decile": None, "rank": None}
     try:
-        rows = data_query(
+        rows = supabase_data_query(
             "SELECT imd_rank, imd_decile FROM public.lsoa_imd WHERE lsoa_code = %s LIMIT 1",
             (lsoa_code,)
         )
@@ -3649,7 +3649,7 @@ def _get_imd_for_lsoa(lsoa_code: str) -> Dict[str, Any]:
             return {
                 "decile": rows[0].get("imd_decile"),
                 "rank":   rows[0].get("imd_rank"),
-                "source": "MHCLG IMD 2019",
+                "source": "MHCLG IMD 2025",
             }
         return {"decile": None, "rank": None}
     except Exception as e:
