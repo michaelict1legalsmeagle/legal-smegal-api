@@ -10015,37 +10015,51 @@ def save_area(deal_id: str):
                 def _patch_inference():
                     # INVARIANT: must not overwrite newer area_json writes (Invariant 3)
                     # Use optimistic lock: only write if updated_at matches snapshot
-                    try:
-                        _snap = supabase.table("deals").select("updated_at").eq("id", _deal_id_ref).single().execute()
-                        _snap_ts = (_snap.data or {}).get("updated_at")
-                    except Exception as _se:
-                        print(f"[_patch_inference] Snapshot read failed for {_deal_id_ref}: {_se}")
-                        return
+                    # FIX Item C: persist against the LATEST row with bounded
+                    # retries. The census auto-enrich path also writes area_json
+                    # on partial-Nomis deals (every load) and would win the
+                    # optimistic lock every time, permanently rejecting this
+                    # write. Re-reading + merging onto the latest snapshot each
+                    # attempt keeps Invariant 3 while letting inference land.
                     try:
                         inference_result = build_area_inference(_cached_ref, _pc_ref)
-                        _cached_ref.update(inference_result)
-                        try:
-                            _pct = (
-                                (_cached_ref.get("inference") or {})
-                                .get("benchmarks", {})
-                                .get("census", {})
-                                .get("private_rent_pct")
-                            )
-                            if _pct is not None:
-                                _cached_ref.setdefault("census", {})["private_rent_pct"] = _pct
-                        except Exception:
-                            pass
-                        # Conditional write — reject if superseded
-                        _result = supabase.table("deals").update({
-                            "area_json":  _cached_ref,
-                            "updated_at": now_iso(),
-                        }).eq("id", _deal_id_ref).eq("updated_at", _snap_ts).execute()
-                        if _result.data:
-                            print(f"[_patch_inference OK] {_deal_id_ref}")
-                        else:
-                            print(f"[_patch_inference STALE_WRITE_REJECTED] {_deal_id_ref} — newer update existed")
                     except Exception as _e:
                         print(f"[_patch_inference ERROR] {_deal_id_ref}: {_e}")
+                        return
+                    for _attempt in range(4):
+                        try:
+                            _snap = supabase.table("deals").select("updated_at,area_json") \
+                                .eq("id", _deal_id_ref).single().execute()
+                            _latest    = (_snap.data or {}).get("area_json") or {}
+                            _latest_ts = (_snap.data or {}).get("updated_at")
+                        except Exception as _se:
+                            print(f"[_patch_inference] Snapshot read failed for {_deal_id_ref}: {_se}")
+                            return
+                        if (((_latest.get("inference") or {}).get("benchmarks", {})
+                                .get("deprivation", {}) or {}).get("imd_decile")) is not None:
+                            print(f"[_patch_inference SKIP] {_deal_id_ref} — already populated")
+                            break
+                        _latest.update(inference_result)
+                        try:
+                            _pct = ((_latest.get("inference") or {}).get("benchmarks", {})
+                                    .get("census", {}).get("private_rent_pct"))
+                            if _pct is not None:
+                                _latest.setdefault("census", {})["private_rent_pct"] = _pct
+                        except Exception:
+                            pass
+                        try:
+                            _result = supabase.table("deals").update({
+                                "area_json":  _latest,
+                                "updated_at": now_iso(),
+                            }).eq("id", _deal_id_ref).eq("updated_at", _latest_ts).execute()
+                        except Exception as _we:
+                            print(f"[_patch_inference ERROR] {_deal_id_ref}: {_we}")
+                            return
+                        if _result.data:
+                            print(f"[_patch_inference OK] {_deal_id_ref} (attempt {_attempt+1})")
+                            break
+                    else:
+                        print(f"[_patch_inference GAVE_UP] {_deal_id_ref} — writes superseded")
                 import threading as _ti
                 _ti.Thread(target=_patch_inference, daemon=True).start()
             # Auto-enrich Census demographics on cached fast-path too —
