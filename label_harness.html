@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>LegalSmegal · Clause Label Harness</title>
+<style>
+  :root{
+    --bg:#0e0f11; --panel:#16181c; --panel2:#1c1f24; --line:#2a2e35;
+    --ink:#f2f4f7; --dim:#9aa2ad; --dimmer:#6b727c;
+    --accent:#f5c518; --accent-ink:#1a1a1a;
+    --good:#3fb950; --warn:#e3543a; --info:#4aa3ff;
+    --radius:12px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:14px;padding:10px 16px;flex-wrap:wrap}
+  header .title{font-weight:700;letter-spacing:.2px}
+  header .title span{color:var(--accent)}
+  .grow{flex:1}
+  .pill{background:var(--panel2);border:1px solid var(--line);border-radius:999px;
+    padding:5px 11px;font-size:13px;color:var(--dim)}
+  .pill b{color:var(--ink)}
+  button{font:inherit;cursor:pointer;border-radius:10px;border:1px solid var(--line);
+    background:var(--panel2);color:var(--ink);padding:9px 13px;transition:.12s}
+  button:hover{border-color:#3a3f47}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:700}
+  button.ghost{background:transparent}
+  .bar{height:6px;background:var(--panel2);border-radius:999px;overflow:hidden;flex-basis:100%;margin-top:2px}
+  .bar > i{display:block;height:100%;background:var(--accent);width:0}
+  main{max-width:820px;margin:0 auto;padding:22px 16px 120px}
+  .synthetic{display:none;background:rgba(227,84,58,.12);border:1px solid var(--warn);
+    color:#ffb3a6;border-radius:var(--radius);padding:10px 14px;margin-bottom:16px;font-size:13.5px}
+  .synthetic.on{display:block}
+  .empty{color:var(--dim);text-align:center;padding:60px 20px}
+  .empty h2{color:var(--ink);font-weight:650}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:16px}
+  .meta{color:var(--dimmer);font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+  .meta .k{color:var(--dim)}
+  .clause{font-size:19px;line-height:1.55;background:var(--panel2);border:1px solid var(--line);
+    border-radius:10px;padding:16px 18px;white-space:pre-wrap}
+  .chips{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .chip{font-size:12px;color:var(--dim);border:1px dashed var(--line);border-radius:999px;padding:3px 9px}
+  .chip.kw{border-style:solid;border-color:var(--info);color:var(--info)}
+  .section-label{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--dimmer);margin:20px 0 8px}
+  .suggests{display:flex;flex-direction:column;gap:8px}
+  .sugg{display:flex;align-items:center;gap:12px;text-align:left;padding:12px 14px}
+  .sugg .rank{font-size:11px;color:var(--dimmer);width:22px;flex:none}
+  .sugg .flag{font-weight:650;flex:1}
+  .sugg .score{font-variant-numeric:tabular-nums;color:var(--dim);font-size:13px}
+  .sugg .score b{color:var(--good)}
+  .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
+  .decided{border:1px solid var(--good);border-radius:10px;padding:10px 14px;margin-top:16px;
+    color:#bfead0;background:rgba(63,185,80,.08);display:flex;gap:10px;align-items:center}
+  .decided.none{border-color:var(--warn);color:#ffcabf;background:rgba(227,84,58,.08)}
+  .decided .x{margin-left:auto}
+  /* vocab picker */
+  .picker{display:none;margin-top:12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px}
+  .picker.on{display:block}
+  .picker input{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);
+    background:var(--bg);color:var(--ink);font:inherit;margin-bottom:10px}
+  .voclist{max-height:230px;overflow:auto;display:flex;flex-direction:column;gap:4px}
+  .voclist button{text-align:left;background:transparent;border:1px solid transparent}
+  .voclist button:hover{background:var(--bg);border-color:var(--line)}
+  .voclist .none{color:var(--dimmer);padding:8px}
+  nav{display:flex;gap:8px;align-items:center;margin-top:22px}
+  .hint{color:var(--dimmer);font-size:12px;margin-top:18px}
+  kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;
+    padding:1px 6px;font-size:11px;color:var(--dim)}
+  a.filelabel{display:inline-block}
+</style>
+</head>
+<body>
+<header>
+  <div class="title">Legal<span>Smegal</span> · Clause Label Harness</div>
+  <span class="pill">decided <b id="nDecided">0</b> / target <b id="nTarget">–</b></span>
+  <span class="pill">skipped <b id="nSkip">0</b></span>
+  <span class="pill">clause <b id="nPos">–</b>/<b id="nTotal">–</b></span>
+  <div class="grow"></div>
+  <label class="filelabel"><button class="ghost" id="loadBtn">Load tasks…</button>
+    <input id="file" type="file" accept="application/json,.json" hidden/></label>
+  <button class="primary" id="exportBtn" disabled>Export labels</button>
+  <div class="bar"><i id="progress"></i></div>
+</header>
+
+<main>
+  <div class="synthetic" id="synthBanner">
+    <b>SAMPLE / SYNTHETIC SUGGESTIONS.</b> This tasks file is marked synthetic — the suggested flags and
+    vocabulary are placeholders for trying the interface. <b>Do not treat anything you export from it as ground truth.</b>
+  </div>
+
+  <div id="stage">
+    <div class="empty">
+      <h2>Load a tasks file to begin</h2>
+      <p>Open <code>label_tasks.json</code> produced by <code>build_label_tasks.py</code>,<br/>
+      or the bundled <code>label_tasks.sample.json</code> to see how it works.</p>
+    </div>
+  </div>
+</main>
+
+<script>/* LegalSmegal clause-label harness — pure core logic.
+ * No DOM, no I/O. Injected verbatim into label_harness.html at build time,
+ * and unit-tested in Node against the SAME source. See HARNESS-README.md.
+ *
+ * A "decision" is one of:
+ *   {kind:'confirm',  flag, chosenFrom:'suggestion'}  human accepted a suggested flag
+ *   {kind:'correct',  flag, chosenFrom:'vocabulary'}  human picked a different real flag
+ *   {kind:'none'}                                      clause is NOT a real flag
+ * A "skip" is never a decision and never becomes a label.
+ */
+(function (root) {
+  'use strict';
+
+  function num(x) { return (typeof x === 'number' && isFinite(x)) ? x : null; }
+
+  // task + decision -> one ground-truth record. ts injected for deterministic tests.
+  function buildRecord(task, decision, ts) {
+    var sugg = Array.isArray(task.suggestions) ? task.suggestions : [];
+    var top1 = sugg.length ? (sugg[0].flag || null) : null;
+    var top1Score = sugg.length ? num(sugg[0].score) : null;
+    var isNone = decision.kind === 'none';
+    var verified = isNone ? null : (decision.flag || null);
+
+    if (!isNone && !verified) {
+      throw new Error('confirm/correct decision must carry a flag');
+    }
+    return {
+      clause_id: task.id,
+      deal_id: task.deal_id != null ? task.deal_id : null,
+      clause_text: task.clause_text,
+      verified_flag: verified,                       // null iff decision==='none'
+      decision: decision.kind,                       // confirm | correct | none
+      chosen_from: isNone ? null : (decision.chosenFrom || null),
+      resolver_top1: top1,
+      resolver_top1_score: top1Score,
+      agreed_with_resolver: verified != null && verified === top1,
+      keyword_flag: task.keyword_flag != null ? task.keyword_flag : null,
+      labeller_ts: ts
+    };
+  }
+
+  // records (array) -> newline-delimited JSON, one object per line, trailing newline.
+  function serializeJSONL(records) {
+    return records.map(function (r) { return JSON.stringify(r); }).join('\n') + (records.length ? '\n' : '');
+  }
+
+  // run-level summary, including the number that actually matters:
+  // resolver top-1 accuracy on the clauses a human adjudicated (confirm+correct only).
+  function summarize(records, skippedCount, meta) {
+    var confirm = 0, correct = 0, none = 0;
+    var top1Right = 0, top1Judged = 0;
+    for (var i = 0; i < records.length; i++) {
+      var r = records[i];
+      if (r.decision === 'confirm') confirm++;
+      else if (r.decision === 'correct') correct++;
+      else if (r.decision === 'none') none++;
+      if (r.decision !== 'none' && r.resolver_top1 != null) {
+        top1Judged++;
+        if (r.agreed_with_resolver) top1Right++;
+      }
+    }
+    return {
+      labelled: records.length,
+      confirm: confirm,
+      correct: correct,
+      none: none,
+      skipped: skippedCount || 0,
+      resolver_top1_accuracy: top1Judged ? +(top1Right / top1Judged).toFixed(4) : null,
+      resolver_top1_judged: top1Judged,
+      generated_from: (meta && meta.generated_at) ? meta.generated_at : null,
+      model: (meta && meta.model) ? meta.model : null,
+      exported_at: new Date().toISOString()
+    };
+  }
+
+  var api = { buildRecord: buildRecord, serializeJSONL: serializeJSONL, summarize: summarize };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  root.HarnessCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<script>
+(function(){
+  "use strict";
+  var C = window.HarnessCore;
+  var state = { tasks:[], meta:{}, idx:0, decisions:{}, skipped:{}, dirty:false };
+
+  var $ = function(id){ return document.getElementById(id); };
+  var stage = $('stage');
+
+  $('loadBtn').addEventListener('click', function(){ $('file').click(); });
+  $('file').addEventListener('change', function(e){
+    var f = e.target.files && e.target.files[0]; if(!f) return;
+    var rd = new FileReader();
+    rd.onload = function(){
+      try { loadTasks(JSON.parse(rd.result)); }
+      catch(err){ alert('Could not parse tasks file:\n'+err.message); }
+    };
+    rd.readAsText(f);
+  });
+
+  function loadTasks(doc){
+    var tasks = Array.isArray(doc) ? doc : (doc.tasks || []);
+    if(!tasks.length){ alert('No tasks found in file.'); return; }
+    // minimal validation — fail loud, never silently mislabel
+    for(var i=0;i<tasks.length;i++){
+      if(!tasks[i].id || typeof tasks[i].clause_text !== 'string'){
+        alert('Task '+i+' is missing an id or clause_text. Aborting load.'); return;
+      }
+    }
+    state.tasks = tasks;
+    state.meta = doc.meta || {};
+    state.vocab = (state.meta.flag_vocabulary || doc.flag_vocabulary || []).slice();
+    state.idx = 0; state.decisions = {}; state.skipped = {}; state.dirty = false;
+    $('nTarget').textContent = state.meta.target || tasks.length;
+    $('nTotal').textContent = tasks.length;
+    $('synthBanner').classList.toggle('on', !!state.meta.synthetic);
+    render();
+  }
+
+  function counts(){
+    return { decided:Object.keys(state.decisions).length, skipped:Object.keys(state.skipped).length };
+  }
+
+  function decide(task, decision){
+    delete state.skipped[task.id];
+    state.decisions[task.id] = C.buildRecord(task, decision, new Date().toISOString());
+    state.dirty = true;
+    next();
+  }
+  function skip(task){
+    delete state.decisions[task.id];
+    state.skipped[task.id] = true;
+    state.dirty = true;
+    next();
+  }
+  function undo(task){
+    delete state.decisions[task.id];
+    delete state.skipped[task.id];
+    state.dirty = true;
+    render();
+  }
+  function next(){ if(state.idx < state.tasks.length-1) state.idx++; render(); }
+  function prev(){ if(state.idx > 0) state.idx--; render(); }
+
+  function render(){
+    if(!state.tasks.length) return;
+    var c = counts();
+    $('nDecided').textContent = c.decided;
+    $('nSkip').textContent = c.skipped;
+    $('nPos').textContent = state.idx+1;
+    var target = state.meta.target || state.tasks.length;
+    $('progress').style.width = Math.min(100, Math.round(100*c.decided/target)) + '%';
+    $('exportBtn').disabled = c.decided === 0;
+
+    var t = state.tasks[state.idx];
+    var existing = state.decisions[t.id];
+    var wasSkipped = state.skipped[t.id];
+
+    var prov = [];
+    if(t.source_clause) prov.push('<span class="k">clause</span> '+esc(t.source_clause));
+    if(t.source_document) prov.push('<span class="k">doc</span> '+esc(t.source_document));
+    if(t.source_page) prov.push('<span class="k">p.</span> '+esc(t.source_page));
+    if(t.deal_id) prov.push('<span class="k">deal</span> '+esc(String(t.deal_id).slice(0,8)));
+    if(t.severity) prov.push('<span class="k">sev</span> '+esc(t.severity));
+
+    var sugg = Array.isArray(t.suggestions) ? t.suggestions : [];
+    var suggHtml = sugg.length ? sugg.map(function(s,i){
+      return '<button class="sugg" data-sugg="'+i+'">'+
+             '<span class="rank">#'+(i+1)+'</span>'+
+             '<span class="flag">'+esc(s.flag)+'</span>'+
+             '<span class="score">'+(typeof s.score==='number'?('score <b>'+s.score.toFixed(3)+'</b>'):'')+'</span>'+
+             '</button>';
+    }).join('') : '<div class="hint">No resolver suggestions for this clause — use “Pick a flag”.</div>';
+
+    var decidedHtml = '';
+    if(existing){
+      if(existing.decision==='none'){
+        decidedHtml = '<div class="decided none">Marked <b>not a real flag</b>.'+
+          '<button class="ghost x" data-undo="1">Undo</button></div>';
+      } else {
+        decidedHtml = '<div class="decided">Labelled <b>'+esc(existing.verified_flag)+'</b>'+
+          ' <span style="color:var(--dimmer)">('+existing.decision+')</span>'+
+          '<button class="ghost x" data-undo="1">Undo</button></div>';
+      }
+    } else if(wasSkipped){
+      decidedHtml = '<div class="decided none">Skipped.<button class="ghost x" data-undo="1">Un-skip</button></div>';
+    }
+
+    stage.innerHTML =
+      '<div class="card">'+
+        '<div class="meta">'+ (prov.join('') || '<span class="k">no provenance</span>') +'</div>'+
+        '<div class="clause">'+ esc(t.clause_text) +'</div>'+
+        (t.keyword_flag ? '<div class="chips"><span class="chip kw">keyword layer said: '+esc(t.keyword_flag)+'</span></div>' : '')+
+        '<div class="section-label">Confirm a suggested flag</div>'+
+        '<div class="suggests">'+ suggHtml +'</div>'+
+        '<div class="actions">'+
+          '<button id="pickBtn">Pick a flag…</button>'+
+          '<button id="noneBtn" class="ghost">Not a real flag</button>'+
+          '<button id="skipBtn" class="ghost">Skip</button>'+
+        '</div>'+
+        '<div class="picker" id="picker">'+
+          '<input id="vocFilter" placeholder="type to filter '+state.vocab.length+' flags…" autocomplete="off"/>'+
+          '<div class="voclist" id="voclist"></div>'+
+        '</div>'+
+        decidedHtml +
+        '<nav>'+
+          '<button id="prevBtn" class="ghost">◀ Prev</button>'+
+          '<button id="nextBtn" class="ghost">Next ▶</button>'+
+          '<div class="grow"></div>'+
+          '<span class="hint" style="margin:0">'+
+            '<kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> confirm · <kbd>p</kbd> pick · <kbd>n</kbd> none · <kbd>s</kbd> skip · <kbd>←</kbd><kbd>→</kbd> move</span>'+
+        '</nav>'+
+      '</div>'+
+      '<div class="hint">Labels stay in memory until you press <b>Export labels</b>. Nothing is uploaded anywhere.</div>';
+
+    // wire suggestion buttons
+    Array.prototype.forEach.call(stage.querySelectorAll('[data-sugg]'), function(b){
+      b.addEventListener('click', function(){
+        var s = sugg[+b.getAttribute('data-sugg')];
+        decide(t, {kind:'confirm', flag:s.flag, chosenFrom:'suggestion'});
+      });
+    });
+    var undoBtn = stage.querySelector('[data-undo]');
+    if(undoBtn) undoBtn.addEventListener('click', function(){ undo(t); });
+    $('noneBtn').addEventListener('click', function(){ decide(t, {kind:'none'}); });
+    $('skipBtn').addEventListener('click', function(){ skip(t); });
+    $('prevBtn').addEventListener('click', prev);
+    $('nextBtn').addEventListener('click', next);
+    $('pickBtn').addEventListener('click', togglePicker);
+    $('vocFilter').addEventListener('input', renderVocab);
+  }
+
+  function togglePicker(){
+    var p = $('picker'); p.classList.toggle('on');
+    if(p.classList.contains('on')){ renderVocab(); $('vocFilter').focus(); }
+  }
+  function renderVocab(){
+    var q = ($('vocFilter').value||'').toLowerCase().trim();
+    var list = state.vocab.filter(function(f){ return !q || f.toLowerCase().indexOf(q)>=0; }).slice(0,200);
+    var t = state.tasks[state.idx];
+    var box = $('voclist');
+    if(!state.vocab.length){ box.innerHTML = '<div class="none">This tasks file carries no flag vocabulary. Regenerate with the resolver so the full flag list is available.</div>'; return; }
+    box.innerHTML = list.length ? list.map(function(f){
+      return '<button data-flag="'+esc(f)+'">'+esc(f)+'</button>';
+    }).join('') : '<div class="none">No flag matches “'+esc(q)+'”.</div>';
+    Array.prototype.forEach.call(box.querySelectorAll('[data-flag]'), function(b){
+      b.addEventListener('click', function(){
+        decide(t, {kind:'correct', flag:b.getAttribute('data-flag'), chosenFrom:'vocabulary'});
+      });
+    });
+  }
+
+  // keyboard
+  document.addEventListener('keydown', function(e){
+    if(!state.tasks.length) return;
+    if(/input/i.test((e.target.tagName||''))){
+      if(e.key==='Escape'){ $('picker').classList.remove('on'); $('vocFilter').blur(); }
+      return;
+    }
+    var t = state.tasks[state.idx];
+    var sugg = Array.isArray(t.suggestions)?t.suggestions:[];
+    if(e.key==='1'&&sugg[0]) decide(t,{kind:'confirm',flag:sugg[0].flag,chosenFrom:'suggestion'});
+    else if(e.key==='2'&&sugg[1]) decide(t,{kind:'confirm',flag:sugg[1].flag,chosenFrom:'suggestion'});
+    else if(e.key==='3'&&sugg[2]) decide(t,{kind:'confirm',flag:sugg[2].flag,chosenFrom:'suggestion'});
+    else if(e.key==='p'||e.key==='P') togglePicker();
+    else if(e.key==='n'||e.key==='N') decide(t,{kind:'none'});
+    else if(e.key==='s'||e.key==='S') skip(t);
+    else if(e.key==='ArrowLeft') prev();
+    else if(e.key==='ArrowRight') next();
+  });
+
+  // export
+  $('exportBtn').addEventListener('click', function(){
+    var recs = state.tasks.map(function(t){ return state.decisions[t.id]; }).filter(Boolean);
+    if(!recs.length){ alert('No labels to export yet.'); return; }
+    var summary = C.summarize(recs, Object.keys(state.skipped).length, state.meta);
+    if(state.meta.synthetic && !confirm('This is a SYNTHETIC sample file. Export anyway (for testing only)?')) return;
+    download('verified_labels.jsonl', C.serializeJSONL(recs), 'application/x-ndjson');
+    download('label_run_summary.json', JSON.stringify(summary, null, 2), 'application/json');
+    state.dirty = false;
+  });
+
+  function download(name, text, mime){
+    var blob = new Blob([text], {type:mime||'text/plain'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a'); a.href=url; a.download=name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 500);
+  }
+
+  window.addEventListener('beforeunload', function(e){
+    if(state.dirty){ e.preventDefault(); e.returnValue=''; }
+  });
+
+  function esc(s){ return String(s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+})();
+</script>
+</body>
+</html>
