@@ -818,9 +818,6 @@ def _fetch_lot_image(source_url: str) -> "str | None":
     """
     if not source_url:
         return None
-    # Single source of truth for the logo filter (services.auction_scraper).
-    # Local fallback predicate keeps enrichment self-contained under the
-    # scan_auctions spec-loader path, where the shared import could be skipped.
     try:
         from services.auction_scraper import _is_property_image as _is_prop
     except Exception:

@@ -697,6 +697,7 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
                         "property_type": {"type": "string"},
                         "detail_url":    {"type": "string"},
                         "legal_pack_url": {"type": "string"},
+                        "image_url":     {"type": "string"},
                     }
                 }
             }
