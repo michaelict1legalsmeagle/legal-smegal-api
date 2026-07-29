@@ -809,9 +809,27 @@ def _step_planning(postcode: str) -> dict:
 
 
 def _fetch_lot_image(source_url: str) -> "str | None":
-    """Fetch og:image from a lot detail page. Called once when image_url is null."""
+    """Fetch og:image from a lot detail page. Called once when image_url is null.
+
+    Applies the SAME logo/placeholder filter as the scraper before returning,
+    so an auction-house og:image logo (e.g. Savills company-logo.svg) is never
+    stored as the lot photo. Without this guard the enrichment fallback bypasses
+    the scraper's _is_property_image() check and poisons image_url with a logo.
+    """
     if not source_url:
         return None
+    # Single source of truth for the logo filter (services.auction_scraper).
+    # Local fallback predicate keeps enrichment self-contained under the
+    # scan_auctions spec-loader path, where the shared import could be skipped.
+    try:
+        from services.auction_scraper import _is_property_image as _is_prop
+    except Exception:
+        _LOGO_BITS = ("/build/assets/", "/assets/company-logo", "company-logo",
+                      "logo.svg", "brand-", "/logo/", "og-share", "placeholder",
+                      "noimage", "default-property",
+                      "/assets/images/auctions/archived")
+        def _is_prop(u: "str | None") -> bool:
+            return bool(u) and not any(b in u.lower() for b in _LOGO_BITS)
     try:
         import requests as _req
         r = _req.get(source_url, timeout=5,
@@ -837,7 +855,8 @@ def _fetch_lot_image(source_url: str) -> "str | None":
                 quote = prefix[-1]
                 end = meta_html.find(quote, ci)
                 url = meta_html[ci:end].strip()
-                if url.startswith("http"):
+                # Only accept a real property photo — reject logos/placeholders.
+                if url.startswith("http") and _is_prop(url):
                     return url
     except Exception:
         pass
