@@ -410,22 +410,34 @@ def _scrape_savills(source: dict, meta: dict | None = None) -> list:
             meta["partial_reason"] = f"savills_seed_error: {exc}"
         return []
 
-    # ── Step 2: Firecrawl the catalogue ────────────────────────────────────
-    # Savills is a JS SPA: give Firecrawl time to render (waitFor), and try the
-    # URL variants that have historically served a full lot list — take the first
-    # that returns lots. This self-heals when the pagination suffix changes and
-    # when the empty result was a render-timing miss rather than a real 0 lots.
-    _sel  = {**(source.get("selectors") or {}), "firecrawl_wait": 8000}
+    # ── Step 2: Firecrawl the catalogue, paginated ─────────────────────────
+    # Savills' single full-catalogue page (/quantity-100) is ~950KB and the
+    # Firecrawl extractor silently returns 0 lots from it — this is what broke
+    # the feed. Verified reliable page size is 15 (20+ starts dropping lots).
+    # Page through /page-N/quantity-15 until a page returns nothing, deduping by
+    # detail_url. _MAX_PAGES caps runaway; the date post-process below is applied
+    # to the combined result.
     _base = catalogue_url.rstrip("/")
+    _PAGE_SIZE = 15
+    _MAX_PAGES = 30                      # 30 * 15 = 450-lot safety ceiling
     results = []
-    for _v in (_base + "/page-1/quantity-100", _base + "/quantity-100", _base):
-        results = _scrape_firecrawl({**source, "listings_url": _v, "selectors": _sel},
-                                    meta=meta)
-        if results:
-            if isinstance(meta, dict):
-                meta.pop("partial_reason", None)
-            log.info("[SCAN:savills] lots via %s (%d)", _v, len(results))
-            break
+    _seen = set()
+    for _page in range(1, _MAX_PAGES + 1):
+        _url = f"{_base}/page-{_page}/quantity-{_PAGE_SIZE}"
+        _batch = _scrape_firecrawl({**source, "listings_url": _url}, meta=meta)
+        if not _batch:
+            break                       # empty page = past the last lot
+        for _lot in _batch:
+            _key = _lot.get("_raw_source_url")
+            if _key and _key in _seen:
+                continue                # same lot echoed on another page
+            if _key:
+                _seen.add(_key)
+            results.append(_lot)
+    # Got lots across ≥1 page → clear the per-page 'firecrawl_empty' that the
+    # final (past-the-end) page set on meta.
+    if isinstance(meta, dict) and results:
+        meta.pop("partial_reason", None)
 
     # Post-process: inject auction_date from catalogue URL slug if missing
     # URL pattern: /auctions/20-may-2026-223 → "2026-05-20"
@@ -722,14 +734,6 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
             "systemPrompt": prompt,
         }
     }
-    # Optional render wait for JS/SPA sources (ms). Only set when the source asks
-    # for it (e.g. Savills), so other sources are unaffected.
-    _wait = (source.get("selectors") or {}).get("firecrawl_wait")
-    if _wait:
-        try:
-            payload["waitFor"] = int(_wait)
-        except (TypeError, ValueError):
-            pass
 
     try:
         resp = requests.post(
