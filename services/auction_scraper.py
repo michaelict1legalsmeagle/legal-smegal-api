@@ -434,6 +434,17 @@ def _scrape_savills(source: dict, meta: dict | None = None) -> list:
             if _key:
                 _seen.add(_key)
             results.append(_lot)
+    # Null images shared by ≥2 distinct lots. Savills' catalogue extraction
+    # repeats one image (a branded "no photo" slide or a mis-paired thumbnail)
+    # across different lots; a shared image is never a valid unique property
+    # photo, so blank it rather than show the wrong picture on a lot.
+    from collections import Counter as _Counter
+    _freq = _Counter(r.get("_raw_image_url") for r in results if r.get("_raw_image_url"))
+    for _r in results:
+        _iu = _r.get("_raw_image_url")
+        if _iu and _freq[_iu] >= 2:
+            _r["_raw_image_url"] = None
+
     # Got lots across ≥1 page → clear the per-page 'firecrawl_empty' that the
     # final (past-the-end) page set on meta.
     if isinstance(meta, dict) and results:
