@@ -743,7 +743,7 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
                 "Authorization": f"Bearer {FIRECRAWL_API_KEY}",
                 "Content-Type": "application/json",
             },
-            timeout=60,
+            timeout=120,
         )
         if meta is not None:
             meta["firecrawl_status_code"] = resp.status_code
@@ -834,6 +834,9 @@ _LOGO_PATTERNS = (
     "placeholder",
     "noimage",
     "default-property",
+    "/agency_logos/",      # iamsold estate-agent logos (photo-less lots)
+    "-logo.",              # e.g. blundells-logo.png
+    "logo-",               # e.g. logo-blue.png (SDL placeholder)
 )
 
 def _is_property_image(url: "str | None") -> bool:

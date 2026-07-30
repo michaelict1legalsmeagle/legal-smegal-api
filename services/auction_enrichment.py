@@ -824,7 +824,8 @@ def _fetch_lot_image(source_url: str) -> "str | None":
         _LOGO_BITS = ("/build/assets/", "/assets/company-logo", "company-logo",
                       "logo.svg", "brand-", "/logo/", "og-share", "placeholder",
                       "noimage", "default-property",
-                      "/assets/images/auctions/archived")
+                      "/assets/images/auctions/archived",
+                      "/agency_logos/", "-logo.", "logo-")
         def _is_prop(u: "str | None") -> bool:
             return bool(u) and not any(b in u.lower() for b in _LOGO_BITS)
     try:
