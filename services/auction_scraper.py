@@ -410,12 +410,22 @@ def _scrape_savills(source: dict, meta: dict | None = None) -> list:
             meta["partial_reason"] = f"savills_seed_error: {exc}"
         return []
 
-    # ── Step 2: Firecrawl the catalogue (100 lots per page) ────────────────
-    # Append /quantity-100 so Firecrawl sees a full page of lots
-    firecrawl_url = catalogue_url.rstrip("/") + "/page-1/quantity-100"
-    source_override = {**source, "listings_url": firecrawl_url}
-
-    results = _scrape_firecrawl(source_override, meta=meta)
+    # ── Step 2: Firecrawl the catalogue ────────────────────────────────────
+    # Savills is a JS SPA: give Firecrawl time to render (waitFor), and try the
+    # URL variants that have historically served a full lot list — take the first
+    # that returns lots. This self-heals when the pagination suffix changes and
+    # when the empty result was a render-timing miss rather than a real 0 lots.
+    _sel  = {**(source.get("selectors") or {}), "firecrawl_wait": 8000}
+    _base = catalogue_url.rstrip("/")
+    results = []
+    for _v in (_base + "/page-1/quantity-100", _base + "/quantity-100", _base):
+        results = _scrape_firecrawl({**source, "listings_url": _v, "selectors": _sel},
+                                    meta=meta)
+        if results:
+            if isinstance(meta, dict):
+                meta.pop("partial_reason", None)
+            log.info("[SCAN:savills] lots via %s (%d)", _v, len(results))
+            break
 
     # Post-process: inject auction_date from catalogue URL slug if missing
     # URL pattern: /auctions/20-may-2026-223 → "2026-05-20"
@@ -712,6 +722,14 @@ def _scrape_firecrawl(source: dict, meta: dict | None = None) -> list[dict]:
             "systemPrompt": prompt,
         }
     }
+    # Optional render wait for JS/SPA sources (ms). Only set when the source asks
+    # for it (e.g. Savills), so other sources are unaffected.
+    _wait = (source.get("selectors") or {}).get("firecrawl_wait")
+    if _wait:
+        try:
+            payload["waitFor"] = int(_wait)
+        except (TypeError, ValueError):
+            pass
 
     try:
         resp = requests.post(
