@@ -2996,6 +2996,27 @@ nwr["tourism"](around:{radius},{lat},{lng});
         )
 
 
+def _supabase_execute_with_retry(build_query, attempts: int = 3, base_delay: float = 0.25):
+    """Execute a supabase-py query with bounded retry on TRANSIENT connection
+    errors (e.g. EAGAIN / '[Errno 11] Resource temporarily unavailable', which the
+    12-worker area fetch can trigger on socket allocation under load).
+
+    build_query is a zero-arg callable returning a FRESH, un-executed query builder
+    each attempt (supabase-py builders are single-use). Reads are idempotent, so
+    retrying is safe. Re-raises the last exception if every attempt fails, so the
+    caller's existing except-branch handles a genuine, persistent error unchanged.
+    """
+    _last_exc = None
+    for _attempt in range(attempts):
+        try:
+            return build_query().execute()
+        except Exception as _e:
+            _last_exc = _e
+            if _attempt < attempts - 1:
+                time.sleep(base_delay * (2 ** _attempt))  # 0.25s, then 0.50s
+    raise _last_exc
+
+
 def get_schools_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
@@ -3095,12 +3116,11 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
 
         try:
             cols_view = "postcode_district,urn,name,establishment_type,phase,local_authority,town,postcode,status,telephone,website"
-            res = (
-                supabase.table(SCHOOLS_SUPABASE_VIEW)
+            res = _supabase_execute_with_retry(
+                lambda: supabase.table(SCHOOLS_SUPABASE_VIEW)
                 .select(cols_view)
                 .eq("postcode_district", district)
                 .limit(SCHOOLS_MAX_RESULTS)
-                .execute()
             )
             rows = res.data if hasattr(res, "data") else None
             if not isinstance(rows, list):
@@ -3126,12 +3146,11 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
 
         try:
             cols_tbl = "urn,name,postcode,phase,establishment_type,local_authority,town,status,telephone,website"
-            res2 = (
-                supabase.table(SCHOOLS_SUPABASE_FALLBACK_TABLE)
+            res2 = _supabase_execute_with_retry(
+                lambda: supabase.table(SCHOOLS_SUPABASE_FALLBACK_TABLE)
                 .select(cols_tbl)
                 .ilike("postcode", f"{district}%")
                 .limit(SCHOOLS_MAX_RESULTS)
-                .execute()
             )
             rows2 = res2.data if hasattr(res2, "data") else None
             if not isinstance(rows2, list):
