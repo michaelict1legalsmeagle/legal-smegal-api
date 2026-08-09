@@ -25,6 +25,9 @@ logging.basicConfig(
 )
 
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
@@ -161,6 +164,35 @@ CORS(
     allow_headers=["Content-Type", "Authorization"],
     methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
 )
+
+# ── H3: app-level rate limiting (abuse / DoS burst cap) ────────────────────────
+# Render terminates at a single load-balancer hop, so the real client IP is in
+# X-Forwarded-For. Without ProxyFix, request.remote_addr is the balancer and every
+# client shares one bucket. x_for=1 = trust exactly one hop.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+# memory:// storage: 2 sync workers + max_requests=500 recycle (gunicorn.conf.py)
+# → counters are per-worker and reset periodically. Correct for SHORT-WINDOW burst
+# limits (this abuse cap); it is NOT a per-hour/day quota (the per-user billing
+# quota is separate). swallow_errors → a limiter fault never 500s a real request.
+limiter = Limiter(
+    key_func=get_remote_address,        # real client IP, post-ProxyFix
+    default_limits=["200 per minute"],  # generous global cap; no human session hits it
+    storage_uri="memory://",
+    strategy="fixed-window",
+    swallow_errors=True,
+    headers_enabled=True,
+)
+limiter.init_app(app)
+
+@limiter.request_filter
+def _ratelimit_exempt_options():
+    # Never limit CORS preflight — would break the frontend under load.
+    return request.method == "OPTIONS"
+
+@app.errorhandler(429)
+def _ratelimit_429(e):
+    return jsonify({"error": "Rate limit exceeded — slow down and retry shortly"}), 429
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GOOGLE_MAPS_API_KEY = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
@@ -1488,6 +1520,7 @@ def _enrich_housing_rows_with_latlng(rows: List[Dict[str, Any]]) -> Tuple[List[D
 
 
 @app.route("/adapters/geocode/batch", methods=["POST"])
+@limiter.limit("20 per minute")
 def adapter_geocode_batch():
     payload = request.get_json(silent=True) or {}
     queries = payload.get("queries") or []
@@ -6188,6 +6221,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
 
 @app.route("/adapters/geo", methods=["GET"])
+@limiter.limit("20 per minute")
 def adapter_geo():
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
     lsoa_gss, meta = resolve_lsoa_gss_from_postcode(postcode)
@@ -6200,18 +6234,21 @@ def adapter_geo():
 
 
 @app.route("/adapters/schools", methods=["GET"])
+@limiter.limit("20 per minute")
 def adapter_schools():
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
     return jsonify(get_schools_data(postcode))
 
 
 @app.route("/adapters/broadband", methods=["GET"])
+@limiter.limit("20 per minute")
 def adapter_broadband():
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
     return jsonify(get_broadband_data(postcode))
 
 
 @app.route("/adapters/housing/comps", methods=["GET"])
+@limiter.limit("20 per minute")
 def adapter_housing_comps():
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
     radius_miles = safe_float(request.args.get("radius_miles"))
@@ -6220,6 +6257,7 @@ def adapter_housing_comps():
 
 
 @app.route("/adapters/nomis", methods=["GET"])
+@limiter.limit("20 per minute")
 def adapter_nomis():
     table_raw = (request.args.get("table", "") or "").strip()
     postcode = normalize_postcode(request.args.get("postcode", "") or "")
@@ -6251,6 +6289,7 @@ def adapter_nomis():
 
 @app.route("/market-insights", methods=["POST"])
 @app.route("/market_insights", methods=["POST"])  # alias for any legacy/underscore callers
+@limiter.limit("5 per minute")
 def market_insights():
     data = request.get_json(silent=True) or {}
     postcode = normalize_postcode(data.get("postcode", "") or "")
@@ -6411,6 +6450,7 @@ def market_insights():
 
 
 @app.route("/qa/clarify", methods=["POST"])
+@limiter.limit("5 per minute")
 def qa_clarify():
     """Bounded solicitor-style clarification for a single triage flag.
 
@@ -6463,6 +6503,7 @@ def qa_clarify():
 
 
 @app.route("/llm/json", methods=["POST"])
+@limiter.limit("5 per minute")
 def llm_json_route():
     """
     Dual-mode endpoint:
@@ -10908,6 +10949,7 @@ def get_auction_brief(deal_id: str):
 #        natively, so we accept token as a query param too: ?token=<jwt>)
 
 @app.route("/api/deals/<deal_id>/summarise/stream", methods=["GET"])
+@limiter.limit("10 per minute")
 def summarise_stream(deal_id: str):
     """SSE endpoint — streams summary pipeline progress to the frontend."""
     import json as _json
@@ -11472,6 +11514,7 @@ def _build_service_jwt(user_id: str) -> str:
 
 # ── GUEST: CREATE DEAL ────────────────────────────────────────────────────
 @app.route("/api/guest/create-deal", methods=["POST", "OPTIONS"])
+@limiter.limit("10 per minute")
 def guest_create_deal():
     """No-auth endpoint. Creates a deal under GUEST_USER_ID.
     Body: { email }
@@ -11509,6 +11552,7 @@ def guest_create_deal():
 
 # ── GUEST: UPLOAD DOCUMENT ───────────────────────────────────────────────
 @app.route("/api/guest/upload", methods=["POST", "OPTIONS"])
+@limiter.limit("10 per minute")
 def guest_upload_document():
     """No-auth endpoint. Uploads a PDF to a guest deal.
     Multipart: file (PDF), deal_id.
@@ -11617,6 +11661,7 @@ def guest_upload_document():
 
 # ── GUEST: CREATE STRIPE CHECKOUT ────────────────────────────────────────
 @app.route("/api/guest/checkout", methods=["POST", "OPTIONS"])
+@limiter.limit("10 per minute")
 def guest_checkout():
     """No-auth endpoint. Creates a Stripe Checkout session for a guest deal.
     Body: { deal_id }
@@ -11688,6 +11733,7 @@ def guest_checkout():
 
 # ── STRIPE WEBHOOK ────────────────────────────────────────────────────────
 @app.route("/api/webhooks/stripe", methods=["POST"])
+@limiter.exempt
 def stripe_webhook():
     """Stripe webhook. Triggers analysis after successful payment.
     No auth — verified via Stripe-Signature header."""
@@ -11758,6 +11804,7 @@ def stripe_webhook():
 
 # ── GUEST: FETCH REPORT (token-gated) ────────────────────────────────────
 @app.route("/api/guest/report", methods=["GET", "OPTIONS"])
+@limiter.limit("30 per minute")
 def guest_get_report():
     """No-auth endpoint. Returns deal data for a valid report token.
     Query: ?token=<signed_jwt>
@@ -12734,6 +12781,7 @@ def auction_events_list():
 
 
 @app.route("/api/auction/events/refresh", methods=["POST", "OPTIONS"])
+@limiter.limit("5 per minute")
 def auction_events_refresh():
     """
     POST /api/auction/events/refresh
@@ -13417,6 +13465,7 @@ def create_checkout():
 
 
 @app.route("/api/billing/webhook", methods=["POST"])
+@limiter.exempt
 def stripe_billing_webhook():
     """Handle Stripe webhook events — upgrades user plan on successful payment."""
     import stripe as _stripe
