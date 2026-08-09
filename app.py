@@ -166,17 +166,26 @@ CORS(
 )
 
 # ── H3: app-level rate limiting (abuse / DoS burst cap) ────────────────────────
-# Render terminates at a single load-balancer hop, so the real client IP is in
-# X-Forwarded-For. Without ProxyFix, request.remote_addr is the balancer and every
-# client shares one bucket. x_for=1 = trust exactly one hop.
+# This service sits behind Cloudflare (Render access log shows rotating Cloudflare
+# edge IPs). So the rate-limit key MUST come from CF-Connecting-IP — Cloudflare sets
+# it to the true client and overwrites any spoofed value, making it stable across
+# CF's rotating edge and un-forgeable (leftmost-XFF would be spoofable, and an XFF
+# hop-count is fragile). ProxyFix is kept only so the non-CF fallback (get_remote_
+# address) resolves sanely; the CF header is the real key.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+def _client_ip() -> str:
+    cf = request.headers.get("CF-Connecting-IP")
+    if cf:
+        return cf.strip()
+    return get_remote_address()
 
 # memory:// storage: 2 sync workers + max_requests=500 recycle (gunicorn.conf.py)
 # → counters are per-worker and reset periodically. Correct for SHORT-WINDOW burst
 # limits (this abuse cap); it is NOT a per-hour/day quota (the per-user billing
 # quota is separate). swallow_errors → a limiter fault never 500s a real request.
 limiter = Limiter(
-    key_func=get_remote_address,        # real client IP, post-ProxyFix
+    key_func=_client_ip,                # CF-Connecting-IP behind Cloudflare, else remote_addr
     default_limits=["200 per minute"],  # generous global cap; no human session hits it
     storage_uri="memory://",
     strategy="fixed-window",
