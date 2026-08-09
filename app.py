@@ -11561,7 +11561,7 @@ def guest_create_deal():
 
 # ── GUEST: UPLOAD DOCUMENT ───────────────────────────────────────────────
 @app.route("/api/guest/upload", methods=["POST", "OPTIONS"])
-@limiter.limit("10 per minute")
+@limiter.limit("60 per minute")
 def guest_upload_document():
     """No-auth endpoint. Uploads a PDF to a guest deal.
     Multipart: file (PDF), deal_id.
