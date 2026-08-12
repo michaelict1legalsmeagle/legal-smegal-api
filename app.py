@@ -194,6 +194,28 @@ limiter = Limiter(
 )
 limiter.init_app(app)
 
+# ── require_auth — defined EARLY (before any route) because decorators
+# evaluate at import time top-to-bottom; several gated routes sit above
+# this function's original location. Body refs (request/jsonify/
+# get_user_id_from_request) resolve at request time, so early def is safe.
+def require_auth(f):
+    """Decorator — returns 401 if no valid JWT.
+    OPTIONS preflight requests are always passed through so flask-cors
+    can attach the correct Access-Control-* headers without an auth gate."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # CORS preflight — never carries an Authorization header by spec.
+        # Let flask-cors handle it; do NOT auth-gate it.
+        if request.method == "OPTIONS":
+            return f(*args, **kwargs)
+        user_id = get_user_id_from_request()
+        if not user_id:
+            return jsonify({"error": "Unauthorised — valid JWT required"}), 401
+        request.user_id = user_id
+        return f(*args, **kwargs)
+    return decorated
+
 @limiter.request_filter
 def _ratelimit_exempt_options():
     # Never limit CORS preflight — would break the frontend under load.
@@ -6661,23 +6683,6 @@ def get_user_id_from_request() -> Optional[str]:
         return None
 
 
-def require_auth(f):
-    """Decorator — returns 401 if no valid JWT.
-    OPTIONS preflight requests are always passed through so flask-cors
-    can attach the correct Access-Control-* headers without an auth gate."""
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        # CORS preflight — never carries an Authorization header by spec.
-        # Let flask-cors handle it; do NOT auth-gate it.
-        if request.method == "OPTIONS":
-            return f(*args, **kwargs)
-        user_id = get_user_id_from_request()
-        if not user_id:
-            return jsonify({"error": "Unauthorised — valid JWT required"}), 401
-        request.user_id = user_id
-        return f(*args, **kwargs)
-    return decorated
 
 
 # ── AI EXPLAIN — Flag workbench Ask AI proxy ────────────────
