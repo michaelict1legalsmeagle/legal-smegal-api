@@ -4698,6 +4698,45 @@ def _extract_epc_assessment_date_from_text(text: Optional[str]) -> Optional[str]
         return None
 
 
+def _extract_epc_property_type_from_text(text: Optional[str]) -> Optional[str]:
+    """Extract the subject's built-form code from the 'Property type' field of
+    an EPC-certificate document (the property's OWN stated type).
+
+    S37-EPC-PACK-TYPE (2026-08-12), verified live on 3 The Green, Seamer
+    (deal b7e962ae): the uploaded pack contained the property's own EPC whose
+    text reads "Property type\\nSemi-detached house", but the pipeline stored
+    "Terraced" because the LLM misread the pack and the external EPC register
+    had no exact row (neighbour vote said Terraced). The stated type in the
+    pack's own certificate must outrank both. This reads that field from the
+    same EPC text the floor-area extractor already consumes.
+
+    Matches the standard gov.uk EPC layout (label and value on adjacent lines):
+      "Property type\\nSemi-detached house"
+      "Property type: Semi-detached house"
+    Returns a canonical code S/T/D/F, or None when the field is absent or is a
+    non-structural type (plain 'House'/'Bungalow'/'Park home'), in which case
+    the caller falls back to the existing register/neighbour/LLM resolution.
+    """
+    if not text:
+        return None
+    m = re.search(
+        r'property\s+type\s*[:\n]?\s*([A-Za-z][A-Za-z\-\/ ]{2,40})',
+        text, re.I
+    )
+    if not m:
+        return None
+    val = m.group(1).strip().upper()
+    if "MAISONETTE" in val or "FLAT" in val:
+        return "F"
+    if "SEMI" in val:      # semi-detached — check before DETACH
+        return "S"
+    if "TERRACE" in val:   # mid-/end-terrace
+        return "T"
+    if "DETACH" in val:
+        return "D"
+    return None
+
+
 def _compute_gia_from_text(text: Optional[str]) -> Tuple[Optional[float], int, str]:
     """Deterministic gross internal area (m²) from auction-particulars room
     dimensions — the production-grade subject-size source.
@@ -10432,9 +10471,35 @@ def save_area(deal_id: str):
 
     _subj_addr = str(_prop.get("address") or "")
     _pc_for_type = normalize_postcode(_postcode) if _postcode else _postcode
+    # S37-EPC-PACK-TYPE (2026-08-12): the property's OWN EPC certificate in
+    # the uploaded pack STATES the type ("Property type\nSemi-detached house")
+    # — a stated fact that must outrank the LLM prose-guess AND the external
+    # EPC register / neighbour vote. Read it from the classified EPC document
+    # (same text the floor-area extractor uses). None when no EPC / non-
+    # structural value, so deals without a pack EPC fall through unchanged.
+    _epc_pack_type_code = None
+    try:
+        _epc_docs = supabase.table("documents") \
+            .select("extracted_text") \
+            .eq("deal_id", deal_id).eq("user_id", request.user_id) \
+            .eq("doc_type", "epc").execute()
+        _epc_pack_text = "\n".join((d.get("extracted_text") or "") for d in (_epc_docs.data or []))
+        _epc_pack_type_code = _extract_epc_property_type_from_text(_epc_pack_text)
+    except Exception as _eptc:
+        print(f"[S37-EPC-PACK-TYPE fetch warn] {deal_id}: {_eptc}")
     _resolved_code, _type_source, _type_conf = _resolve_subject_type_code(
         _subj_addr, _pc_for_type, _prop_type_code
     )
+    # Pack-EPC certificate is the TOP authority — the property's own stated
+    # type overrides the register/neighbour/LLM resolution below.
+    if _epc_pack_type_code:
+        if _resolved_code and _resolved_code != _epc_pack_type_code:
+            app.logger.info(
+                f"[S37-EPC-PACK-TYPE] {_subj_addr} ({_pc_for_type}): pack EPC "
+                f"states {_epc_pack_type_code}, overriding resolved="
+                f"{_resolved_code} ({_type_source}/{_type_conf})"
+            )
+        _resolved_code, _type_source, _type_conf = _epc_pack_type_code, "epc_pack_certificate", "high"
     # Override the LLM-derived code with the resolved one. Log disagreements —
     # the 148 Barns Lane class (EPC had truth, LLM was wrong, pipeline used LLM)
     # must be visible, not silent.
