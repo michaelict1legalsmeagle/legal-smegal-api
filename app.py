@@ -5407,8 +5407,41 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _hpi_latest_avg   = None  # latest average_price for the area used
         _hpi_latest_month = None  # latest date (for audit)
         _hpi_area_code_used = None   # actual area_code the ratio is computed on
-        _hpi_basis          = "none" # "lad" | "national_fallback" | "none"
-        if _lad_code_for_hpi:
+        _hpi_basis          = "none" # "lad_by_type" | "lad" | "national_fallback" | "none"
+        # S-HPI-BYTYPE (2026-08-14): property-type LAD series is the first and
+        # best tier. uk_hpi_monthly (overall) blends all types and mis-times a
+        # comp whenever the subject type diverges from the LAD type mix
+        # (measured live E08000025: flat mult 0.958 vs overall 0.992, same span;
+        # semi 1.006 the other way). uk_hpi_monthly_by_property_type is
+        # populated to the same latest month. NB live vocabulary is detached/
+        # semi/terraced/flat — the 'semi_detached' rows are a STALE duplicate
+        # (stop 2025-10) and must never be used. 'O'/unknown types map to
+        # nothing and fall through to the overall-LAD tier unchanged. Numerator
+        # and denominator stay on the SAME series via _hpi_table + _hpi_ptype,
+        # carried down to the Step 8b sale-month batch.
+        _hpi_ptype = None                              # by-type token or None
+        _hpi_table = "public.uk_hpi_monthly"           # series table for 8b
+        _pt_to_hpi = {"D": "detached", "S": "semi", "T": "terraced", "F": "flat"}
+        _bytype_token = _pt_to_hpi.get(_pt_param) if _pt_param else None
+        if _bytype_token and _lad_code_for_hpi:
+            try:
+                _bt_rows = supabase_data_query(
+                    "SELECT date, average_price FROM public.uk_hpi_monthly_by_property_type "
+                    "WHERE area_code = %s AND property_type = %s ORDER BY date DESC LIMIT 1",
+                    (_lad_code_for_hpi, _bytype_token)
+                )
+                if _bt_rows:
+                    _bt_avg = safe_float(_bt_rows[0].get("average_price"))
+                    if _bt_avg:
+                        _hpi_latest_avg     = _bt_avg
+                        _hpi_latest_month   = str(_bt_rows[0].get("date") or "")[:10]
+                        _hpi_area_code_used = _lad_code_for_hpi
+                        _hpi_basis          = "lad_by_type"
+                        _hpi_ptype          = _bytype_token
+                        _hpi_table          = "public.uk_hpi_monthly_by_property_type"
+            except Exception as _e:
+                _audit["warnings"].append(f"hpi_bytype_lookup_failed: {_e}")
+        if _hpi_latest_avg is None and _lad_code_for_hpi:
             try:
                 _hpi_latest_rows = supabase_data_query(
                     "SELECT date, average_price FROM public.uk_hpi_monthly "
@@ -5745,11 +5778,18 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         if _hpi_area_code_used and _hpi_latest_avg and _sale_month_set:
             try:
                 _placeholders = ", ".join(["%s"] * len(_sale_month_set))
-                _sm_rows = supabase_data_query(
-                    f"SELECT date, average_price FROM public.uk_hpi_monthly "
-                    f"WHERE area_code = %s AND date IN ({_placeholders})",
-                    (_hpi_area_code_used, *sorted(_sale_month_set))
-                )
+                if _hpi_ptype:
+                    _sm_rows = supabase_data_query(
+                        f"SELECT date, average_price FROM {_hpi_table} "
+                        f"WHERE area_code = %s AND property_type = %s AND date IN ({_placeholders})",
+                        (_hpi_area_code_used, _hpi_ptype, *sorted(_sale_month_set))
+                    )
+                else:
+                    _sm_rows = supabase_data_query(
+                        f"SELECT date, average_price FROM {_hpi_table} "
+                        f"WHERE area_code = %s AND date IN ({_placeholders})",
+                        (_hpi_area_code_used, *sorted(_sale_month_set))
+                    )
                 for _smr in (_sm_rows or []):
                     _smr_date = str(_smr.get("date") or "")[:10]
                     _smr_avg  = safe_float(_smr.get("average_price"))
@@ -5802,7 +5842,8 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _audit["hpi_missing_count"]  = _hpi_missing_count
         _audit["hpi_skipped_count"]  = _hpi_skipped_count
         _audit["hpi_method"]         = "average_price_ratio"
-        _audit["hpi_basis"]          = _hpi_basis            # "lad" | "national_fallback" | "none"
+        _audit["hpi_basis"]          = _hpi_basis            # "lad_by_type" | "lad" | "national_fallback" | "none"
+        _audit["hpi_property_type"]  = _hpi_ptype            # by-type token when hpi_basis == "lad_by_type"
         _audit["hpi_area_code_used"] = _hpi_area_code_used
         _audit["hpi_latest_month"]   = _hpi_latest_month
         _audit["hpi_latest_avg"]     = _hpi_latest_avg
