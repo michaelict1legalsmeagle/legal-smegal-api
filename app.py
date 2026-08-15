@@ -5961,7 +5961,14 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 _r["normalisation_factor"] = None
             _audit["warnings"].append("floor_area_normalisation_skipped: subject floor area unknown")
 
-        _use_normalised = len(_normalised_prices) >= 5
+        # S-SIZE-OFF (2026-08-15): floor-area £/m² normalisation verified net-negative
+        # on the live book (subject-level engine back-test: size ON MdAPE 16.45% vs
+        # OFF 15.38%; comp LOO 16.47% vs no-sqft 14.88%). Matches S43 beta=0.47 (weak
+        # size effect) + noisy EPC comp areas. Median now uses HPI-adjusted price, not
+        # size-normalised. Reversible: flip the flag to restore. price_normalised is
+        # still COMPUTED above for display/audit, just not used for the median.
+        HOUSING_SIZE_NORMALISATION_ENABLED = False
+        _use_normalised = HOUSING_SIZE_NORMALISATION_ENABLED and len(_normalised_prices) >= 5
         _audit["area_normalised_count"] = _area_normalised_count
         if not _use_normalised and _subject_area:
             _audit["warnings"].append(f"floor_area_normalisation_skipped: only {_area_normalised_count}/10 comps have floor area data")
