@@ -6041,6 +6041,52 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
 
         _audit["final_comp_count"] = len(rows)
 
+        # ── S-AREA-GUARD (2026-08-15): subject floor-area plausibility check ──
+        # Subject floor area is single-source (pack EPC) and can be wrong
+        # (66 Loughshaw: EPC states 74 m2 for a 139 m2 house). Size normalisation
+        # is now OFF so a bad area no longer distorts the valuation, but it still
+        # corrupts subject £/sqft and Financials per-sqft, so we cross-check it
+        # against the comparable floor-area envelope and FLAG (never override).
+        # Thresholds calibrated on the live 39-deal book: catch the two known bad
+        # areas (74 m2 detached ratio 0.80, 200 m2 semi ratio 1.71) without
+        # flagging the ~18 deals whose subject sits inside its comp size band.
+        try:
+            _sa_src = _subject_area_source if "_subject_area_source" in dir() else None
+            _ca = sorted(v for r in rows if isinstance(r, dict)
+                         for v in [safe_float(r.get("floor_area"))] if v and v > 0)
+            _n_ca = len(_ca)
+            _sac = {"subject_area": _subject_area, "subject_area_source": _sa_src, "n_comp_area": _n_ca}
+            if not _subject_area or _subject_area <= 0:
+                _sac["status"] = "no_subject_area"
+                _sac["message"] = "Subject floor area unknown - comparable evidence shown without size context."
+            elif _n_ca == 0:
+                _sac["status"] = "no_comp_areas"
+                _sac["message"] = "Subject floor area could not be cross-checked (no comparable floor-area data)."
+            else:
+                _cmed = _ca[_n_ca // 2] if _n_ca % 2 else (_ca[_n_ca // 2 - 1] + _ca[_n_ca // 2]) / 2.0
+                _cmin, _cmax = _ca[0], _ca[-1]
+                _ratio = (_subject_area / _cmed) if _cmed else None
+                _lo, _hi = (0.82, 1.45) if _n_ca >= 4 else (0.62, 1.60)
+                _sac.update({"comp_area_median": round(_cmed, 1), "comp_area_min": _cmin,
+                             "comp_area_max": _cmax,
+                             "ratio_to_comp_median": round(_ratio, 2) if _ratio else None})
+                if _ratio is not None and (_ratio < _lo or _ratio > _hi):
+                    _dir = "below" if _ratio < 1 else "above"
+                    _sac["status"] = "unverified"
+                    _sac["message"] = (
+                        "Subject floor area %g m\u00b2 is %s the comparable range "
+                        "%g\u2013%g m\u00b2 (median %g) - verify the floor area; "
+                        "\u00a3/sq ft and Financials per-sq-ft depend on it."
+                        % (_subject_area, _dir, _cmin, _cmax, _cmed))
+                    _audit["warnings"].append(
+                        "subject_area_unverified: %gm2 vs comp median %gm2 (ratio %.2f)"
+                        % (_subject_area, _cmed, _ratio))
+                else:
+                    _sac["status"] = "ok"; _sac["message"] = None
+            _audit["subject_area_check"] = _sac
+        except Exception as _e:
+            _audit["warnings"].append("subject_area_check_failed: %s" % _e)
+
         # ── S-5 (part B): tenure / new-build resolution audit counters ──────
         # S-1 surfaced duration + old_new on every comp. Where these are
         # non-null, the engine's Step-3 / Step-4 filters and Step-8 similarity
