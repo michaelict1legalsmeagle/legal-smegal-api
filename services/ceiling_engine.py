@@ -194,6 +194,7 @@ SIZE_BANDS = [
     (1.25, 1.33, 0.60),
 ]
 SIZE_OUTER_SCORE = 0.40
+SIZE_ADJUSTMENT_ENABLED = False  # S-SIZE-OFF 2026-08-15: price size-adjust verified net-negative on live book (16.45%->15.38% MdAPE); reversible
 SIZE_ADJ_CAP_LO  = 0.80
 SIZE_ADJ_CAP_HI  = 1.25
 
@@ -2537,6 +2538,8 @@ def _size_score(ratio: Optional[float]) -> float:
     return SIZE_OUTER_SCORE
 
 def _size_adjustment(subject_area: Optional[float], comp_area: Optional[float]) -> float:
+    if not SIZE_ADJUSTMENT_ENABLED:        # S-SIZE-OFF: net-negative on live book; reversible
+        return 1.00
     if not subject_area or not comp_area or comp_area <= 0:
         return 1.00
     ratio = subject_area / comp_area
