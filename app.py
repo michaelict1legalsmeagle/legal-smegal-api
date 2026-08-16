@@ -9946,6 +9946,72 @@ def get_area(deal_id: str):
         app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
+SAME_STREET_BLEND_K = 4  # S-STREET-BLEND: Bühlmann credibility constant (Z = n/(n+K), capped 0.85)
+
+def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) -> dict:
+    """Same-street credibility evidence for the valuation blend (S-STREET-BLEND,
+    2026-08-15). Fetches same-postcode, same-type, Category-A Land Registry sales
+    18-60 months old (the band the 18-month comp window discards), HPI-uplifts each
+    to the latest month using the by-type LAD series, and returns a consistency-gated
+    median + credibility Z. Verified on the live book: corrects tight-street mis-
+    valuations both ways; noisy streets (CV>0.20) excluded. Read-only; never fabricates."""
+    out = {"status": "insufficient", "value": None, "credibility": 0.0, "n": 0, "cv": None}
+    try:
+        _lad_rows = supabase_data_query(
+            "SELECT ladcd FROM public.postcode_to_lsoa WHERE pcds_nospace = %s LIMIT 1",
+            (pcd_nospace,))
+        lad = _lad_rows[0].get("ladcd") if _lad_rows else None
+        if not lad:
+            out["status"] = "no_lad"; return out
+        _sales = data_query(
+            "SELECT date_of_transfer, price FROM price_paid_raw_2025 "
+            "WHERE postcode_nospace = %s AND property_type = %s AND ppd_category_type = 'A' "
+            "AND date_of_transfer <  (CURRENT_DATE - INTERVAL '18 months')::date "
+            "AND date_of_transfer >= (CURRENT_DATE - INTERVAL '60 months')::date "
+            "ORDER BY date_of_transfer DESC",
+            (pcd_nospace, ptype_code)) or []
+        if len(_sales) < 2:
+            out["n"] = len(_sales); return out
+        _latest = supabase_data_query(
+            "SELECT average_price FROM public.uk_hpi_monthly_by_property_type "
+            "WHERE area_code = %s AND property_type = %s ORDER BY date DESC LIMIT 1",
+            (lad, token))
+        _latest_avg = safe_float(_latest[0].get("average_price")) if _latest else None
+        if not _latest_avg:
+            out["status"] = "no_hpi"; return out
+        _upl = []
+        for _r in _sales:
+            _p = safe_float(_r.get("price"))
+            _dt = str(_r.get("date_of_transfer") or "")[:7]
+            if not (_p and _dt):
+                continue
+            _sm = _dt + "-01"
+            _mrow = supabase_data_query(
+                "SELECT average_price FROM public.uk_hpi_monthly_by_property_type "
+                "WHERE area_code = %s AND property_type = %s AND date <= %s "
+                "ORDER BY date DESC LIMIT 1",
+                (lad, token, _sm))
+            _mavg = safe_float(_mrow[0].get("average_price")) if _mrow else None
+            if _mavg and _mavg > 0:
+                _upl.append(_p * (_latest_avg / _mavg))
+        n = len(_upl)
+        if n < 2:
+            out["n"] = n; return out
+        _upl.sort()
+        _median = _upl[n // 2] if n % 2 else (_upl[n // 2 - 1] + _upl[n // 2]) / 2.0
+        _mean = sum(_upl) / n
+        _cv = (sum((x - _mean) ** 2 for x in _upl) / n) ** 0.5 / _mean if _mean else 1.0
+        out.update({"value": round(_median, 2), "n": n, "cv": round(_cv, 4)})
+        if _cv <= 0.20:
+            _z = min(n / (n + SAME_STREET_BLEND_K), 0.85)
+            out.update({"status": "admit", "credibility": round(_z, 4)})
+        else:
+            out["status"] = "excluded_noisy"   # street too dispersed to trust — no blend
+    except Exception as _e:
+        out["status"] = "error"; out["error"] = str(_e)
+    return out
+
+
 def _recompute_deal_ceiling(deal_id: str, area_data: dict):
     """
     D1 — recompute summary_json.ceiling from area_json comps and persist it.
@@ -10023,8 +10089,29 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
                     if isinstance(c, dict) and c.get("property_type")]
         _inferred_pt = _Counter(_pt_vals).most_common(1)[0][0] if _pt_vals else None
 
+        # S-STREET-BLEND (2026-08-15): compute same-street credibility evidence and
+        # hang value+Z on the subject dict; ceiling_engine blends at base_value and it
+        # cascades to verdict/workbench. Reversible via SAME_STREET_BLEND_ENABLED (engine).
+        _ss = {"status": "off"}
+        try:
+            import re as _re_ss
+            _ss_pc = _re_ss.sub(r"\\s+", "", str(_prop_rc.get("postcode") or "").upper())
+            _ss_t  = str(_inferred_pt or _prop_rc.get("physical_type") or _prop_rc.get("type") or "").lower()
+            _ss_tok = ("flat" if ("flat" in _ss_t or "apart" in _ss_t or "maison" in _ss_t)
+                       else "semi" if "semi" in _ss_t
+                       else "terraced" if "terrac" in _ss_t
+                       else "detached" if "detach" in _ss_t else None)
+            _ss_code = {"flat": "F", "semi": "S", "terraced": "T", "detached": "D"}.get(_ss_tok)
+            if _ss_pc and _ss_tok and _ss_code:
+                _ss = _compute_same_street_blend(_ss_pc, _ss_tok, _ss_code)
+                if isinstance(_housing, dict):
+                    _housing["_same_street"] = _ss     # persisted for the frontend divergence badge
+        except Exception as _e_ss:
+            _ss = {"status": "error", "error": str(_e_ss)}
         _subject_rc = {
             "property_type":        _inferred_pt or _prop_rc.get("physical_type") or _prop_rc.get("type") or _d.get("deal_type"),
+            "_same_street_value":       _ss.get("value"),
+            "_same_street_credibility": _ss.get("credibility"),
             "tenure":               _prop_rc.get("tenure") or _fins_inputs.get("tenure"),
             "lease_length":         _prop_rc.get("lease_length") or _fins_inputs.get("lease_length"),
             "internal_area":        _prop_rc.get("internal_area") or _fins_inputs.get("internal_area") or (_housing.get("subject_floor_area") if isinstance(_housing, dict) else None),
