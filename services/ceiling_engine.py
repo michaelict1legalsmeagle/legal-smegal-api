@@ -195,6 +195,7 @@ SIZE_BANDS = [
 ]
 SIZE_OUTER_SCORE = 0.40
 SIZE_ADJUSTMENT_ENABLED = False  # S-SIZE-OFF 2026-08-15: price size-adjust verified net-negative on live book (16.45%->15.38% MdAPE); reversible
+SAME_STREET_BLEND_ENABLED = True  # S-STREET-BLEND 2026-08-15: Bühlmann credibility blend of same-street evidence (value+Z carried on subject dict); reversible
 SIZE_ADJ_CAP_LO  = 0.80
 SIZE_ADJ_CAP_HI  = 1.25
 
@@ -3940,6 +3941,20 @@ def calculate_ceiling(
         else:
             base_value = round(wm, 2)
             formula_trace.append(f"step_2: base_value={base_value} method={base_method} n_valid={n_valid}")
+            # S-STREET-BLEND (2026-08-15): Bühlmann credibility blend of same-street
+            # evidence. app.py computes the same-postcode/same-type HPI-uplifted median +
+            # a within-street consistency gate + credibility Z, and hangs them on the
+            # subject dict (so no call-site touched). Verified on the live book: corrects
+            # tight-street mis-valuations BOTH ways (Coldbath £177k->£228k up, Lancaster
+            # down); noisy streets excluded by the gate; Z scales with same-street n.
+            # Cascades to risk_adjusted / verdict / workbench. Reversible via the flag.
+            _ssv = (subject or {}).get("_same_street_value")
+            _ssc = (subject or {}).get("_same_street_credibility") or 0.0
+            if SAME_STREET_BLEND_ENABLED and _ssv and float(_ssv) > 0 and float(_ssc) > 0:
+                _z = min(max(float(_ssc), 0.0), 0.85)  # cross-street evidence never fully overridden
+                _blended = round(_z * float(_ssv) + (1.0 - _z) * base_value, 2)
+                formula_trace.append(f"step_2b: same_street_blend Z={_z:.2f} street={round(float(_ssv))} comp={base_value} -> {_blended}")
+                base_value = _blended
             if n_valid < MIN_REQUIRED_COMPS:
                 warnings.append(f"Only {n_valid} valid comp(s) — below minimum {MIN_REQUIRED_COMPS}; ceiling is indicative with low confidence")
             if n_valid < PREFERRED_COMPS:
