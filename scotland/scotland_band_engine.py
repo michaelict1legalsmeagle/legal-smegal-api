@@ -27,7 +27,6 @@ VERIFIED INPUTS (all confirmed against the real files earlier):
 
 import csv, re, subprocess, sys
 from pathlib import Path
-import openpyxl
 
 # ---- vintage boundaries (verified from the real files) -----------------------
 DZ2011_MIN, DZ2011_MAX = "S01006506", "S01013481"   # 6,976 zones
@@ -78,6 +77,7 @@ def load_price_median_2023(path):
 
 def load_ros_la_medians(path):
     """Returns (current: la_code->median, current_period), (y2023: la_code->median)."""
+    import openpyxl  # lazy: only the file/xlsx build path needs it, not the pg runtime
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     # M1 monthly LA -> latest median per LA
     cur, latest_period = {}, None
@@ -117,23 +117,17 @@ TYPE_MAP = [("semi-detached", "semi"), ("semi detached", "semi"),
             ("flat", "flat"), ("maisonette", "flat"), ("bungalow", "bungalow"),
             ("detached", "detached"), ("villa", "house")]
 
-def extract_home_report(pdf_path, max_bytes=25_000_000, timeout=20):
-    """Pull anchor fields from a Home Report PDF. Any field not found -> None.
-    Hardened for untrusted uploads: size guard, subprocess timeout, graceful failure.
-    On failure returns the dict with error set and fields None (never raises, never guesses)."""
-    a = {"source_file": Path(pdf_path).name, "market_value": None, "valuation_date": None,
+def extract_home_report_from_text(txt, source_file=""):
+    """Regex the anchor fields out of already-extracted Home Report text.
+    Same field logic as extract_home_report; any field not found -> None.
+    This is the single source of truth for the anchor regexes — the PDF entry
+    point calls it after pdftotext, and the app calls it on stored document text."""
+    a = {"source_file": source_file, "market_value": None, "valuation_date": None,
          "property_type": None, "epc_band": None, "cat3_count": None, "postcode": None,
          "error": None}
-    try:
-        if Path(pdf_path).stat().st_size > max_bytes:
-            a["error"] = "file too large"; return a
-        proc = subprocess.run(["pdftotext", "-layout", str(pdf_path), "-"],
-                              capture_output=True, text=True, timeout=timeout)
-        txt = proc.stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as ex:
-        a["error"] = f"pdf read failed: {type(ex).__name__}"; return a
-    if not txt.strip():
-        a["error"] = "no extractable text (scanned or encrypted pack?)"; return a
+    if not txt or not txt.strip():
+        a["error"] = "no extractable text (scanned or encrypted pack?)"
+        return a
 
     m = PC_RE.search(txt)                                     # postcode
     if m: a["postcode"] = (m.group(1) + m.group(2)).upper()
@@ -164,6 +158,25 @@ def extract_home_report(pdf_path, max_bytes=25_000_000, timeout=20):
 
     a["cat3_count"] = len(re.findall(r"Repair category\s+3\b", txt))  # urgent-repair flags
     return a
+
+
+def extract_home_report(pdf_path, max_bytes=25_000_000, timeout=20):
+    """Pull anchor fields from a Home Report PDF. Any field not found -> None.
+    Hardened for untrusted uploads: size guard, subprocess timeout, graceful failure.
+    On failure returns the dict with error set and fields None (never raises, never guesses)."""
+    src_name = Path(pdf_path).name
+    _err = lambda msg: {"source_file": src_name, "market_value": None, "valuation_date": None,
+                        "property_type": None, "epc_band": None, "cat3_count": None,
+                        "postcode": None, "error": msg}
+    try:
+        if Path(pdf_path).stat().st_size > max_bytes:
+            return _err("file too large")
+        proc = subprocess.run(["pdftotext", "-layout", str(pdf_path), "-"],
+                              capture_output=True, text=True, timeout=timeout)
+        txt = proc.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as ex:
+        return _err(f"pdf read failed: {type(ex).__name__}")
+    return extract_home_report_from_text(txt, src_name)
 
 
 # ============================================================================
