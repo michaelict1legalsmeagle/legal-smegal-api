@@ -1,0 +1,4 @@
+# Runtime: pdftotext (poppler-utils) must be on PATH — system package, not pip.
+openpyxl>=3.1          # parse the Registers of Scotland workbook (reference build)
+psycopg[binary]>=3.1   # Postgres-backed reference loader (build + runtime)
+# pytest>=7.0          # tests only
