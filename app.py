@@ -2795,6 +2795,101 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
         )
 
 
+# ── Scotland crime (Slice A) ─────────────────────────────────────────────
+# Ward-level Police Scotland crime for Scottish deals. Resolves postcode -> multi-member
+# ward via postcodes.io (codes.admin_ward), reads scotland.crime_by_area (Hetzner) via the
+# app's existing data_query(), and returns the SAME crime-metric contract as get_crime_data
+# plus Scottish native categories / geography / period / source / comparability notice.
+# Missing data -> honest "unavailable", NEVER a zero. Scotland-only path; E&W flow untouched.
+def _scotland_ward_lookup(postcode: str):
+    pc = (postcode or "").strip()
+    if not pc:
+        return None
+    ck = "scotward:" + pc.upper().replace(" ", "")
+    cached = geo_cache_get(ck)
+    if cached is not None:
+        return cached or None
+    try:
+        status, data = _http_get_json("https://api.postcodes.io/postcodes/" + pc.upper().replace(" ", ""))
+        res = (data or {}).get("result") if isinstance(data, dict) else None
+        if status != 200 or not isinstance(res, dict):
+            geo_cache_set(ck, {})
+            return None
+        codes = res.get("codes") or {}
+        out = {
+            "ward_code":    (codes.get("admin_ward") or "").strip() or None,
+            "ward_name":    (res.get("admin_ward") or "").strip() or None,
+            "council_name": (res.get("admin_district") or "").strip() or None,
+            "la_code":      (codes.get("admin_district") or "").strip() or None,
+        }
+        geo_cache_set(ck, out)
+        return out
+    except Exception as _e:
+        app.logger.warning("[scotland-crime] ward lookup failed for %s: %s", pc, _e)
+        return None
+
+
+def get_scotland_crime_data(postcode: str) -> Dict[str, Any]:
+    retrieved = now_iso()
+    src_page = "https://www.scotland.police.uk/about-us/how-we-do-it/crime-data/"
+    sources = [{"label": "Police Scotland — Multi-Member Ward crime data", "url": src_page}]
+    ward = _scotland_ward_lookup(postcode)
+    if not ward or not (ward.get("ward_code") or ward.get("ward_name")):
+        return metric_unavailable(
+            "Scottish crime unavailable: the postcode could not be resolved to a ward.",
+            sources, retrieved)
+    _cols = ("native_group, native_category, display_category, comparison_quality, "
+             "recorded_count, detected_count, rate_per_10000, geography_name, "
+             "council_name, period, source")
+    rows = []
+    try:
+        if ward.get("ward_code"):
+            rows = data_query(
+                "SELECT " + _cols + " FROM scotland.crime_by_area "
+                "WHERE geography_type='multi_member_ward' AND geography_code=%s "
+                "ORDER BY period DESC", (ward["ward_code"],))
+        if not rows and ward.get("ward_name"):
+            rows = data_query(
+                "SELECT " + _cols + " FROM scotland.crime_by_area "
+                "WHERE geography_type='multi_member_ward' AND lower(geography_name)=lower(%s) "
+                "AND (%s='' OR lower(coalesce(council_name,''))=lower(%s)) "
+                "ORDER BY period DESC",
+                (ward["ward_name"], ward.get("council_name") or "", ward.get("council_name") or ""))
+    except Exception as _e:
+        app.logger.warning("[scotland-crime] query failed for %s: %s", postcode, _e)
+        return metric_unavailable("Scottish crime data fetch failed: %s" % _e, sources, retrieved)
+
+    if not rows:
+        return metric_unavailable(
+            "Scottish crime data not yet available for this ward/period.", sources, retrieved)
+
+    latest = rows[0].get("period")
+    rows = [r for r in rows if r.get("period") == latest]
+
+    try:
+        from scotland.scotland_crime_payload import assemble_scotland_crime
+    except Exception as _e:
+        app.logger.warning("[scotland-crime] payload module missing: %s", _e)
+        return metric_unavailable("Scottish crime data unavailable (payload module).", sources, retrieved)
+
+    geo = {"type": "multi_member_ward", "code": ward.get("ward_code"),
+           "name": rows[0].get("geography_name") or ward.get("ward_name"),
+           "council": rows[0].get("council_name") or ward.get("council_name"),
+           "period": latest, "source": rows[0].get("source") or "Police Scotland"}
+    payload = assemble_scotland_crime(geo, rows)
+    if not payload:
+        return metric_unavailable(
+            "Scottish crime data not yet available for this ward/period.", sources, retrieved)
+
+    out = metric_ok(payload["summary"], payload["value"],
+                    sources + [{"label": "%s (%s, Multi-Member Ward)" % (geo["source"], latest),
+                                "url": src_page}],
+                    retrieved, MIN_VERIFIED)
+    out["metrics"] = payload["metrics"]
+    out["jurisdiction"] = "scotland"
+    return out
+
+
 def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
     q = f"""
 [out:json];
@@ -3988,6 +4083,13 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         local_crime_rate   = (crime_total / pop_latest * 1000) if pop_latest > 0 else 0
         national_crime_rate = 82.0  # ONS Crime Survey England and Wales 2023
         crime_index  = round(local_crime_rate / national_crime_rate, 2) if national_crime_rate > 0 else None
+        _crime_is_scotland = str((area_data.get("crime") or {}).get("metrics", {}).get("jurisdiction")
+                                 or (area_data.get("crime") or {}).get("jurisdiction") or "").lower() == "scotland"
+        if _crime_is_scotland:
+            # The 82/1000 baseline is England&Wales (ONS CSEW). Applying it to Scottish crime
+            # would fabricate a cross-jurisdiction ratio and, on empty E&W data, the old
+            # "-100% / Lower crime" false zero. Null it; the Scottish card shows native categories.
+            crime_index = None
 
         # Comp avg from housing for price benchmarking
         housing_metrics = (area_data.get("housing") or {}).get("metrics") or {}
@@ -4187,10 +4289,18 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                 "text": f"Crime {local_label} · {index_label} · {nat_label} · Police.uk"
             })
         elif crime_total > 0:
-            drivers.append({
-                "sign": "~" if crime_total < 300 else "-",
-                "text": f"Crime {int(crime_total)}/yr · Police.uk"
-            })
+            if _crime_is_scotland:
+                _csrc = (area_data.get("crime") or {}).get("metrics", {}).get("source") or "Police Scotland"
+                _cgeo = (area_data.get("crime") or {}).get("metrics", {}).get("geography_name") or "ward"
+                drivers.append({
+                    "sign": "~",  # no comparable national baseline — do not imply better/worse
+                    "text": f"Crime {int(crime_total)} recorded · {_cgeo} · {_csrc}"
+                })
+            else:
+                drivers.append({
+                    "sign": "~" if crime_total < 300 else "-",
+                    "text": f"Crime {int(crime_total)}/yr · Police.uk"
+                })
 
         # Population trend — with magnitude
         if pop.get("change_pct") is not None:
@@ -4297,10 +4407,12 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                     },
                     "crime": {
                         "local_total":      int(crime_total),
-                        "local_rate_per_1000": round(local_crime_rate, 2),
-                        "national_rate_per_1000": national_crime_rate,
+                        "local_rate_per_1000": (None if _crime_is_scotland else round(local_crime_rate, 2)),
+                        "national_rate_per_1000": (None if _crime_is_scotland else national_crime_rate),
                         "crime_index":      crime_index,
-                        "source": "Police.uk",
+                        "source": (((area_data.get("crime") or {}).get("metrics", {}).get("source") or "Police Scotland")
+                                   if _crime_is_scotland else "Police.uk"),
+                        "jurisdiction": ("scotland" if _crime_is_scotland else "england_wales"),
                     },
                     "liquidity": {
                         "annual_transactions": liquidity.get("local_annual"),
@@ -6677,7 +6789,7 @@ def market_insights():
             "housing": get_housing_data(postcode),
             "transport": get_transport_data(lat, lng),
             "amenities": get_amenities_data(lat, lng),
-            "crime": get_crime_data(lat, lng),
+            "crime": (get_scotland_crime_data(postcode) if _is_scotland_lsoa(lsoa_gss) else get_crime_data(lat, lng)),
             "broadband": get_broadband_data(postcode),
             "gp": get_gp_data(postcode),
             "flood": get_flood_risk(lat, lng, postcode),
@@ -10961,7 +11073,8 @@ def save_area(deal_id: str):
 
             _area_task_specs = [
                 ("housing",   get_housing_data,         [_postcode],              {"property_type": _prop_type_code, "guide_price": _guide_price_gbp, "subject_tenure_hint": _prop.get("tenure"), "subject_address": _prop.get("address"), "subject_internal_area": _subject_gia_listing or safe_float(_prop.get("internal_area"))}),
-                ("crime",     get_crime_data,           [lat, lng],               {}),
+                ("crime",     (get_scotland_crime_data if _is_scotland_lsoa(lsoa_gss) else get_crime_data),
+                              ([_postcode] if _is_scotland_lsoa(lsoa_gss) else [lat, lng]), {}),
                 ("transport", get_transport_data,       [lat, lng],               {}),
                 ("amenities", get_amenities_data,       [lat, lng],               {}),
                 ("schools",   get_schools_data,         [_postcode],              {}),
