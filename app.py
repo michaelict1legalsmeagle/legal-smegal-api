@@ -2849,12 +2849,20 @@ def get_scotland_crime_data(postcode: str) -> Dict[str, Any]:
                 "WHERE geography_type='multi_member_ward' AND geography_code=%s "
                 "ORDER BY period DESC", (ward["ward_code"],))
         if not rows and ward.get("ward_name"):
+            # Normalise both sides (lowercase, "&"->"and", drop all non-alphanumerics)
+            # so slashes/spaces/ampersands in ward names cannot cause a false miss.
+            _norm = "regexp_replace(lower(replace({col},'&','and')),'[^a-z0-9]','','g')"
+            _name_n = _norm.format(col="geography_name")
+            _coun_n = _norm.format(col="coalesce(council_name,'')")
+            _arg_name = _norm.format(col="%s")
+            _arg_coun = _norm.format(col="%s")
             rows = data_query(
                 "SELECT " + _cols + " FROM scotland.crime_by_area "
-                "WHERE geography_type='multi_member_ward' AND lower(geography_name)=lower(%s) "
-                "AND (%s='' OR lower(coalesce(council_name,''))=lower(%s)) "
+                "WHERE geography_type='multi_member_ward' AND " + _name_n + " = " + _arg_name + " "
+                "AND (%s='' OR " + _coun_n + " = " + _arg_coun + ") "
                 "ORDER BY period DESC",
-                (ward["ward_name"], ward.get("council_name") or "", ward.get("council_name") or ""))
+                (ward["ward_name"], ward.get("council_name") or "",
+                 ward.get("council_name") or ""))
     except Exception as _e:
         app.logger.warning("[scotland-crime] query failed for %s: %s", postcode, _e)
         return metric_unavailable("Scottish crime data fetch failed: %s" % _e, sources, retrieved)
