@@ -4767,21 +4767,27 @@ _SEPA_FLOOD_LAYERS = {
 }
 
 
-def _sepa_point_in_layer(service: str, lat: float, lng: float, timeout: int = 7):
+def _sepa_point_in_layer(service: str, lat: float, lng: float, timeout: int = 12):
     """Return True/False if the point intersects the flood extent, or None on query failure."""
+    import json as _json
     url = f"{_SEPA_BASE}/{service}/FeatureServer/0/query"
     params = {
-        "geometry": f"{lng},{lat}",          # x,y = lng,lat
+        "where": "1=1",                       # ArcGIS query requires a where clause alongside geometry
+        "geometry": _json.dumps({"x": lng, "y": lat, "spatialReference": {"wkid": 4326}}),
         "geometryType": "esriGeometryPoint",
         "inSR": "4326",                       # WGS84 in; SEPA reprojects to 27700
         "spatialRel": "esriSpatialRelIntersects",
         "returnCountOnly": "true",
         "f": "json",
     }
+    headers = {"User-Agent": "LegalSmegal-AreaIntelligence/1.0"}
     try:
-        status, payload = _http_get_json(url, params=params, timeout=timeout)
-        if status == 200 and isinstance(payload, dict) and "count" in payload:
-            return int(payload.get("count") or 0) > 0
+        status, payload = _http_get_json(url, params=params, headers=headers, timeout=timeout)
+        if status == 200 and isinstance(payload, dict):
+            if "count" in payload:
+                return int(payload.get("count") or 0) > 0
+            if "features" in payload:          # server ignored returnCountOnly -> use features
+                return len(payload.get("features") or []) > 0
     except Exception:
         pass
     return None
