@@ -2926,7 +2926,23 @@ def get_scotland_crime_data(postcode: str) -> Dict[str, Any]:
     return out
 
 
+# Public Overpass instances, tried in order. The primary frequently returns 429/504
+# under load; without a fallback the whole transport/amenities card comes back empty.
+_OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
+
 def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
+    """Query OSM Overpass with automatic failover across mirrors.
+
+    Returns on the first endpoint that gives a valid 200 JSON body. A transient
+    failure on one mirror (timeout/429/504/network) falls through to the next
+    rather than yielding an empty card — the root cause of intermittently missing
+    transport/amenities on a first-time fetch. A genuine 200 with no elements
+    (a truly sparse area) is accepted as-is and NOT retried.
+    """
     q = f"""
 [out:json];
 (
@@ -2935,21 +2951,26 @@ def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
 out center;
 """.strip()
 
-    status, text = _http_post_text(
-        "https://overpass-api.de/api/interpreter",
-        data=q.encode("utf-8"),
-        headers={"Content-Type": "text/plain"},
-        timeout=30,
-    )
-    if status != 200 or not text:
-        return {"elements": []}
-    try:
-        payload = json.loads(text)
-        if isinstance(payload, dict):
-            return payload
-        return {"elements": []}
-    except Exception:
-        return {"elements": []}
+    last_empty = {"elements": []}
+    for ep in _OVERPASS_ENDPOINTS:
+        try:
+            status, text = _http_post_text(
+                ep,
+                data=q.encode("utf-8"),
+                headers={"Content-Type": "text/plain"},
+                timeout=20,
+            )
+        except Exception:
+            continue  # network error on this mirror -> try the next
+        if status != 200 or not text:
+            continue  # 429/504/empty -> try the next mirror
+        try:
+            payload = json.loads(text)
+        except Exception:
+            continue  # malformed body -> try the next mirror
+        if isinstance(payload, dict) and isinstance(payload.get("elements"), list):
+            return payload  # valid response (may be genuinely empty) -> done
+    return last_empty  # all mirrors failed -> honest empty (FE hides the card)
 
 
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
