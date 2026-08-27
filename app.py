@@ -2833,9 +2833,18 @@ def get_scotland_crime_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     src_page = "https://www.scotland.police.uk/about-us/how-we-do-it/crime-data/"
     sources = [{"label": "Police Scotland — Multi-Member Ward crime data", "url": src_page}]
+    def _su(msg):
+        # Every exit from this Scottish provider must declare jurisdiction=scotland,
+        # even on a ward-join miss — else the -100% gate and the FE flood-suppress
+        # (which key on jurisdiction) never fire and English data leaks onto the page.
+        r = metric_unavailable(msg, sources, retrieved)
+        r["jurisdiction"] = "scotland"
+        if isinstance(r.get("metrics"), dict): r["metrics"]["jurisdiction"] = "scotland"
+        else: r["metrics"] = {"jurisdiction": "scotland", "geography_type": "multi_member_ward"}
+        return r
     ward = _scotland_ward_lookup(postcode)
     if not ward or not (ward.get("ward_code") or ward.get("ward_name")):
-        return metric_unavailable(
+        return _su(
             "Scottish crime unavailable: the postcode could not be resolved to a ward.",
             sources, retrieved)
     _cols = ("native_group, native_category, display_category, comparison_quality, "
@@ -2863,13 +2872,32 @@ def get_scotland_crime_data(postcode: str) -> Dict[str, Any]:
                 "ORDER BY period DESC",
                 (ward["ward_name"], ward.get("council_name") or "",
                  ward.get("council_name") or ""))
+        if not rows and ward.get("ward_name") and ward.get("council_name"):
+            # Council-scoped, uniqueness-guarded CONTAINS match: resolves ward-name
+            # variants (e.g. postcodes.io "North Coast" vs Police Scotland
+            # "North Coast and Cumbraes") without any backfill. Only accepted when it
+            # maps to exactly ONE ward in that council, so it can never mis-match.
+            try:
+                cand = data_query(
+                    "SELECT DISTINCT geography_name FROM scotland.crime_by_area "
+                    "WHERE geography_type='multi_member_ward' AND " + _coun_n + " = " + _arg_coun + " "
+                    "AND (" + _name_n + " LIKE '%' || " + _arg_name + " || '%' "
+                    "     OR " + _arg_name + " LIKE '%' || " + _name_n + " || '%')",
+                    (ward.get("council_name") or "", ward["ward_name"], ward["ward_name"]))
+                if len(cand) == 1:
+                    rows = data_query(
+                        "SELECT " + _cols + " FROM scotland.crime_by_area "
+                        "WHERE geography_type='multi_member_ward' AND geography_name=%s "
+                        "ORDER BY period DESC", (cand[0]["geography_name"],))
+            except Exception:
+                pass
     except Exception as _e:
         app.logger.warning("[scotland-crime] query failed for %s: %s", postcode, _e)
-        return metric_unavailable("Scottish crime data fetch failed: %s" % _e, sources, retrieved)
+        return metric_unavailable("Scottish crime data fetch failed: %s" % _e)
 
     if not rows:
-        return metric_unavailable(
-            "Scottish crime data not yet available for this ward/period.", sources, retrieved)
+        return _su(
+            "Scottish crime data not yet available for this ward/period.")
 
     latest = rows[0].get("period")
     rows = [r for r in rows if r.get("period") == latest]
@@ -2878,7 +2906,7 @@ def get_scotland_crime_data(postcode: str) -> Dict[str, Any]:
         from scotland.scotland_crime_payload import assemble_scotland_crime
     except Exception as _e:
         app.logger.warning("[scotland-crime] payload module missing: %s", _e)
-        return metric_unavailable("Scottish crime data unavailable (payload module).", sources, retrieved)
+        return _su("Scottish crime data unavailable (payload module).")
 
     geo = {"type": "multi_member_ward", "code": ward.get("ward_code"),
            "name": rows[0].get("geography_name") or ward.get("ward_name"),
@@ -2886,8 +2914,8 @@ def get_scotland_crime_data(postcode: str) -> Dict[str, Any]:
            "period": latest, "source": rows[0].get("source") or "Police Scotland"}
     payload = assemble_scotland_crime(geo, rows)
     if not payload:
-        return metric_unavailable(
-            "Scottish crime data not yet available for this ward/period.", sources, retrieved)
+        return _su(
+            "Scottish crime data not yet available for this ward/period.")
 
     out = metric_ok(payload["summary"], payload["value"],
                     sources + [{"label": "%s (%s, Multi-Member Ward)" % (geo["source"], latest),
@@ -2898,7 +2926,23 @@ def get_scotland_crime_data(postcode: str) -> Dict[str, Any]:
     return out
 
 
+# Public Overpass instances, tried in order. The primary frequently returns 429/504
+# under load; without a fallback the whole transport/amenities card comes back empty.
+_OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
+
 def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
+    """Query OSM Overpass with automatic failover across mirrors.
+
+    Returns on the first endpoint that gives a valid 200 JSON body. A transient
+    failure on one mirror (timeout/429/504/network) falls through to the next
+    rather than yielding an empty card — the root cause of intermittently missing
+    transport/amenities on a first-time fetch. A genuine 200 with no elements
+    (a truly sparse area) is accepted as-is and NOT retried.
+    """
     q = f"""
 [out:json];
 (
@@ -2907,21 +2951,26 @@ def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
 out center;
 """.strip()
 
-    status, text = _http_post_text(
-        "https://overpass-api.de/api/interpreter",
-        data=q.encode("utf-8"),
-        headers={"Content-Type": "text/plain"},
-        timeout=30,
-    )
-    if status != 200 or not text:
-        return {"elements": []}
-    try:
-        payload = json.loads(text)
-        if isinstance(payload, dict):
-            return payload
-        return {"elements": []}
-    except Exception:
-        return {"elements": []}
+    last_empty = {"elements": []}
+    for ep in _OVERPASS_ENDPOINTS:
+        try:
+            status, text = _http_post_text(
+                ep,
+                data=q.encode("utf-8"),
+                headers={"Content-Type": "text/plain"},
+                timeout=20,
+            )
+        except Exception:
+            continue  # network error on this mirror -> try the next
+        if status != 200 or not text:
+            continue  # 429/504/empty -> try the next mirror
+        try:
+            payload = json.loads(text)
+        except Exception:
+            continue  # malformed body -> try the next mirror
+        if isinstance(payload, dict) and isinstance(payload.get("elements"), list):
+            return payload  # valid response (may be genuinely empty) -> done
+    return last_empty  # all mirrors failed -> honest empty (FE hides the card)
 
 
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
@@ -4091,8 +4140,9 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         local_crime_rate   = (crime_total / pop_latest * 1000) if pop_latest > 0 else 0
         national_crime_rate = 82.0  # ONS Crime Survey England and Wales 2023
         crime_index  = round(local_crime_rate / national_crime_rate, 2) if national_crime_rate > 0 else None
-        _crime_is_scotland = str((area_data.get("crime") or {}).get("metrics", {}).get("jurisdiction")
+        _crime_is_scotland = (str((area_data.get("crime") or {}).get("metrics", {}).get("jurisdiction")
                                  or (area_data.get("crime") or {}).get("jurisdiction") or "").lower() == "scotland"
+                              or _is_scotland_lsoa(str(area_data.get("lsoa_gss") or "")))  # nation-based: null for ANY Scottish deal, even a ward-join miss
         if _crime_is_scotland:
             # The 82/1000 baseline is England&Wales (ONS CSEW). Applying it to Scottish crime
             # would fabricate a cross-jurisdiction ratio and, on empty E&W data, the old
