@@ -4742,6 +4742,184 @@ def get_flood_risk(lat: Optional[float], lng: Optional[float], postcode: str = "
     )
 
 
+def _haversine_km(la1: float, lo1: float, la2: float, lo2: float) -> float:
+    import math
+    r = 6371.0
+    dla = math.radians(la2 - la1); dlo = math.radians(lo2 - lo1)
+    a = (math.sin(dla / 2) ** 2 +
+         math.cos(math.radians(la1)) * math.cos(math.radians(la2)) * math.sin(dlo / 2) ** 2)
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+_SEPA_BASE = "https://map.sepa.org.uk/server/rest/services/Open"
+# SEPA Open flood extents (Open Government Licence). River/Coastal/Surface-water,
+# each at High (1-in-10 / 10% yr), Medium (1-in-200 / 0.5%), Low (1-in-1000 / 0.1%).
+_SEPA_FLOOD_LAYERS = {
+    "high":   [("River_Flooding_High_Likelihood", "river"),
+               ("Coastal_Flooding_High_Likelihood", "coastal"),
+               ("Surface_Water_and_Small_Watercourses_Flooding_High_Likelihood", "surface water")],
+    "medium": [("River_Flooding_Medium_Likelihood", "river"),
+               ("Coastal_Flooding_Medium_Likelihood", "coastal"),
+               ("Surface_Water_and_Small_Watercourses_Flooding_Medium_Likelihood", "surface water")],
+    "low":    [("River_Flooding_Low_Likelihood", "river"),
+               ("Coastal_Flooding_Low_Likelihood", "coastal"),
+               ("Surface_Water_and_Small_Watercourses_Flooding_Low_Likelihood", "surface water")],
+}
+
+
+def _sepa_point_in_layer(service: str, lat: float, lng: float, timeout: int = 7):
+    """Return True/False if the point intersects the flood extent, or None on query failure."""
+    url = f"{_SEPA_BASE}/{service}/FeatureServer/0/query"
+    params = {
+        "geometry": f"{lng},{lat}",          # x,y = lng,lat
+        "geometryType": "esriGeometryPoint",
+        "inSR": "4326",                       # WGS84 in; SEPA reprojects to 27700
+        "spatialRel": "esriSpatialRelIntersects",
+        "returnCountOnly": "true",
+        "f": "json",
+    }
+    try:
+        status, payload = _http_get_json(url, params=params, timeout=timeout)
+        if status == 200 and isinstance(payload, dict) and "count" in payload:
+            return int(payload.get("count") or 0) > 0
+    except Exception:
+        pass
+    return None
+
+
+def get_scotland_flood_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
+    """Real per-point flood risk from SEPA (Scotland's flood authority), replacing the
+    England EA map which does not apply north of the border. Returns the same
+    `metrics.zone` contract the frontend already reads (1/2/3), plus SEPA-specific
+    fields. Graceful: on total API failure returns 'unavailable' (the card then hides)
+    — it never fabricates a zone."""
+    retrieved = now_iso()
+    sources = [{"label": "SEPA Flood Maps (Open Government Licence v3.0)",
+                "url": "https://map.sepa.org.uk/floodmaps"}]
+    if lat is None or lng is None:
+        return metric_unavailable("Scottish flood risk unavailable: coordinates not resolved.", sources, retrieved)
+
+    def scan(band):
+        hit, types, all_failed = False, [], True
+        for service, kind in _SEPA_FLOOD_LAYERS[band]:
+            r = _sepa_point_in_layer(service, lat, lng)
+            if r is not None:
+                all_failed = False
+            if r:
+                hit = True
+                types.append(kind)
+        return hit, types, all_failed
+
+    # Low extent is the widest and contains the medium/high extents: if the point is
+    # not even in the Low extent, it is outside all flood risk -> Minimal (fast path).
+    low_hit, low_types, low_failed = scan("low")
+    if low_failed:
+        return metric_unavailable(
+            "Scottish flood risk temporarily unavailable (SEPA). Verify via SEPA Flood Maps before bidding.",
+            sources, retrieved)
+    if not low_hit:
+        out = metric_ok(
+            "Minimal — outside all SEPA river, coastal and surface-water flood extents (below a 1 in 1000 annual chance).",
+            [{"zone": 1}], sources, retrieved, 0.9)
+        out["metrics"] = {"zone": 1, "risk": "Minimal", "source": "SEPA",
+                          "jurisdiction": "scotland", "flood_types": []}
+        return out
+
+    # In some flood extent: refine to the highest band the point sits in.
+    high_hit, high_types, _ = scan("high")
+    if high_hit:
+        band, zone, types = "High", 3, high_types
+        desc = ("High — within a SEPA high-likelihood flood extent (about a 1 in 10 annual chance). "
+                "Significant insurance cost and possible mortgage-availability implications.")
+    else:
+        med_hit, med_types, _ = scan("medium")
+        if med_hit:
+            band, zone, types = "Medium", 2, med_types
+            desc = ("Medium — within a SEPA medium-likelihood flood extent (about a 1 in 200 annual "
+                    "chance). Flood insurance recommended.")
+        else:
+            band, zone, types = "Low", 1, low_types
+            desc = ("Low — within a SEPA low-likelihood flood extent (about a 1 in 1000 annual chance).")
+
+    out = metric_ok(desc, [{"zone": zone}], sources, retrieved, 0.9)
+    out["metrics"] = {"zone": zone, "risk": band, "source": "SEPA",
+                      "jurisdiction": "scotland", "flood_types": sorted(set(types))}
+    return out
+
+
+def get_scotland_schools_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
+    """Nearby schools from OpenStreetMap (Scotland has no Ofsted-equivalent open rating,
+    so we present real named establishments + phase, not a fabricated rating). Reuses the
+    resilient overpass_query (mirror failover). Graceful unavailable on failure."""
+    retrieved = now_iso()
+    sources = [{"label": "OpenStreetMap — education (ODbL)", "url": "https://www.openstreetmap.org"}]
+    if lat is None or lng is None:
+        return metric_unavailable("Nearby schools unavailable: coordinates not resolved.", sources, retrieved)
+
+    radius = 2000
+    sel = (
+        f'node["amenity"="school"](around:{radius},{lat},{lng});'
+        f'way["amenity"="school"](around:{radius},{lat},{lng});'
+        f'node["amenity"="college"](around:{radius},{lat},{lng});'
+        f'way["amenity"="college"](around:{radius},{lat},{lng});'
+        f'node["amenity"="kindergarten"](around:{radius},{lat},{lng});'
+        f'way["amenity"="kindergarten"](around:{radius},{lat},{lng});'
+    )
+    data = overpass_query(lat, lng, sel) or {}
+    elements = data.get("elements") or []
+    if not isinstance(elements, list):
+        return metric_unavailable("Nearby schools temporarily unavailable.", sources, retrieved)
+
+    def _phase(name: str, amenity: str) -> str:
+        n = (name or "").lower()
+        if amenity == "kindergarten" or "nursery" in n or "kindergarten" in n or "early years" in n:
+            return "nursery"
+        if amenity == "college" or "college" in n:
+            return "college"
+        if "primary" in n:
+            return "primary"
+        if any(k in n for k in ("secondary", "high school", "academy", "grammar", "high sch")):
+            return "secondary"
+        return "school"
+
+    seen, schools = set(), []
+    prim = sec = nurs = other = 0
+    for el in elements:
+        tags = el.get("tags") or {}
+        name = str(tags.get("name") or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        amenity = str(tags.get("amenity") or "")
+        ph = _phase(name, amenity)
+        elat = el.get("lat") or (el.get("center") or {}).get("lat")
+        elng = el.get("lon") or (el.get("center") or {}).get("lon")
+        dist_km = None
+        try:
+            if elat is not None and elng is not None:
+                dist_km = round(_haversine_km(lat, lng, float(elat), float(elng)), 1)
+        except Exception:
+            dist_km = None
+        schools.append({"name": name, "phase": ph, "distance_km": dist_km})
+        if ph == "primary":   prim += 1
+        elif ph == "secondary": sec += 1
+        elif ph == "nursery": nurs += 1
+        else: other += 1
+
+    if not schools:
+        return metric_unavailable("No schools found near this location.", sources, retrieved)
+
+    schools.sort(key=lambda s: (s["distance_km"] is None, s["distance_km"] if s["distance_km"] is not None else 1e9))
+    total = len(schools)
+    out = metric_ok(
+        f"{total} schools within {radius//1000}km (OpenStreetMap).",
+        schools, sources, retrieved, 0.8)
+    out["metrics"] = {"total": total, "primary": prim, "secondary": sec,
+                      "nursery": nurs, "other": other, "source": "OpenStreetMap",
+                      "jurisdiction": "scotland", "value": schools}
+    return out
+
+
 def get_broadband_data(postcode: str) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
@@ -6843,14 +7021,14 @@ def market_insights():
         local_area = {
             "retrievedAtISO": now_iso(),
             "postcode": postcode,
-            "schools": get_schools_data(postcode),
+            "schools": (get_scotland_schools_data(lat, lng) if _is_scotland_lsoa(lsoa_gss) else get_schools_data(postcode)),
             "housing": get_housing_data(postcode),
             "transport": get_transport_data(lat, lng),
             "amenities": get_amenities_data(lat, lng),
             "crime": (get_scotland_crime_data(postcode) if _is_scotland_lsoa(lsoa_gss) else get_crime_data(lat, lng)),
             "broadband": get_broadband_data(postcode),
             "gp": get_gp_data(postcode),
-            "flood": get_flood_risk(lat, lng, postcode),
+            "flood": (get_scotland_flood_data(lat, lng) if _is_scotland_lsoa(lsoa_gss) else get_flood_risk(lat, lng, postcode)),
             "census": {
                 "ts003": get_nomis_table("Household composition (TS003)", NOMIS_TS003_DIM, NOMIS_TS003_CATS, nomis_geo),
                 "ts044": get_nomis_table("Accommodation type (TS044)", NOMIS_TS044_DIM, NOMIS_TS044_CATS, nomis_geo),
@@ -11135,10 +11313,12 @@ def save_area(deal_id: str):
                               ([_postcode] if _is_scotland_lsoa(lsoa_gss) else [lat, lng]), {}),
                 ("transport", get_transport_data,       [lat, lng],               {}),
                 ("amenities", get_amenities_data,       [lat, lng],               {}),
-                ("schools",   get_schools_data,         [_postcode],              {}),
+                ("schools",   (get_scotland_schools_data if _is_scotland_lsoa(lsoa_gss) else get_schools_data),
+                              ([lat, lng] if _is_scotland_lsoa(lsoa_gss) else [_postcode]), {}),
                 ("broadband", get_broadband_data,       [_postcode],              {}),
                 ("gp",        get_gp_data,              [_postcode],              {}),
-                ("flood",     get_flood_risk,           [lat, lng, _postcode],    {}),
+                ("flood",     (get_scotland_flood_data if _is_scotland_lsoa(lsoa_gss) else get_flood_risk),
+                              ([lat, lng] if _is_scotland_lsoa(lsoa_gss) else [lat, lng, _postcode]), {}),
                 ("epc",       get_epc_data,             [_postcode],              {}),
                 ("planning",  get_planning_data,        [lat, lng, _postcode],    {}),
                 ("trends",    build_trends_from_uk_hpi, [_postcode, area_code, 24], {}),
