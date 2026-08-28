@@ -4754,110 +4754,92 @@ def _haversine_km(la1: float, lo1: float, la2: float, lo2: float) -> float:
 _SEPA_BASE = "https://map.sepa.org.uk/server/rest/services/Open"
 # SEPA Open flood extents (Open Government Licence). River/Coastal/Surface-water,
 # each at High (1-in-10 / 10% yr), Medium (1-in-200 / 0.5%), Low (1-in-1000 / 0.1%).
-_SEPA_FLOOD_LAYERS = {
-    "high":   [("River_Flooding_High_Likelihood", "river"),
-               ("Coastal_Flooding_High_Likelihood", "coastal"),
-               ("Surface_Water_and_Small_Watercourses_Flooding_High_Likelihood", "surface water")],
-    "medium": [("River_Flooding_Medium_Likelihood", "river"),
-               ("Coastal_Flooding_Medium_Likelihood", "coastal"),
-               ("Surface_Water_and_Small_Watercourses_Flooding_Medium_Likelihood", "surface water")],
-    "low":    [("River_Flooding_Low_Likelihood", "river"),
-               ("Coastal_Flooding_Low_Likelihood", "coastal"),
-               ("Surface_Water_and_Small_Watercourses_Flooding_Low_Likelihood", "surface water")],
-}
+_SEPA_MAP_URL = "https://map.sepa.org.uk/floodmap/map.htm"
 
 
-def _sepa_point_in_layer(service: str, lat: float, lng: float, timeout: int = 12):
-    """Return True/False if the point intersects the flood extent, or None on query failure."""
+def get_scotland_flood_data(lat, lng):
+    """Real per-point flood risk from SEPA via the Flood_Maps MapServer *Identify* operation
+    (one call returns every flood layer the point falls in, with names). SEPA is Scotland's
+    flood authority; the English EA map does not apply here. Same metrics.zone contract the
+    frontend reads (1/2/3), plus SEPA fields. If SEPA can't be reached we return an honest
+    'check SEPA map' link state — never a fabricated band."""
     import json as _json
-    url = f"{_SEPA_BASE}/{service}/FeatureServer/0/query"
+    retrieved = now_iso()
+    sources = [{"label": "SEPA Flood Maps (Open Government Licence v3.0)",
+                "url": "https://map.sepa.org.uk/floodmaps"}]
+
+    def _link_state(msg="Check SEPA's flood map for this property (Scotland's flood authority)."):
+        out = metric_ok(msg, [], sources, retrieved, 0.5)
+        out["metrics"] = {"zone": None, "risk": "Check SEPA", "source": "SEPA",
+                          "jurisdiction": "scotland", "flood_types": [],
+                          "sepa_url": _SEPA_MAP_URL, "check_directly": True}
+        return out
+
+    if lat is None or lng is None:
+        return _link_state()
+
+    d = 0.004  # small map extent (deg) around the point so Identify resolves precisely
+    url = f"{_SEPA_BASE}/Flood_Maps/MapServer/identify"
     params = {
-        "where": "1=1",                       # ArcGIS query requires a where clause alongside geometry
         "geometry": _json.dumps({"x": lng, "y": lat, "spatialReference": {"wkid": 4326}}),
         "geometryType": "esriGeometryPoint",
-        "inSR": "4326",                       # WGS84 in; SEPA reprojects to 27700
-        "spatialRel": "esriSpatialRelIntersects",
-        "returnCountOnly": "true",
+        "sr": "4326",
+        "layers": "all",
+        "tolerance": "2",
+        "mapExtent": f"{lng-d},{lat-d},{lng+d},{lat+d}",
+        "imageDisplay": "600,600,96",
+        "returnGeometry": "false",
         "f": "json",
     }
     headers = {"User-Agent": "LegalSmegal-AreaIntelligence/1.0"}
     try:
-        status, payload = _http_get_json(url, params=params, headers=headers, timeout=timeout)
-        if status == 200 and isinstance(payload, dict):
-            if "count" in payload:
-                return int(payload.get("count") or 0) > 0
-            if "features" in payload:          # server ignored returnCountOnly -> use features
-                return len(payload.get("features") or []) > 0
+        status, payload = _http_get_json(url, params=params, headers=headers, timeout=15)
     except Exception:
-        pass
-    return None
+        status, payload = 0, None
+    if status != 200 or not isinstance(payload, dict) or "results" not in payload:
+        return _link_state()
 
+    bands = {"high": False, "medium": False, "low": False}
+    types = set()
+    for r in (payload.get("results") or []):
+        name = str(r.get("layerName") or "").lower()
+        if "future" in name or "climate" in name:
+            continue  # current maps only, not the 2080s climate-change projections
+        if "high likelihood" in name:
+            band = "high"
+        elif "medium likelihood" in name:
+            band = "medium"
+        elif "low likelihood" in name:
+            band = "low"
+        else:
+            continue
+        bands[band] = True
+        if "coastal" in name:
+            types.add("coastal")
+        elif "surface" in name:
+            types.add("surface water")
+        else:
+            types.add("river")
 
-def get_scotland_flood_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
-    """Real per-point flood risk from SEPA (Scotland's flood authority), replacing the
-    England EA map which does not apply north of the border. Returns the same
-    `metrics.zone` contract the frontend already reads (1/2/3), plus SEPA-specific
-    fields. Graceful: on total API failure returns 'unavailable' (the card then hides)
-    — it never fabricates a zone."""
-    retrieved = now_iso()
-    sources = [{"label": "SEPA Flood Maps (Open Government Licence v3.0)",
-                "url": "https://map.sepa.org.uk/floodmaps"}]
-    if lat is None or lng is None:
-        return metric_unavailable("Scottish flood risk unavailable: coordinates not resolved.", sources, retrieved)
-
-    def scan(band):
-        hit, types, all_failed = False, [], True
-        for service, kind in _SEPA_FLOOD_LAYERS[band]:
-            r = _sepa_point_in_layer(service, lat, lng)
-            if r is not None:
-                all_failed = False
-            if r:
-                hit = True
-                types.append(kind)
-        return hit, types, all_failed
-
-    # Low extent is the widest and contains the medium/high extents: if the point is
-    # not even in the Low extent, it is outside all flood risk -> Minimal (fast path).
-    _SEPA_MAP = "https://map.sepa.org.uk/floodmap/map.htm"
-    low_hit, low_types, low_failed = scan("low")
-    if low_failed:
-        # SEPA's live API is not reliably reachable from our server. Rather than hide flood or
-        # fabricate a band, give the buyer the authoritative source directly: a link to SEPA's own
-        # flood map for this property. Honest, real, one click — never a made-up figure.
-        out = metric_ok(
-            "Check SEPA's flood map for this property (Scotland's flood authority).",
-            [], sources, retrieved, 0.5)
-        out["metrics"] = {"zone": None, "risk": "Check SEPA", "source": "SEPA",
-                          "jurisdiction": "scotland", "flood_types": [],
-                          "sepa_url": _SEPA_MAP, "check_directly": True}
-        return out
-    if not low_hit:
-        out = metric_ok(
-            "Minimal — outside all SEPA river, coastal and surface-water flood extents (below a 1 in 1000 annual chance).",
-            [{"zone": 1}], sources, retrieved, 0.9)
-        out["metrics"] = {"zone": 1, "risk": "Minimal", "source": "SEPA",
-                          "jurisdiction": "scotland", "flood_types": [], "sepa_url": _SEPA_MAP}
-        return out
-
-    # In some flood extent: refine to the highest band the point sits in.
-    high_hit, high_types, _ = scan("high")
-    if high_hit:
-        band, zone, types = "High", 3, high_types
+    if bands["high"]:
+        risk, zone = "High", 3
         desc = ("High — within a SEPA high-likelihood flood extent (about a 1 in 10 annual chance). "
                 "Significant insurance cost and possible mortgage-availability implications.")
+    elif bands["medium"]:
+        risk, zone = "Medium", 2
+        desc = ("Medium — within a SEPA medium-likelihood flood extent (about a 1 in 200 annual "
+                "chance). Flood insurance recommended.")
+    elif bands["low"]:
+        risk, zone = "Low", 1
+        desc = "Low — within a SEPA low-likelihood flood extent (about a 1 in 1000 annual chance)."
     else:
-        med_hit, med_types, _ = scan("medium")
-        if med_hit:
-            band, zone, types = "Medium", 2, med_types
-            desc = ("Medium — within a SEPA medium-likelihood flood extent (about a 1 in 200 annual "
-                    "chance). Flood insurance recommended.")
-        else:
-            band, zone, types = "Low", 1, low_types
-            desc = ("Low — within a SEPA low-likelihood flood extent (about a 1 in 1000 annual chance).")
+        risk, zone = "Minimal", 1
+        desc = ("Minimal — outside all SEPA river, coastal and surface-water flood extents "
+                "(below a 1 in 1000 annual chance).")
 
     out = metric_ok(desc, [{"zone": zone}], sources, retrieved, 0.9)
-    out["metrics"] = {"zone": zone, "risk": band, "source": "SEPA",
-                      "jurisdiction": "scotland", "flood_types": sorted(set(types)), "sepa_url": _SEPA_MAP}
+    out["metrics"] = {"zone": zone, "risk": risk, "source": "SEPA", "jurisdiction": "scotland",
+                      "flood_types": sorted(types), "sepa_url": _SEPA_MAP_URL}
     return out
 
 
