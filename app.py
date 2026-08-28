@@ -4818,17 +4818,25 @@ def get_scotland_flood_data(lat: Optional[float], lng: Optional[float]) -> Dict[
 
     # Low extent is the widest and contains the medium/high extents: if the point is
     # not even in the Low extent, it is outside all flood risk -> Minimal (fast path).
+    _SEPA_MAP = "https://map.sepa.org.uk/floodmap/map.htm"
     low_hit, low_types, low_failed = scan("low")
     if low_failed:
-        return metric_unavailable(
-            "Scottish flood risk temporarily unavailable (SEPA). Verify via SEPA Flood Maps before bidding.",
-            sources, retrieved)
+        # SEPA's live API is not reliably reachable from our server. Rather than hide flood or
+        # fabricate a band, give the buyer the authoritative source directly: a link to SEPA's own
+        # flood map for this property. Honest, real, one click — never a made-up figure.
+        out = metric_ok(
+            "Check SEPA's flood map for this property (Scotland's flood authority).",
+            [], sources, retrieved, 0.5)
+        out["metrics"] = {"zone": None, "risk": "Check SEPA", "source": "SEPA",
+                          "jurisdiction": "scotland", "flood_types": [],
+                          "sepa_url": _SEPA_MAP, "check_directly": True}
+        return out
     if not low_hit:
         out = metric_ok(
             "Minimal — outside all SEPA river, coastal and surface-water flood extents (below a 1 in 1000 annual chance).",
             [{"zone": 1}], sources, retrieved, 0.9)
         out["metrics"] = {"zone": 1, "risk": "Minimal", "source": "SEPA",
-                          "jurisdiction": "scotland", "flood_types": []}
+                          "jurisdiction": "scotland", "flood_types": [], "sepa_url": _SEPA_MAP}
         return out
 
     # In some flood extent: refine to the highest band the point sits in.
@@ -4849,7 +4857,7 @@ def get_scotland_flood_data(lat: Optional[float], lng: Optional[float]) -> Dict[
 
     out = metric_ok(desc, [{"zone": zone}], sources, retrieved, 0.9)
     out["metrics"] = {"zone": zone, "risk": band, "source": "SEPA",
-                      "jurisdiction": "scotland", "flood_types": sorted(set(types))}
+                      "jurisdiction": "scotland", "flood_types": sorted(set(types)), "sepa_url": _SEPA_MAP}
     return out
 
 
