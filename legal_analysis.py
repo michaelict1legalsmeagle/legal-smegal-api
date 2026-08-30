@@ -162,6 +162,63 @@ SCORING RULES:
 * viability_statement: state the flag count and what is resolvable. Never say "recommend" or "advise". Never give a verdict."""
 
 
+# ── STAGE 3 PROMPT — PACK-LEVEL CROSS-DOCUMENT & STATUTORY REVIEW ──
+# Stages 1 and 2 are deliberately single-document and forbid inference/external
+# knowledge. That is correct for verbatim extraction but it is BLIND to risks that
+# only appear when two documents are compared, or when a stated fact triggers a
+# well-established statutory consequence. Stage 3 fills exactly that gap, under
+# strict evidence discipline so it cannot fabricate.
+STAGE_3_SYSTEM = """You are a UK property legal analyst performing PACK-LEVEL cross-document and statutory review of an auction legal pack. This stage exists to catch material risks that a single-document, no-inference scan cannot see.
+
+You MAY compare facts across documents and apply established UK conveyancing law. You operate under STRICT evidence discipline:
+
+EVIDENCE DISCIPLINE (non-negotiable):
+* Every flag MUST quote the exact verbatim text from EACH document it relies on, and name that document. If you cannot quote the triggering fact(s) from the documents provided, DO NOT emit the flag.
+* You connect STATED facts. You never invent a fact that is not written in the documents.
+* A statutory-consequence flag fires ONLY when its triggering fact is explicitly present in the pack (e.g. only raise a build-over point if a document explicitly states a public sewer/lateral drain is within the property boundary).
+* If a comparison is impossible because a document is absent (e.g. no title register present), DO NOT flag — silence is correct.
+* No verdicts, no recommendations. State the risk factually and the specific action a buyer's solicitor should take.
+* When in doubt, EXCLUDE. A false alarm that scares a buyer off a sound deal is as harmful as a miss.
+
+REVIEW TASKS — check each; emit a flag only where the evidence is present in the documents:
+
+A) SELLER vs REGISTERED PROPRIETOR (cross-document):
+Compare the SELLER named in the special conditions / contract against the REGISTERED PROPRIETOR(S) named in the title register Proprietorship Register (the "PROPRIETOR:" entry). If the named seller is NOT among the registered proprietors, this is CRITICAL — the buyer would contract to buy from a party not yet on the title. Corroborate with any "pending application" / unregistered-transfer evidence in the pack. In summation, quote BOTH the seller line and the proprietor line. Category: seller_not_registered_proprietor.
+
+B) REGISTRATION-BLOCKING RESTRICTIONS (title register):
+Identify RESTRICTION entries that can block the buyer's own registration: (i) third-party CONSENT restrictions ("no disposition ... without the consent of [named party]") — category registration_consent_restriction; (ii) SETTLEMENT/trust-compliance restrictions requiring a certificate or statutory declaration of compliance with a named settlement/deed — category settlement_compliance_restriction; (iii) Form A / two-trustee (overreaching) restrictions — category trust_corporation_restriction. Where a consent or settlement restriction is present, emit ONE flag stating registration can be blocked until each is satisfied, quoting each restriction; severity critical.
+
+C) STATUTORY OVERLAYS (a stated fact triggers a statutory consequence) — only where the fact is explicit:
+* Public sewer/lateral drain within the boundary (drainage search) OR a covenant barring building near sewers/drains -> building or extending may require a build-over agreement under Building Regulations Part H4. Category: public_sewer_within.
+* Coal-mining search verdict of "potential risk" / "action required" / within the boundary -> coal mining subsidence risk; a visual mining survey is advised. Category: mining.
+* Recent building works recorded with a missing Building Regulations completion certificate -> building-control enforcement exposure (extended to 10 years for works completed after 1 October 2023 by the Building Safety Act 2022). Category: building_safety_act_enforcement.
+* Highway not confirmed maintainable at public expense -> possible unadopted-road / private maintenance liability; a highways search is advised. Category: road_adoption.
+
+D) DERIVED FINANCIAL / DELIVERABILITY (combine stated terms) — only where the terms are stated:
+* If the sale is UNCONDITIONAL with a short completion window (about 28 days or fewer) AND the title carries a registration or mortgageability risk identified in A or B, flag that mainstream finance is unlikely to complete in time and bridging may be required, with deposit and buyer's-fee forfeiture exposure on failure. Category: unconditional_completion_finance.
+* If the seller is not yet the registered proprietor because an already-completed transfer merely awaits registration, note that SDLT sub-sale relief is unlikely to apply (this is two chargeable transactions) — for the buyer's tax adviser to confirm. Category: sub_sale_sdlt.
+
+ALLOWED risk_category slugs (choose EXACTLY one per flag, or "uncategorised" if none genuinely fits):
+seller_not_registered_proprietor, registration_consent_restriction, settlement_compliance_restriction, trust_corporation_restriction, public_sewer_within, mining, building_safety_act_enforcement, building_regulations_completion, road_adoption, unconditional_completion_finance, sub_sale_sdlt, restrictive_covenant, indemnifies_seller_for_all_covenant, limited_title_guarantee, buyer_bears_risk_from_exchange, notice_to_complete, uncategorised
+
+OUTPUT (STRICT JSON ONLY — no prose, no markdown):
+{
+  "flags": [
+    {
+      "severity": "critical | high | note",
+      "title": "string — one line, max 12 words",
+      "summation": "string — one sentence that quotes or names the specific evidence from each document relied on",
+      "risk_category": "one slug from the allowed list above, or uncategorised",
+      "source_document": "string — primary document, or 'multiple: X + Y' for a cross-document finding",
+      "source_clause": "string or null",
+      "source_page": number or null,
+      "legal_risk_weight": number
+    }
+  ]
+}
+FAIL-SAFE: if nothing qualifies with evidence, return { "flags": [] }."""
+
+
 # ── DOCUMENT TYPE DISPLAY NAMES ──────────────────────────────
 DOC_TYPE_LABELS = {
     "legal_pack":         "Auctioneer's legal pack",
@@ -493,6 +550,44 @@ any line containing a house number followed by a street name.""",
     flags = stage2_result.get("flags", [])
     flags = flags + pack["missing_critical"]
 
+    # ── Stage 3 — Pack-level cross-document & statutory reasoning ──
+    # Catches risks the single-document, no-inference stages cannot see:
+    # seller vs registered proprietor, registration-blocking restrictions,
+    # statutory overlays (build-over / coal / building-safety / road adoption),
+    # and derived finance/deliverability. Evidence-grounded (see STAGE_3_SYSTEM);
+    # additive and fully optional — a failure never blocks the summary.
+    stage3_flags: List[Dict] = []
+    if combined_text.strip():
+        try:
+            logger.info("Stage 3: pack-level cross-document review")
+            stage3_result = llm_json_fn(
+                system=STAGE_3_SYSTEM,
+                prompt=("Perform a pack-level cross-document and statutory review of these "
+                        "auction documents. Emit flags only where the evidence is present:\n\n"
+                        + truncated),
+                temperature=0.1,
+            )
+            raw3 = stage3_result.get("flags", []) if isinstance(stage3_result, dict) else []
+            # De-duplicate against stage-2 flags so we never double-count the same risk.
+            _seen = {((f.get("risk_category") or "").strip().lower(),
+                      (f.get("title") or "").strip().lower()[:40]) for f in flags}
+            for f in raw3:
+                if not isinstance(f, dict):
+                    continue
+                key = ((f.get("risk_category") or "").strip().lower(),
+                       (f.get("title") or "").strip().lower()[:40])
+                if key in _seen:
+                    continue
+                _seen.add(key)
+                f.setdefault("source_clause", None)
+                f.setdefault("source_page", None)
+                stage3_flags.append(f)
+            logger.info(f"Stage 3 complete: {len(stage3_flags)} pack-level flag(s)")
+        except Exception as e:
+            logger.error(f"Stage 3 failed: {e}")
+            stage3_flags = []
+    flags = flags + stage3_flags
+
     # Recount after merge
     flag_counts = {
         "critical": sum(1 for f in flags if f.get("severity") == "critical"),
@@ -501,10 +596,16 @@ any line containing a house number followed by a street name.""",
         "note":     sum(1 for f in flags if f.get("severity") == "note"),
     }
 
-    # Recalculate deal score including missing doc deductions
+    # Recalculate deal score including missing doc deductions and stage-3 flags.
+    # Stage 2 already deducted its own flags from deal_score; apply the same
+    # tariff (critical 12 / high 6) to the additive stage-3 pack-level flags.
     base_score = stage2_result.get("deal_score", 100)
     missing_deduction = flag_counts["missing"] * 4
-    deal_score = max(0, base_score - missing_deduction)
+    stage3_deduction = sum(
+        12 if f.get("severity") == "critical" else 6 if f.get("severity") == "high" else 0
+        for f in stage3_flags
+    )
+    deal_score = max(0, base_score - missing_deduction - stage3_deduction)
 
     # ── Merge address pre-extraction into property ──
     prop = stage2_result.get("property", {}) or {}
