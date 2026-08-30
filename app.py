@@ -7486,8 +7486,11 @@ def ai_explain():
 
 # ── PDF TEXT EXTRACTION ─────────────────────────────────────
 DOCUMENT_PATTERNS: Dict[str, List[str]] = {
-    "legal_pack":          ["legal pack", "auction pack", "lot information", "information pack",
-                            "document archive", "pack archive"],
+    # NOTE: detect_document_type returns the FIRST matching type in this order. SPECIFIC
+    # types must come before broad catch-alls. 'legal_pack' fires on the phrase "legal pack",
+    # which special-conditions / addendum / title documents routinely reference — so it MUST
+    # be checked LAST, or it swallows those specific types (this is what mis-tagged the
+    # Woodlands special conditions as 'legal_pack' and made them read as "not present").
     "special_conditions":  ["special conditions", "special condition of sale", "conditions of sale"],
     "addendum":            ["addendum", "day of sale", "lot amendment", "amendment notice",
                             "late amendment", "revised conditions", "updated conditions",
@@ -7512,11 +7515,14 @@ DOCUMENT_PATTERNS: Dict[str, List[str]] = {
     "survey":              ["structural survey", "building survey", "rics survey",
                             "condition report", "level 2", "level 3", "homebuyer report"],
     "auction_tcs":         ["auction terms", "auctioneer terms", "conditions of auction"],
-    "freehold":            ["freehold", "absolute freehold", "possessory freehold"],
     "deed":                ["transfer deed", "conveyance", "tr1", "deed of",
                             "ta6", "ta10", "seller property", "fittings and contents",
                             "property information form"],
     "tenancy_ast":         ["assured shorthold", "tenancy agreement", "rental agreement"],
+    "freehold":            ["freehold", "absolute freehold", "possessory freehold"],
+    # broad catch-all — MUST stay last
+    "legal_pack":          ["legal pack", "auction pack", "lot information", "information pack",
+                            "document archive", "pack archive"],
 }
 
 def detect_document_type(filename: str, text: str) -> str:
@@ -8636,22 +8642,40 @@ def summarise_deal(deal_id: str):
         import sys as _sys, os as _os
         _sys.path.insert(0, _os.path.dirname(__file__))
         # Build prioritised text inline — bypass external service
-        _PRIORITY = ['special_conditions','addendum','title_register','lease',
+        _PRIORITY = ['special_conditions','addendum','legal_pack','auction_tcs','title_register','lease',
                      'title_plan','deed','freehold','tenancy_ast',
-                     'local_auth_search','environmental','epc','survey','auction_tcs','unknown']
-        _docs_sorted = sorted(documents,
-            key=lambda d: _PRIORITY.index(d.get('doc_type','unknown'))
-                          if d.get('doc_type','unknown') in _PRIORITY else 99)
+                     'local_auth_search','environmental','epc','survey','unknown']
+        # Special conditions & addendum are the highest-value documents and are frequently
+        # MIS-CLASSIFIED (this pack tagged the special conditions as 'legal_pack'). Prioritise
+        # by FILENAME as well as doc_type so the huge searches can never crowd them out of the
+        # prompt budget — that mis-ordering is what made special conditions read as "not present".
+        def _prio(d):
+            _fn = (d.get('file_name') or '').lower()
+            _dt = d.get('doc_type', 'unknown')
+            if 'special condition' in _fn or 'special_condition' in _fn:
+                return -2
+            if 'addendum' in _fn:
+                return -1
+            return _PRIORITY.index(_dt) if _dt in _PRIORITY else 99
+        _docs_sorted = sorted(documents, key=_prio)
         _parts = []
         _total = 0
         _HARD_CAP = 40000   # ~10k tokens — target <20s LLM response
-        _PER_DOC  = 6000    # max per document
+        _PER_DOC  = 6000    # max per document (bulky searches: verdicts are near the top)
+        # Material legal documents carry the clauses that actually create liability — give them
+        # enough budget to be read in full rather than a 6k slice.
+        _LEGAL_TYPES = {'special_conditions','addendum','legal_pack','auction_tcs','title_register'}
+        _PER_DOC_LEGAL = 12000
         for _doc in _docs_sorted:
             _txt = (_doc.get('extracted_text') or '').strip()
             if not _txt:
                 continue
+            _fn = (_doc.get('file_name') or '').lower()
+            _is_legal = (_doc.get('doc_type') in _LEGAL_TYPES
+                         or 'special condition' in _fn or 'addendum' in _fn)
+            _cap = _PER_DOC_LEGAL if _is_legal else _PER_DOC
             _label = f"=== {_doc.get('doc_type','unknown').upper()}: {_doc.get('file_name','')} ===\n"
-            _capped = _txt[:_PER_DOC] + ('\n[...truncated...]' if len(_txt) > _PER_DOC else '')
+            _capped = _txt[:_cap] + ('\n[...truncated...]' if len(_txt) > _cap else '')
             _chunk  = _label + _capped + '\n\n'
             if _total + len(_chunk) > _HARD_CAP:
                 _rem = _HARD_CAP - _total - len(_label) - 20
