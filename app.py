@@ -2969,8 +2969,14 @@ out center;
         except Exception:
             continue  # malformed body -> try the next mirror
         if isinstance(payload, dict) and isinstance(payload.get("elements"), list):
-            return payload  # valid response (may be genuinely empty) -> done
-    return last_empty  # all mirrors failed -> honest empty (FE hides the card)
+            if payload["elements"]:
+                return payload            # real data -> done
+            last_empty = payload          # 200 but EMPTY — likely a soft failure (rate-limit /
+                                          # partial result); remember it but try the next mirror.
+                                          # Only accepted if EVERY mirror also comes back empty
+                                          # (i.e. the area is genuinely featureless).
+            continue
+    return last_empty  # all mirrors empty or failed -> honest empty (FE hides the card)
 
 
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
