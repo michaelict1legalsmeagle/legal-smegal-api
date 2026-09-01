@@ -8218,11 +8218,12 @@ def upload_document():
     filename = secure_filename(file.filename or "document.pdf")
     if not filename:
         filename = "document.pdf"
-    if not filename.lower().endswith((".pdf", ".docx")):
-        return jsonify({"error": "Only PDF and Word (.docx) files are accepted"}), 400
+    if not filename.lower().endswith((".pdf", ".docx", ".txt")):
+        return jsonify({"error": "Only PDF, Word (.docx) and text (.txt) files are accepted"}), 400
     _is_docx = filename.lower().endswith(".docx")
+    _is_txt  = filename.lower().endswith(".txt")
     _content_type = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                     if _is_docx else "application/pdf")
+                     if _is_docx else "text/plain" if _is_txt else "application/pdf")
 
     # Verify deal belongs to this user
     try:
@@ -8288,13 +8289,20 @@ def upload_document():
         if _is_docx:
             extracted_text, page_count = _extract_docx_text(file_bytes)
             needs_ocr = False
+        elif _is_txt:
+            try:
+                extracted_text = file_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                extracted_text = file_bytes.decode("latin-1", "ignore")
+            page_count = max(1, len(extracted_text) // 3000)
+            needs_ocr = False
         else:
             extracted_text, page_count = extract_pdf_text(file_bytes)
             needs_ocr = (docai_ocr is not None) and (not extracted_text)
     except Exception as e:
         app.logger.warning(f"Extraction failed: {e} — routing to OCR")
         extracted_text, page_count = "", 0
-        needs_ocr = (docai_ocr is not None) and (not _is_docx)
+        needs_ocr = (docai_ocr is not None) and (not _is_docx) and (not _is_txt)
     _t_extract = round(time.time() - _t0, 2)
     _t_classify_ocr_need = 0.0  # no longer a separate step
 
