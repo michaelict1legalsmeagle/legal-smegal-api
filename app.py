@@ -7534,6 +7534,30 @@ def detect_document_type(filename: str, text: str) -> str:
     return "unknown"
 
 
+def _extract_docx_text(file_bytes: bytes) -> Tuple[str, int]:
+    """Extract text from a .docx (Office Open XML) with NO third-party dependency.
+    A .docx is a zip; the body text lives in word/document.xml. Paragraph/break tags
+    become newlines, then all tags are stripped. page_count is approximated from length.
+    Auction packs frequently supply the Special Conditions and TR1 as .docx, so dropping
+    them (PDF-only upload) silently loses the most important document in the pack."""
+    import io as _io, zipfile as _zip, re as _re
+    try:
+        with _zip.ZipFile(_io.BytesIO(file_bytes)) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "ignore")
+    except Exception as e:
+        app.logger.warning(f"docx extraction failed: {e}")
+        return "", 0
+    xml = _re.sub(r"</w:p>", "\n", xml)
+    xml = _re.sub(r"<w:br\s*/?>", "\n", xml)
+    xml = _re.sub(r"<w:tab\s*/?>", "\t", xml)
+    text = _re.sub(r"<[^>]+>", "", xml)
+    for a, b in (("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&apos;", "'")):
+        text = text.replace(a, b)
+    text = _re.sub(r"[ \t]+\n", "\n", text)
+    text = _re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text, max(1, len(text) // 3000)
+
+
 def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     """Extract text from PDF bytes. Returns (text, page_count).
 
@@ -8188,8 +8212,11 @@ def upload_document():
     filename = secure_filename(file.filename or "document.pdf")
     if not filename:
         filename = "document.pdf"
-    if not filename.lower().endswith(".pdf"):
-        return jsonify({"error": "Only PDF files are accepted"}), 400
+    if not filename.lower().endswith((".pdf", ".docx")):
+        return jsonify({"error": "Only PDF and Word (.docx) files are accepted"}), 400
+    _is_docx = filename.lower().endswith(".docx")
+    _content_type = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                     if _is_docx else "application/pdf")
 
     # Verify deal belongs to this user
     try:
@@ -8252,12 +8279,16 @@ def upload_document():
     # 390MB peak even for max-size PDFs — 122MB headroom within 512MB.
     _t0 = time.time()
     try:
-        extracted_text, page_count = extract_pdf_text(file_bytes)
-        needs_ocr = (docai_ocr is not None) and (not extracted_text)
+        if _is_docx:
+            extracted_text, page_count = _extract_docx_text(file_bytes)
+            needs_ocr = False
+        else:
+            extracted_text, page_count = extract_pdf_text(file_bytes)
+            needs_ocr = (docai_ocr is not None) and (not extracted_text)
     except Exception as e:
-        app.logger.warning(f"PDF extraction failed: {e} — routing to OCR")
+        app.logger.warning(f"Extraction failed: {e} — routing to OCR")
         extracted_text, page_count = "", 0
-        needs_ocr = docai_ocr is not None
+        needs_ocr = (docai_ocr is not None) and (not _is_docx)
     _t_extract = round(time.time() - _t0, 2)
     _t_classify_ocr_need = 0.0  # no longer a separate step
 
@@ -8274,7 +8305,7 @@ def upload_document():
             supabase.storage.from_("legal-packs").upload(
                 path=storage_path,
                 file=file_bytes,
-                file_options={"content-type": "application/pdf", "upsert": "true"}
+                file_options={"content-type": _content_type, "upsert": "true"}
             )
             _t_storage = round(time.time() - _t0, 2)
         except Exception as e:
