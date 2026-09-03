@@ -4599,92 +4599,79 @@ def get_epc_data(postcode: str) -> Dict[str, Any]:
 
 def get_planning_data(lat: Optional[float], lng: Optional[float], postcode: str = "") -> Dict[str, Any]:
     """
-    PlanningAlerts.org API — free, no key required.
-    Returns planning applications within 3-mile (4827m) radius in last 24 months.
-    Returns count, types and recent activity for inference engine growth signal.
+    Planning CONSTRAINTS from the official MHCLG platform (planning.data.gov.uk),
+    bulk-loaded into the local `planning.constraints` PostGIS table on Hetzner and
+    answered with a point-in-polygon query. No live external dependency — resolves
+    from our own DB every time. Datasets: conservation-area, article-4-direction-area,
+    listed-building (with grade), green-belt, tree-preservation-zone.
+    (Flood risk is served by the EA-fed flood card, not duplicated here.)
+
+    Governance: absence of a hit is NOT a guarantee of "no constraint" — coverage
+    varies by authority — so the empty state says so and points to the LA register.
+    No fabrication: every flag is a real geometry intersection or an honest absence.
     """
     retrieved = now_iso()
-    sources = [{"label": "PlanningAlerts.org", "url": "https://www.planningalerts.org.uk/"}]
+    sources = [{"label": "planning.data.gov.uk (MHCLG)", "url": "https://www.planning.data.gov.uk/"}]
 
     if lat is None or lng is None:
-        return metric_unavailable("Planning data unavailable: coordinates not resolved.", sources, retrieved)
+        return metric_unavailable("Planning constraints unavailable: coordinates not resolved.", sources, retrieved)
 
     try:
-        # PlanningAlerts API — radius in metres, returns recent applications
-        url = "https://www.planningalerts.org.uk/api/v2/applications"
-        params = {
-            "lat":    lat,
-            "lng":    lng,
-            "radius": 4827,  # 3 miles in metres
-            "count":  100,
+        # ST_MakePoint(x=lng, y=lat); geometries stored in WGS84 (EPSG:4326).
+        rows = data_query(
+            "SELECT dataset, name, reference, grade "
+            "FROM planning.constraints "
+            "WHERE ST_Intersects(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))",
+            (lng, lat),
+        ) or []
+
+        present: Dict[str, list] = {}
+        for r in rows:
+            ds = (r.get("dataset") or "").strip()
+            if ds:
+                present.setdefault(ds, []).append({
+                    "name":      r.get("name"),
+                    "reference": r.get("reference"),
+                    "grade":     r.get("grade"),
+                })
+
+        def _items(ds):  return present.get(ds, [])
+        def _flag(ds):   return ds in present
+        _lb = _items("listed-building")
+        _lb_grade = next((i.get("grade") for i in _lb if i.get("grade")), None)
+
+        constraints = {
+            "conservation_area": {"present": _flag("conservation-area"),        "items": _items("conservation-area")},
+            "article_4":         {"present": _flag("article-4-direction-area"), "items": _items("article-4-direction-area")},
+            "listed_building":   {"present": _flag("listed-building"),          "items": _lb, "grade": _lb_grade},
+            "green_belt":        {"present": _flag("green-belt"),               "items": _items("green-belt")},
+            "tpo":               {"present": _flag("tree-preservation-zone"),   "items": _items("tree-preservation-zone")},
         }
-        status, payload = _http_get_json(url, params=params, timeout=15)
 
-        if status == 200 and isinstance(payload, dict):
-            applications = payload.get("applications") or []
-            if not applications:
-                out = metric_ok(
-                    f"No planning applications found within 3 miles of {postcode}.",
-                    [], sources, retrieved, 0.7
-                )
-                out["metrics"] = {"total": 0, "new_build": 0, "change_of_use": 0, "other": 0}
-                return out
-
-            # Classify by type
-            new_build     = 0
-            change_of_use = 0
-            other         = 0
-            recent_24m    = 0
-            cutoff        = datetime.utcnow() - timedelta(days=730)  # 24 months
-
-            for app in applications:
-                desc = str(app.get("description") or "").lower()
-                date_str = app.get("date_scraped") or app.get("on_notice_from") or ""
-                try:
-                    app_date = datetime.fromisoformat(date_str[:10])
-                    if app_date >= cutoff:
-                        recent_24m += 1
-                except Exception:
-                    pass
-
-                if any(kw in desc for kw in ["new dwelling", "new build", "erection of", "residential development"]):
-                    new_build += 1
-                elif any(kw in desc for kw in ["change of use", "conversion", "permitted development"]):
-                    change_of_use += 1
-                else:
-                    other += 1
-
-            total = len(applications)
-            summary = (
-                f"{total} planning applications within 3 miles. "
-                f"{recent_24m} in last 24 months. "
-                f"New build: {new_build}, Change of use: {change_of_use}, Other: {other}."
-            )
-
-            out = metric_ok(summary, applications[:10], sources, retrieved, 0.8)
-            out["metrics"] = {
-                "total":          total,
-                "recent_24m":     recent_24m,
-                "new_build":      new_build,
-                "change_of_use":  change_of_use,
-                "other":          other,
+        _hit = [k for k, v in constraints.items() if v.get("present")]
+        if _hit:
+            _label = {
+                "conservation_area": "conservation area", "article_4": "Article 4 direction",
+                "listed_building": "listed building", "green_belt": "green belt",
+                "tpo": "TPO",
             }
-            return out
-
-        elif status == 404:
-            out = metric_ok(
-                f"No planning applications found within 3 miles of {postcode}.",
-                [], sources, retrieved, 0.7
-            )
-            out["metrics"] = {"total": 0, "new_build": 0, "change_of_use": 0, "other": 0}
-            return out
+            summary = "Planning constraints at this location: " + ", ".join(_label[k] for k in _hit) + "."
         else:
-            return metric_unavailable(f"Planning API returned status {status}.", sources, retrieved)
+            summary = (f"No mapped planning constraints at {postcode}. Coverage varies by "
+                       f"authority — confirm on the local authority planning register before bidding.")
+
+        out = metric_ok(summary, [], sources, retrieved, 0.9)
+        out["constraints"] = constraints
+        # Activity-count model retired (national applications coverage is partial).
+        # Consumer (build_area_inference) reads planning.metrics.* via safe defaults →
+        # 0 → no planning-derived growth signal, which is the honest position.
+        out["metrics"] = {}
+        return out
 
     except Exception as e:
-        print(f"[WARN] Planning fetch failed for {lat},{lng}: {e}")
+        print(f"[WARN] Planning constraints query failed for {lat},{lng}: {e}")
 
-    return metric_unavailable("Planning data temporarily unavailable.", sources, retrieved)
+    return metric_unavailable("Planning constraints temporarily unavailable.", sources, retrieved)
 
 
 def get_flood_risk(lat: Optional[float], lng: Optional[float], postcode: str = "") -> Dict[str, Any]:
