@@ -2951,32 +2951,45 @@ def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
 out center;
 """.strip()
 
+    # S-OVERPASS-RETRY (2026-09-04): all three public mirrors are frequently
+    # rate-limited at the SAME moment (429/504/timeout), so a single sweep can
+    # return empty for a dense area — 31% of deals had empty amenities, most of
+    # them false. We now RE-SWEEP the mirrors when EVERY mirror failed with a
+    # non-200 (a transient outage). A genuine 200-with-no-elements (a truly
+    # sparse area) is accepted immediately and NOT retried, so we never hammer
+    # the mirrors for a real empty. Bounded to 2 sweeps to cap background latency.
     last_empty = {"elements": []}
-    for ep in _OVERPASS_ENDPOINTS:
-        try:
-            status, text = _http_post_text(
-                ep,
-                data=q.encode("utf-8"),
-                headers={"Content-Type": "text/plain"},
-                timeout=20,
-            )
-        except Exception:
-            continue  # network error on this mirror -> try the next
-        if status != 200 or not text:
-            continue  # 429/504/empty -> try the next mirror
-        try:
-            payload = json.loads(text)
-        except Exception:
-            continue  # malformed body -> try the next mirror
-        if isinstance(payload, dict) and isinstance(payload.get("elements"), list):
-            if payload["elements"]:
-                return payload            # real data -> done
-            last_empty = payload          # 200 but EMPTY — likely a soft failure (rate-limit /
-                                          # partial result); remember it but try the next mirror.
-                                          # Only accepted if EVERY mirror also comes back empty
-                                          # (i.e. the area is genuinely featureless).
-            continue
-    return last_empty  # all mirrors empty or failed -> honest empty (FE hides the card)
+    for _attempt in range(2):
+        if _attempt:
+            time.sleep(2.5)  # brief backoff before re-sweeping the mirrors
+        saw_200 = False
+        for ep in _OVERPASS_ENDPOINTS:
+            try:
+                status, text = _http_post_text(
+                    ep,
+                    data=q.encode("utf-8"),
+                    headers={"Content-Type": "text/plain"},
+                    timeout=20,
+                )
+            except Exception:
+                continue  # network error on this mirror -> try the next
+            if status != 200 or not text:
+                continue  # 429/504/empty body -> try the next mirror
+            saw_200 = True
+            try:
+                payload = json.loads(text)
+            except Exception:
+                continue  # malformed body -> try the next mirror
+            if isinstance(payload, dict) and isinstance(payload.get("elements"), list):
+                if payload["elements"]:
+                    return payload            # real data -> done
+                last_empty = payload          # 200 but EMPTY — genuine sparse area
+                continue
+        # At least one mirror answered 200 -> trust it as a real (sparse) result,
+        # don't re-sweep. Only re-sweep when the whole sweep was a transient outage.
+        if saw_200:
+            break
+    return last_empty  # genuinely sparse, or all mirrors down after retry
 
 
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
@@ -3312,7 +3325,11 @@ nwr["tourism"](around:{radius},{lat},{lng});
 
         total = sum(int(buckets[k]["count"]) for k in buckets.keys())
         if total == 0:
-            return metric_ok("No amenities returned from OSM for this area.", [], base_sources, retrieved, 0.0)
+            # Empty after the mirror re-sweep: for anything but a genuinely rural
+            # point this means OpenStreetMap/Overpass couldn't be reached, not that
+            # there are no amenities. Label it UNAVAILABLE (honest) rather than a
+            # false "no amenities here" — governance: never a fabricated all-clear.
+            return metric_unavailable("Amenities temporarily unavailable from OpenStreetMap (Overpass).", base_sources, retrieved)
 
         bullets: List[str] = []
 
