@@ -39,17 +39,13 @@ import urllib.error
 # --- Verified representative series (owner-occupier quoted rates) -------------
 # label must match the label seeded in bench_rates.
 SERIES = {
-    "IUMABEDR": "Bank Rate",
-    "IUMB2GH":  "2yr fixed 75% LTV",
-    "IUMB5GH":  "5yr fixed 75% LTV",
-    "IUMB2IH":  "2yr fixed 90% LTV",
-    "IUMB5IH":  "5yr fixed 90% LTV",
-    # TODO(confirm): add BoE buy-to-let quoted-rate series codes here once
-    # verified from the BoE series list. Leave out until confirmed — never guess.
+    "IUDBEDR": "Bank Rate",
+    "IUMBV34": "2yr fixed 75% LTV",
+    "IUMBV42": "5yr fixed 75% LTV",
 }
 
-BOE_BASE = "https://www.bankofengland.co.uk/boeapps/iadb/fromshowcolumns.asp"
-USER_AGENT = "LegalSmegal-rates-sync/1.0 (+admin contact)"
+BOE_BASE = "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp"
+USER_AGENT = "Mozilla/5.0 (LegalSmegal-rates-sync/1.1)"
 FRESH_DAYS = 45  # bench considered stale beyond this (BoE is monthly)
 
 
@@ -75,6 +71,8 @@ def fetch_csv() -> str:
 def parse_latest(csv_text: str) -> dict:
     """Return {series_code: (rate_pct, as_of_date)} for the most recent non-empty
     observation of each series. Missing/blank cells are skipped (never coerced to 0)."""
+    if "<html" in csv_text[:200].lower() or "DATE" not in csv_text[:50].upper():
+        raise ValueError("BoE did not return CSV (got an error/HTML page)")
     reader = csv.reader(io.StringIO(csv_text))
     rows = [r for r in reader if r]
     if len(rows) < 2:
