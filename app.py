@@ -8659,12 +8659,27 @@ def _tag_overage_flags(flags):
     import re as _re
     if not isinstance(flags, list):
         return
-    _pat = _re.compile(r"overage|anti[-\s]?embarrass|on[-\s]?sale|uplift|clawback|"
-                       r"pre[-\s]?empt|minimum\s+resale|resale\s+value", _re.I)
+    # TRUE overage signature = a further PAYMENT / share of resale UPLIFT / clawback.
+    # Weak terms (on-sale/resale/pre-emption) only qualify alongside money-owed-to-
+    # seller language; a Deed of Covenant on disposal is NOT an overage.
+    _strong = _re.compile(r"overage|anti[-\s]?embarrass|clawback|"
+                          r"uplift\s+(?:payment|share|clause)|"
+                          r"minimum\s+resale\s+value|"
+                          r"(?:further|additional|overage)\s+payment", _re.I)
+    _weak = _re.compile(r"on[-\s]?sale|re[-\s]?sale|pre[-\s]?empt", _re.I)
+    _money = _re.compile(r"pay(?:able|ment)?|percentage|share|proceeds|profit|"
+                         r"uplift|sum\s+(?:due|payable)|entitled\s+to", _re.I)
+    _excl = _re.compile(r"deed\s+of\s+covenant|same\s+terms|containing\s+covenants|"
+                        r"enter\s+into\s+a\s+deed", _re.I)
     for _f in flags:
         if not isinstance(_f, dict) or (_f.get("flag_class") or "").strip():
             continue
-        if _pat.search(" ".join(str(_f.get(k) or "") for k in ("title","evidence"))):
+        _txt = " ".join(str(_f.get(k) or "") for k in ("title","evidence"))
+        _is_overage = bool(_strong.search(_txt)) or (
+            bool(_weak.search(_txt)) and bool(_money.search(_txt)))
+        if _is_overage and _excl.search(_txt) and not _strong.search(_txt):
+            _is_overage = False  # pass-on-covenant deed, not an overage
+        if _is_overage:
             _f["flag_class"] = "exit_impairing_contingent_liability"
 
 
