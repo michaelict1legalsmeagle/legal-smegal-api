@@ -87,7 +87,7 @@ SUPA_URL            = (os.getenv("SUPABASE_URL") or "").strip()
 SUPA_KEY            = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
 
 SESSION_TTL_HOURS   = 2
-REPORT_TOKEN_TTL    = 72 * 3600   # 72-hour viewer link
+REPORT_TOKEN_TTL    = 30 * 24 * 3600   # 30-day viewer link (user must download within window)
 MAX_FILE_BYTES      = 20 * 1024 * 1024
 MAX_FILES           = 10
 
@@ -646,10 +646,12 @@ def _generate_pdf_bytes(summary_json: dict, docs: list) -> bytes:
 
 
 
-def _send_report_email(to_email: str, address: str, report_url: str, pdf_bytes: bytes) -> bool:
+def _send_report_email(to_email: str, address: str, report_url: str, expiry_date: str) -> bool:
+    """Link-only email (no PDF attachment). The online report is the single
+    canonical format; the user downloads/prints their own copy from it. The
+    email states the exact expiry date and the user's responsibility to save it."""
     if not RESEND_API_KEY:
         logger.warning("[guest2] RESEND_API_KEY not set"); return False
-    import base64
     try:
         resp = requests.post(
             "https://api.resend.com/emails",
@@ -659,13 +661,16 @@ def _send_report_email(to_email: str, address: str, report_url: str, pdf_bytes: 
                 "subject": f"Your LegalSmegal Report — {address or 'Legal Pack'}",
                 "html": f"""<div style="font-family:'IBM Plex Sans',sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;background:#0d1219;color:#e8edf2">
   <div style="font-family:'IBM Plex Mono',monospace;font-size:18px;font-weight:600;margin-bottom:28px">Legal<span style="color:#c8a84b">Smegal</span></div>
+  <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#c8a84b;margin-bottom:12px">Please read carefully</div>
   <div style="font-size:14px;font-weight:600;margin-bottom:8px">Your report is ready</div>
   <div style="font-size:13px;color:#7a8fa3;margin-bottom:24px">{address or 'Legal Pack'}</div>
   <a href="{report_url}" style="display:inline-block;padding:12px 24px;background:#c8a84b;color:#080c10;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;text-decoration:none;border-radius:4px">View Online &rarr;</a>
-  <div style="margin-top:24px;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#3d5068">PDF attached. Link valid 72 hours. Not legal advice.</div>
+  <div style="margin-top:24px;padding:12px 14px;background:#1a1410;border:1px solid #4a3a1a;border-radius:4px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#e8c98a;line-height:1.5">
+    <strong>Your report link is live and only available until {expiry_date}.</strong><br>
+    Open it and use <strong>Print / Download PDF</strong> and save your own copy to your own device. After {expiry_date} the link expires and the report cannot be recovered. It is your responsibility to download and keep your copy before then.
+  </div>
+  <div style="margin-top:20px;font-family:'IBM Plex Mono',monospace;font-size:9px;color:#3d5068">Not legal advice.</div>
 </div>""",
-                "attachments": [{"filename": "LegalSmegal-Report.pdf",
-                                  "content": base64.b64encode(pdf_bytes).decode()}],
             }, timeout=30,
         )
         if resp.status_code in (200, 201):
@@ -719,14 +724,17 @@ def _run_analysis_and_deliver(session_id: str):
 
     address = (summary_json.get("property") or {}).get("address") or ""
 
+    # Single canonical format: the online HTML report. No ReportLab PDF is
+    # generated or attached — the user downloads/prints their own copy from
+    # the report page (works on desktop and mobile). Email carries the link
+    # plus the exact expiry date and the download-now responsibility.
+    from datetime import datetime, timezone, timedelta
+    expiry_date = (datetime.now(timezone.utc) + timedelta(seconds=REPORT_TOKEN_TTL)).strftime("%d %B %Y")
+    _session_update(session_id, {"report_expires": expiry_date})
     try:
-        pdf_bytes = _generate_pdf_bytes(summary_json, [
-            {k: v for k, v in d.items() if k != "extracted_text"} for d in docs
-        ])
-        logger.info(f"[guest2] PDF generated ({len(pdf_bytes):,} bytes)")
-        _send_report_email(email, address, report_url, pdf_bytes)
+        _send_report_email(email, address, report_url, expiry_date)
     except Exception as e:
-        logger.error(f"[guest2] PDF/email failed: {e}")
+        logger.error(f"[guest2] email failed: {e}")
         # Fallback: link-only email
         try:
             requests.post("https://api.resend.com/emails",
