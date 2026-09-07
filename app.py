@@ -149,6 +149,7 @@ except Exception:
 app = Flask(__name__)
 from guest_routes import guest_bp; app.register_blueprint(guest_bp)  # guest2 pipeline — independent of subscriber flow
 from commercial_routes import commercial_bp; app.register_blueprint(commercial_bp)  # commercial valuation pipeline — independent of residential ceiling flow
+from rates_routes import rates_bp; app.register_blueprint(rates_bp)  # lender rates (bench_rates + lender_rates) — public /api/rates
 
 # CORS: wildcard origin + supports_credentials=True is rejected by all modern browsers.
 # Use an explicit allowlist. Add CORS_ORIGINS env var on Render if you add more origins.
