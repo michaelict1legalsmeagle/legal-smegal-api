@@ -490,7 +490,7 @@ Combine the street address with the city to form the full address.
 ALSO check: lot description lines, special conditions property description, 
 any line containing a house number followed by a street name.""",
             prompt=f"Extract property identification:\n\n{addr_input}",
-            temperature=0.1,
+            temperature=0,
             )
             address_data = addr_result
             logger.info(f"Address extracted: {address_data.get('address')}")
@@ -519,7 +519,7 @@ any line containing a house number followed by a street name.""",
         stage1_result = llm_json_fn(
             system=STAGE_1_SYSTEM,
             prompt=f"Extract all qualifying findings from these auction documents:\n\n{truncated}",
-            temperature=0.1,
+            temperature=0,
         )
         findings = stage1_result.get("findings", [])
         logger.info(f"Stage 1 complete: {len(findings)} findings extracted")
@@ -536,7 +536,7 @@ any line containing a house number followed by a street name.""",
             stage2_result = llm_json_fn(
                 system=STAGE_2_SYSTEM,
                 prompt=f"Classify these verified findings into the summary schema:\n\n{findings_json}",
-                temperature=0.1,
+                temperature=0,
             )
             logger.info("Stage 2 complete")
         except Exception as e:
@@ -565,7 +565,7 @@ any line containing a house number followed by a street name.""",
                 prompt=("Perform a pack-level cross-document and statutory review of these "
                         "auction documents. Emit flags only where the evidence is present:\n\n"
                         + truncated),
-                temperature=0.1,
+                temperature=0,
             )
             raw3 = stage3_result.get("flags", []) if isinstance(stage3_result, dict) else []
             # De-duplicate against stage-2 flags so we never double-count the same risk.
