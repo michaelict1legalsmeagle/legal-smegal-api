@@ -58,6 +58,7 @@ def _row_to_obj(r: dict) -> dict:
         "tags": r.get("tags") or [],
         "asOf": (str(r.get("as_of"))[:10] if r.get("as_of") else None),
         "source": r.get("source") or "",
+        "rateUrl": r.get("rate_url") or None,
     }
     if r.get("hmo_premium") is not None:
         o["hmoPremium"] = _num(r.get("hmo_premium"))
