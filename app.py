@@ -2963,7 +2963,7 @@ out center;
     last_empty = {"elements": []}
     for _attempt in range(2):
         if _attempt:
-            time.sleep(2.5)  # brief backoff before re-sweeping the mirrors
+            time.sleep(1.0)  # brief backoff before re-sweeping the mirrors
         saw_200 = False
         for ep in _OVERPASS_ENDPOINTS:
             try:
@@ -2971,7 +2971,7 @@ out center;
                     ep,
                     data=q.encode("utf-8"),
                     headers={"Content-Type": "text/plain"},
-                    timeout=20,
+                    timeout=10,
                 )
             except Exception:
                 continue  # network error on this mirror -> try the next
@@ -10798,24 +10798,42 @@ def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) ->
 
 
 def _json_sanitize(obj):
-    """Recursively convert non-JSON-native values (Decimal, date/datetime) to
-    JSON-safe types before a dict is written to a Supabase json/jsonb column.
+    """Convert non-JSON-native values (Decimal, date/datetime) to JSON-safe
+    types IN PLACE, so a large area_json can be written to a Supabase json/jsonb
+    column without building a full second copy (peak-memory safe during save).
 
-    A single Decimal anywhere in area_json otherwise fails the ENTIRE save
-    (the Supabase client serialises with json.dumps, which raises on Decimal),
-    discarding the comps and blanking the deal. This is one general guard for
-    every sub-fetch, present and future — not a per-column cast."""
+    A single Decimal anywhere otherwise fails the ENTIRE save (the Supabase
+    client serialises with json.dumps, which raises on Decimal), discarding the
+    comps and blanking the deal. One general guard for every sub-fetch, present
+    and future — not a per-column cast. Mutates dicts/lists in place and returns
+    the same object for convenient inline use; converts a bare scalar by value."""
     from decimal import Decimal as _Decimal
     import datetime as _dt
+
+    def _conv(v):
+        if isinstance(v, _Decimal):
+            return float(v)
+        if isinstance(v, (_dt.date, _dt.datetime)):
+            return v.isoformat()
+        if isinstance(v, tuple):
+            return _json_sanitize(list(v))
+        return v
+
     if isinstance(obj, dict):
-        return {_k: _json_sanitize(_v) for _k, _v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_json_sanitize(_v) for _v in obj]
-    if isinstance(obj, _Decimal):
-        return float(obj)
-    if isinstance(obj, (_dt.date, _dt.datetime)):
-        return obj.isoformat()
-    return obj
+        for _k, _v in obj.items():
+            if isinstance(_v, (dict, list)):
+                _json_sanitize(_v)
+            else:
+                obj[_k] = _conv(_v)
+        return obj
+    if isinstance(obj, list):
+        for _i, _v in enumerate(obj):
+            if isinstance(_v, (dict, list)):
+                _json_sanitize(_v)
+            else:
+                obj[_i] = _conv(_v)
+        return obj
+    return _conv(obj)
 
 
 def _recompute_deal_ceiling(deal_id: str, area_data: dict):
