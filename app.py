@@ -3423,10 +3423,10 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
                        s.ofsted_label, s.phase, s.establishment_type,
                        s.local_authority,
                        ROUND(
-                         ST_Distance(
+                         (ST_Distance(
                            ST_MakePoint(s.lng, s.lat)::geography,
                            ST_MakePoint(%s, %s)::geography
-                         ) / 1609.34, 2
+                         ) / 1609.34)::numeric, 2
                        ) AS miles
                 FROM public.schools s
                 WHERE s.lat IS NOT NULL AND s.lng IS NOT NULL
