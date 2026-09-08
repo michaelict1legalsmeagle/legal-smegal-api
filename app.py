@@ -3427,7 +3427,7 @@ def get_schools_data(postcode: str) -> Dict[str, Any]:
                            ST_MakePoint(s.lng, s.lat)::geography,
                            ST_MakePoint(%s, %s)::geography
                          ) / 1609.34)::numeric, 2
-                       ) AS miles
+                       )::float8 AS miles
                 FROM public.schools s
                 WHERE s.lat IS NOT NULL AND s.lng IS NOT NULL
                   AND ST_DWithin(
@@ -10669,7 +10669,7 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
         area_data.setdefault("census", {})["demographics"] = demographics
 
         _q = supabase.table("deals").update({
-            "area_json":  area_data,
+            "area_json":  _json_sanitize(area_data),
             "updated_at": now_iso(),
         }).eq("id", deal_id)
         if _snap_ts:
@@ -10795,6 +10795,27 @@ def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) ->
     except Exception as _e:
         out["status"] = "error"; out["error"] = str(_e)
     return out
+
+
+def _json_sanitize(obj):
+    """Recursively convert non-JSON-native values (Decimal, date/datetime) to
+    JSON-safe types before a dict is written to a Supabase json/jsonb column.
+
+    A single Decimal anywhere in area_json otherwise fails the ENTIRE save
+    (the Supabase client serialises with json.dumps, which raises on Decimal),
+    discarding the comps and blanking the deal. This is one general guard for
+    every sub-fetch, present and future — not a per-column cast."""
+    from decimal import Decimal as _Decimal
+    import datetime as _dt
+    if isinstance(obj, dict):
+        return {_k: _json_sanitize(_v) for _k, _v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_sanitize(_v) for _v in obj]
+    if isinstance(obj, _Decimal):
+        return float(obj)
+    if isinstance(obj, (_dt.date, _dt.datetime)):
+        return obj.isoformat()
+    return obj
 
 
 def _recompute_deal_ceiling(deal_id: str, area_data: dict):
@@ -11154,7 +11175,7 @@ def save_area(deal_id: str):
                             pass
                         try:
                             _result = supabase.table("deals").update({
-                                "area_json":  _latest,
+                                "area_json":  _json_sanitize(_latest),
                                 "updated_at": now_iso(),
                             }).eq("id", _deal_id_ref).eq("updated_at", _latest_ts).execute()
                         except Exception as _we:
@@ -11633,7 +11654,7 @@ def save_area(deal_id: str):
                 pass
 
             supabase.table("deals").update({
-                "area_json":  area_data,
+                "area_json":  _json_sanitize(area_data),
                 "updated_at": now_iso(),
             }).eq("id", _deal_id).execute()
 
@@ -11815,7 +11836,7 @@ def refresh_area_census(deal_id: str):
 
     try:
         supabase.table("deals").update({
-            "area_json":  area_data,
+            "area_json":  _json_sanitize(area_data),
             "updated_at": now_iso(),
         }).eq("id", deal_id).execute()
     except Exception as exc:
