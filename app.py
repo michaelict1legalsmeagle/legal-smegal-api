@@ -11662,6 +11662,20 @@ def save_area(deal_id: str):
             inference_result = build_area_inference(area_data, _postcode)
             area_data.update(inference_result)
 
+            # ── CURRENT MARKET DATA (SPEC v2.1; additive) ────────────────────
+            # Dated market facts + derived buyer/seller read. Fail-safe: any
+            # feed miss => that line unavailable, never fabricated. DISPLAY /
+            # CONTEXT only — writes area_json.market_data, touches NO ceiling.
+            try:
+                from market_data import build_market_data
+                area_data["market_data"] = build_market_data(
+                    supabase_data_query, data_query,
+                    area_code=area_code, postcode=_postcode,
+                    guide_price=_guide_price_gbp,
+                )
+            except Exception as _mde:
+                print(f"[market_data] build failed for {_deal_id}: {_mde}")
+
             # Write census.private_rent_pct to TOP-LEVEL area_json.census so
             # frontend can read it at area_json.census.private_rent_pct.
             # (build_area_inference buries it at inference.benchmarks.census)
