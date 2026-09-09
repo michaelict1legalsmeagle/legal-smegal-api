@@ -11625,6 +11625,23 @@ def save_area(deal_id: str):
                         app.logger.warning(f"[area-fetch] {_lbl} failed: {_fe}")
                         _area_results[_lbl] = None
 
+                    # EARLY VERDICT (fresh-upload latency fix): the ceiling needs
+                    # ONLY comps (area_data.housing) — verified: _recompute reads
+                    # housing + housing.metrics.audit, nothing from the slow
+                    # transport/amenities fetches. So the moment housing lands
+                    # (~2s) we recompute + persist the verdict, instead of making
+                    # the user wait for the whole batch (~30s on a slow Overpass).
+                    # It writes ONLY summary_json (CAS on updated_at) — a different
+                    # column from the later area_json write, so nothing is clobbered.
+                    # The end-of-batch _recompute at the bottom of save_area remains
+                    # as an idempotent fallback (its retry no-ops if the ceiling is
+                    # already good). Guarded so a failure here never breaks the fetch.
+                    if _lbl == "housing" and _res:
+                        try:
+                            _recompute_deal_ceiling(_deal_id, {"housing": _res})
+                        except Exception as _eve:
+                            app.logger.warning(f"[area-fetch] early verdict recompute failed: {_eve}")
+
             _census_result = _area_results.pop("_census", None)
 
             area_data = {
