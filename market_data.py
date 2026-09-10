@@ -12,10 +12,10 @@ the read, TREND earns "increasingly"; DISPLAY/CONTEXT only — never the ceiling
 from datetime import datetime
 
 MIN_SIGNALS = 3
-P_MOM = 1.0; DECEL = 0.5; AUC = 0.03; V_TXN = 5.0; R_FIX = 0.10; A_HI, A_LO = 1.05, 0.95
+P_MOM = 1.0; DECEL = 0.5; AUC = 0.03; V_TXN = 5.0; R_FIX = 0.10; A_HI, A_LO = 1.05, 0.95; A_APP = 3.0
 BUYER, SELLER, NEUTRAL = "buyer", "seller", "neutral"
 # trend (rate-of-change) signals — these earn the word "increasingly"
-TREND_KEYS = {"momentum", "deceleration", "auction", "rate_trend", "volume"}
+TREND_KEYS = {"momentum", "deceleration", "auction", "rate_trend", "volume", "approvals"}
 
 def _v_mom(x):   return None if x is None else (BUYER if x <= -P_MOM else SELLER if x >= P_MOM else NEUTRAL)
 def _v_dec(x):   return None if x is None else (BUYER if x <= -DECEL else SELLER if x >= DECEL else NEUTRAL)
@@ -23,12 +23,14 @@ def _v_auc(x):   return None if x is None else (BUYER if x <= -AUC  else SELLER 
 def _v_txn(x):   return None if x is None else (BUYER if x <= -V_TXN else SELLER if x >= V_TXN else NEUTRAL)
 def _v_rate(x):  return None if x is None else (BUYER if x >= R_FIX  else SELLER if x <= -R_FIX else NEUTRAL)
 def _v_aff(x):   return None if x is None else (BUYER if x >= A_HI   else SELLER if x <= A_LO  else NEUTRAL)
+def _v_app(x):   return None if x is None else (BUYER if x <= -A_APP else SELLER if x >= A_APP  else NEUTRAL)
 
 def classify(momentum=None, deceleration=None, auction=None,
-             affordability_vs_lr=None, rate_trend=None, volume=None):
+             affordability_vs_lr=None, rate_trend=None, volume=None, approvals=None):
     votes = {"momentum": _v_mom(momentum), "deceleration": _v_dec(deceleration),
              "auction": _v_auc(auction), "affordability": _v_aff(affordability_vs_lr),
-             "rate_trend": _v_rate(rate_trend), "volume": _v_txn(volume)}
+             "rate_trend": _v_rate(rate_trend), "volume": _v_txn(volume),
+             "approvals": _v_app(approvals)}
     avail = {k: v for k, v in votes.items() if v is not None}
     n = len(avail)
     if n < MIN_SIGNALS:
@@ -46,7 +48,7 @@ def classify(momentum=None, deceleration=None, auction=None,
     else:
         corr = False; gloss = "Supply and demand broadly in balance."
     return {"read": read, "gloss": gloss, "basis": [f"{k}={avail[k]}" for k in avail],
-            "n_signals": n, "net": net, "trend_corroborates": corr}
+            "n_signals": n, "net": net, "votes": avail, "trend_corroborates": corr}
 
 # ── readers (fail-safe; never raise) ─────────────────────────────────────────
 def _read_momentum(sq, area_code, region_name):
@@ -151,19 +153,49 @@ def _read_volume(dq, postcode):
     except Exception as e:
         return None, "volume unavailable (prod/Hetzner only)"
 
-def impact_of(read, n_signals, net):
-    """Decision impact — DERIVED from the read, never hand-set. Conditions affect
-    bid margin and exit certainty; the comparable ceiling is ALWAYS unchanged."""
-    arrow = {"buyer-leaning":"↘","seller-leaning":"↗","balanced":"→"}.get(read,"")
-    cons = {"buyer-leaning":"Conditions currently give buyers greater negotiating leverage.",
-            "seller-leaning":"Conditions currently favour sellers; buyers have less leverage.",
-            "balanced":"Supply and demand are broadly balanced."}.get(read,"Not enough current data to read the market.")
-    margin = {"buyer-leaning":"Wider","seller-leaning":"Tighter","balanced":"Standard"}.get(read,"—")
-    exitr  = {"buyer-leaning":"Slightly higher","seller-leaning":"Lower","balanced":"Neutral"}.get(read,"—")
+def impact_of(read, n_signals, net, votes=None):
+    """Decision impact + consequence sentence, DERIVED from the read and the
+    actual voting signals (never hand-written). The comparable ceiling is ALWAYS
+    unchanged; conditions are context only."""
+    votes = votes or {}
+    arrow = {"buyer-leaning":"\u2193","seller-leaning":"\u2191","balanced":"\u2192"}.get(read,"")
+    db = {"momentum":"lower prices","volume":"reduced transaction activity",
+          "deceleration":"slowing price growth","auction":"softening auction demand",
+          "affordability":"stretched affordability","rate_trend":"rising borrowing costs",
+          "approvals":"falling mortgage approvals"}
+    ds = {"momentum":"rising prices","volume":"increased transaction activity",
+          "deceleration":"accelerating price growth","auction":"firming auction demand",
+          "affordability":"improving affordability","rate_trend":"falling borrowing costs",
+          "approvals":"rising mortgage approvals"}
+    def _join(xs):
+        xs = xs[:3]
+        if not xs: return ""
+        p = xs[0] if len(xs)==1 else (xs[0]+" and "+xs[1] if len(xs)==2 else ", ".join(xs[:-1])+" and "+xs[-1])
+        return p[0].upper()+p[1:]
+    if read=="buyer-leaning":
+        drv=[db[k] for k,v in votes.items() if v=="buyer" and k in db]
+        cons=(_join(drv)+" are increasing buyer leverage.") if drv else "Current conditions are increasing buyer leverage."
+    elif read=="seller-leaning":
+        drv=[ds[k] for k,v in votes.items() if v=="seller" and k in ds]
+        cons=(_join(drv)+" are strengthening sellers' position.") if drv else "Current conditions are strengthening sellers' position."
+    else:
+        cons="Signals are mixed, leaving the market broadly balanced."
     ev = "Strong" if (n_signals>=4 and abs(net)>=2) else "Moderate" if n_signals>=3 else "Limited"
-    return {"arrow":arrow,"consequence":cons,"evidence":ev,"ceiling":"Unchanged",
-            "bid_margin":margin,"exit_risk":exitr}
+    return {"arrow":arrow, "consequence":cons, "evidence":ev, "ceiling":"Unchanged"}
 
+def _read_approvals(sq):
+    """National mortgage approvals (BoE, house purchase, 000s) — a LEADING demand
+    indicator that turns before completed transactions. NATIONAL, not local: shown
+    as a demand backdrop, disclosed as such. Latest month vs trailing average."""
+    try:
+        rows = sq("select period::text period, approvals_k from boe_approvals order by period desc limit 7", ())
+        if len(rows) < 4: return None, "approvals not loaded"
+        latest = float(rows[0]["approvals_k"]); prior=[float(r["approvals_k"]) for r in rows[1:]]
+        avg = sum(prior)/len(prior)
+        return {"latest_k": round(latest,1), "trend_pct": round(100.0*(latest-avg)/avg,1),
+                "as_at": rows[0]["period"]}, None
+    except Exception:
+        return None, "approvals not loaded"
 
 def build_market_data(sq, dq, *, area_code=None, region_name=None, postcode=None, guide_price=None):
     data, un = {}, []
@@ -186,13 +218,17 @@ def build_market_data(sq, dq, *, area_code=None, region_name=None, postcode=None
     aff, note = _read_affordability(sq, area_code)
     if aff: data["affordability"] = aff
     else:   un.append(f"affordability: {note}")
+    app, note = _read_approvals(sq)
+    if app: data["approvals"] = app
+    else:   un.append(f"approvals: {note}")
     vol, note = _read_volume(dq, postcode)
     if vol: data["transactions"] = vol
     else:   un.append(f"transactions: {note}")
     read = classify(momentum=(mom or {}).get("chg_6m"), deceleration=decel,
                     auction=(auc or {}).get("delta"), affordability_vs_lr=(aff or {}).get("vs_lr"),
-                    rate_trend=rt, volume=(vol or {}).get("trend_pct"))
-    impact = impact_of(read["read"], read["n_signals"], read.get("net",0))
+                    rate_trend=rt, volume=(vol or {}).get("trend_pct"),
+                    approvals=(app or {}).get("trend_pct"))
+    impact = impact_of(read["read"], read["n_signals"], read.get("net",0), read.get("votes"))
     return {"data": data, "read": read, "impact": impact, "_unavailable": un, "computed_at": datetime.utcnow().isoformat()+"Z"}
 
 if __name__ == "__main__":
