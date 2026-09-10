@@ -47,12 +47,23 @@ def classify(momentum=None, deceleration=None, auction=None,
     W = sum(WEIGHTS.get(k,1.0) for k in avail)
     score = wnet / W if W else 0.0                                    # -1 seller .. +1 buyer
     b = sum(v == BUYER for v in avail.values()); s = sum(v == SELLER for v in avail.values()); net = b - s
-    BAL, STRONG = 0.10, 0.50
-    if   score >=  STRONG: read, strength, label = "buyer-leaning","strong","Strong buyer advantage"
-    elif score >   BAL:    read, strength, label = "buyer-leaning","moderate","Buyer-leaning"
-    elif score >= -BAL:    read, strength, label = "balanced","none","Balanced"
-    elif score >  -STRONG: read, strength, label = "seller-leaning","moderate","Seller-leaning"
-    else:                  read, strength, label = "seller-leaning","strong","Strong seller advantage"
+    # "Strongly" requires BREADTH + magnitude + no contradiction, not just a high
+    # score off a thin set (2 votes must never read "strong").
+    BAL, STRONG, BREADTH = 0.10, 0.50, 3
+    if score > BAL:
+        read = "buyer-leaning"
+        if score >= STRONG and b >= BREADTH and s == 0 and avail.get("momentum")==BUYER:
+            strength, label = "strong", "Strongly favours buyers"
+        else:
+            strength, label = "moderate", "Favours buyers"
+    elif score < -BAL:
+        read = "seller-leaning"
+        if score <= -STRONG and s >= BREADTH and b == 0 and avail.get("momentum")==SELLER:
+            strength, label = "strong", "Strongly favours sellers"
+        else:
+            strength, label = "moderate", "Favours sellers"
+    else:
+        read, strength, label = "balanced", "none", "Balanced"
     tv = [avail[k] for k in TREND_KEYS if k in avail]; tb, ts = tv.count(BUYER), tv.count(SELLER)
     corr = (read=="buyer-leaning" and tb>ts) or (read=="seller-leaning" and ts>tb)
     gloss = ("A market increasingly favouring buyers." if (read=="buyer-leaning" and corr) else
