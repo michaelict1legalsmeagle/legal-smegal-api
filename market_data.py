@@ -46,7 +46,7 @@ def classify(momentum=None, deceleration=None, auction=None,
     else:
         corr = False; gloss = "Supply and demand broadly in balance."
     return {"read": read, "gloss": gloss, "basis": [f"{k}={avail[k]}" for k in avail],
-            "n_signals": n, "trend_corroborates": corr}
+            "n_signals": n, "net": net, "trend_corroborates": corr}
 
 # ── readers (fail-safe; never raise) ─────────────────────────────────────────
 def _read_momentum(sq, area_code, region_name):
@@ -151,6 +151,20 @@ def _read_volume(dq, postcode):
     except Exception as e:
         return None, "volume unavailable (prod/Hetzner only)"
 
+def impact_of(read, n_signals, net):
+    """Decision impact — DERIVED from the read, never hand-set. Conditions affect
+    bid margin and exit certainty; the comparable ceiling is ALWAYS unchanged."""
+    arrow = {"buyer-leaning":"↘","seller-leaning":"↗","balanced":"→"}.get(read,"")
+    cons = {"buyer-leaning":"Conditions currently give buyers greater negotiating leverage.",
+            "seller-leaning":"Conditions currently favour sellers; buyers have less leverage.",
+            "balanced":"Supply and demand are broadly balanced."}.get(read,"Not enough current data to read the market.")
+    margin = {"buyer-leaning":"Wider","seller-leaning":"Tighter","balanced":"Standard"}.get(read,"—")
+    exitr  = {"buyer-leaning":"Slightly higher","seller-leaning":"Lower","balanced":"Neutral"}.get(read,"—")
+    ev = "Strong" if (n_signals>=4 and abs(net)>=2) else "Moderate" if n_signals>=3 else "Limited"
+    return {"arrow":arrow,"consequence":cons,"evidence":ev,"ceiling":"Unchanged",
+            "bid_margin":margin,"exit_risk":exitr}
+
+
 def build_market_data(sq, dq, *, area_code=None, region_name=None, postcode=None, guide_price=None):
     data, un = {}, []
     mom, note = _read_momentum(sq, area_code, region_name)
@@ -178,7 +192,8 @@ def build_market_data(sq, dq, *, area_code=None, region_name=None, postcode=None
     read = classify(momentum=(mom or {}).get("chg_6m"), deceleration=decel,
                     auction=(auc or {}).get("delta"), affordability_vs_lr=(aff or {}).get("vs_lr"),
                     rate_trend=rt, volume=(vol or {}).get("trend_pct"))
-    return {"data": data, "read": read, "_unavailable": un, "computed_at": datetime.utcnow().isoformat()+"Z"}
+    impact = impact_of(read["read"], read["n_signals"], read.get("net",0))
+    return {"data": data, "read": read, "impact": impact, "_unavailable": un, "computed_at": datetime.utcnow().isoformat()+"Z"}
 
 if __name__ == "__main__":
     P=0
