@@ -7777,6 +7777,40 @@ def list_deals():
         app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
+@app.route("/api/deals/<deal_id>/market", methods=["GET"])
+@require_auth
+def get_deal_market(deal_id: str):
+    """On-read market data: computed FRESH from live feeds on each page load so the
+    market read is never a stale snapshot. Not persisted. Fail-safe -> null."""
+    if not supabase:
+        return jsonify({"market_data": None}), 200
+    try:
+        result = supabase.table("deals") \
+            .select("area_json,summary_json,guide_price") \
+            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
+        if not result.data:
+            return jsonify({"market_data": None}), 404
+        deal = result.data
+        housing = ((deal.get("area_json") or {}).get("housing") or {})
+        audit = (housing.get("_audit") or {})
+        prop = ((deal.get("summary_json") or {}).get("property") or {})
+        area_code = audit.get("hpi_area_code_used")
+        postcode = audit.get("postcode") or prop.get("postcode")
+        guide = deal.get("guide_price")
+        if guide is None:
+            _gpp = prop.get("guide_price_pence")
+            try: guide = (float(_gpp) / 100.0) if _gpp else None
+            except Exception: guide = None
+        from market_data import build_market_data
+        md = build_market_data(supabase_data_query, data_query,
+                               area_code=area_code, postcode=postcode, guide_price=guide)
+        return jsonify({"market_data": md}), 200
+    except Exception as e:
+        try: app.logger.warning(f"[get_deal_market] {deal_id}: {e}")
+        except Exception: pass
+        return jsonify({"market_data": None}), 200
+
+
 @app.route("/api/deals/<deal_id>", methods=["GET"])
 @require_auth
 def get_deal(deal_id: str):
@@ -11661,20 +11695,6 @@ def save_area(deal_id: str):
             # ── INFERENCE ENGINE ─────────────────────────────────
             inference_result = build_area_inference(area_data, _postcode)
             area_data.update(inference_result)
-
-            # ── CURRENT MARKET DATA (SPEC v2.1; additive) ────────────────────
-            # Dated market facts + derived buyer/seller read. Fail-safe: any
-            # feed miss => that line unavailable, never fabricated. DISPLAY /
-            # CONTEXT only — writes area_json.market_data, touches NO ceiling.
-            try:
-                from market_data import build_market_data
-                area_data["market_data"] = build_market_data(
-                    supabase_data_query, data_query,
-                    area_code=area_code, postcode=_postcode,
-                    guide_price=_guide_price_gbp,
-                )
-            except Exception as _mde:
-                print(f"[market_data] build failed for {_deal_id}: {_mde}")
 
             # Write census.private_rent_pct to TOP-LEVEL area_json.census so
             # frontend can read it at area_json.census.private_rent_pct.

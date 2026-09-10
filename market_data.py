@@ -16,6 +16,10 @@ P_MOM = 1.0; DECEL = 0.5; AUC = 0.03; V_TXN = 5.0; R_FIX = 0.10; A_HI, A_LO = 1.
 BUYER, SELLER, NEUTRAL = "buyer", "seller", "neutral"
 # trend (rate-of-change) signals — these earn the word "increasingly"
 TREND_KEYS = {"momentum", "deceleration", "auction", "rate_trend", "volume", "approvals"}
+# Signal weights (calibratable, disclosed in the panel): leading/local signals weigh
+# most; thin/national signals least. Approvals lead but are national -> mid weight.
+WEIGHTS = {"momentum":1.25, "affordability":1.25, "volume":1.0, "approvals":1.0,
+           "deceleration":0.75, "rate_trend":0.5, "auction":0.5}
 
 def _v_mom(x):   return None if x is None else (BUYER if x <= -P_MOM else SELLER if x >= P_MOM else NEUTRAL)
 def _v_dec(x):   return None if x is None else (BUYER if x <= -DECEL else SELLER if x >= DECEL else NEUTRAL)
@@ -34,21 +38,31 @@ def classify(momentum=None, deceleration=None, auction=None,
     avail = {k: v for k, v in votes.items() if v is not None}
     n = len(avail)
     if n < MIN_SIGNALS:
-        return {"read": "insufficient_data", "gloss": "Not enough current data to read the market.",
-                "basis": list(avail), "n_signals": n, "trend_corroborates": False}
-    b = sum(v == BUYER for v in avail.values()); s = sum(v == SELLER for v in avail.values())
-    net = b - s
-    read = "buyer-leaning" if net > 0 else "seller-leaning" if net < 0 else "balanced"
-    tv = [avail[k] for k in TREND_KEYS if k in avail]
-    tb, ts = tv.count(BUYER), tv.count(SELLER)
-    if read == "buyer-leaning":
-        corr = tb > ts; gloss = "A market increasingly favouring buyers." if corr else "A market currently favouring buyers."
-    elif read == "seller-leaning":
-        corr = ts > tb; gloss = "A market increasingly favouring sellers." if corr else "A market currently favouring sellers."
-    else:
-        corr = False; gloss = "Supply and demand broadly in balance."
-    return {"read": read, "gloss": gloss, "basis": [f"{k}={avail[k]}" for k in avail],
-            "n_signals": n, "net": net, "votes": avail, "trend_corroborates": corr}
+        return {"read": "insufficient_data", "label": "Market read unavailable", "strength": "none",
+                "score": 0.0, "gloss": "Not enough current data to read the market.",
+                "basis": list(avail), "n_signals": n, "net": 0, "weighted_net": 0.0,
+                "votes": avail, "trend_corroborates": False}
+    def _s(v): return 1 if v == BUYER else -1 if v == SELLER else 0   # +buyer / -seller
+    wnet = sum(WEIGHTS.get(k,1.0)*_s(v) for k,v in avail.items())
+    W = sum(WEIGHTS.get(k,1.0) for k in avail)
+    score = wnet / W if W else 0.0                                    # -1 seller .. +1 buyer
+    b = sum(v == BUYER for v in avail.values()); s = sum(v == SELLER for v in avail.values()); net = b - s
+    BAL, STRONG = 0.10, 0.50
+    if   score >=  STRONG: read, strength, label = "buyer-leaning","strong","Strong buyer advantage"
+    elif score >   BAL:    read, strength, label = "buyer-leaning","moderate","Buyer-leaning"
+    elif score >= -BAL:    read, strength, label = "balanced","none","Balanced"
+    elif score >  -STRONG: read, strength, label = "seller-leaning","moderate","Seller-leaning"
+    else:                  read, strength, label = "seller-leaning","strong","Strong seller advantage"
+    tv = [avail[k] for k in TREND_KEYS if k in avail]; tb, ts = tv.count(BUYER), tv.count(SELLER)
+    corr = (read=="buyer-leaning" and tb>ts) or (read=="seller-leaning" and ts>tb)
+    gloss = ("A market increasingly favouring buyers." if (read=="buyer-leaning" and corr) else
+             "A market currently favouring buyers." if read=="buyer-leaning" else
+             "A market increasingly favouring sellers." if (read=="seller-leaning" and corr) else
+             "A market currently favouring sellers." if read=="seller-leaning" else
+             "Supply and demand broadly in balance.")
+    return {"read": read, "label": label, "strength": strength, "score": round(score,3),
+            "gloss": gloss, "basis": [f"{k}={avail[k]}" for k in avail], "n_signals": n,
+            "net": net, "weighted_net": round(wnet,2), "votes": avail, "trend_corroborates": corr}
 
 # ── readers (fail-safe; never raise) ─────────────────────────────────────────
 def _read_momentum(sq, area_code, region_name):
@@ -158,7 +172,6 @@ def impact_of(read, n_signals, net, votes=None):
     actual voting signals (never hand-written). The comparable ceiling is ALWAYS
     unchanged; conditions are context only."""
     votes = votes or {}
-    arrow = {"buyer-leaning":"\u2193","seller-leaning":"\u2191","balanced":"\u2192"}.get(read,"")
     db = {"momentum":"lower prices","volume":"reduced transaction activity",
           "deceleration":"slowing price growth","auction":"softening auction demand",
           "affordability":"stretched affordability","rate_trend":"rising borrowing costs",
@@ -181,7 +194,7 @@ def impact_of(read, n_signals, net, votes=None):
     else:
         cons="Signals are mixed, leaving the market broadly balanced."
     ev = "Strong" if (n_signals>=4 and abs(net)>=2) else "Moderate" if n_signals>=3 else "Limited"
-    return {"arrow":arrow, "consequence":cons, "evidence":ev, "ceiling":"Unchanged"}
+    return {"consequence":cons, "evidence":ev, "ceiling":"Unchanged"}
 
 def _read_approvals(sq):
     """National mortgage approvals (BoE, house purchase, 000s) — a LEADING demand
