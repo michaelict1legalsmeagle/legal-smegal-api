@@ -7622,6 +7622,17 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
                 f"[H-EXTRACT] Hetzner returned {resp.status_code}: "
                 f"{resp.text[:200]} — falling back to spawn"
             )
+        except requests.exceptions.Timeout:
+            # H-OOM (2026-09-10): a Hetzner TIMEOUT means the PDF was slow to
+            # parse — almost always a large image-only/scanned pack needing OCR.
+            # Do NOT fall back to the local spawn (fitz on full bytes OOMs the
+            # 512MB worker on large PDFs — the crash that dropped scanned packs
+            # before any row was inserted). Return empty so the upload handler
+            # routes it to background OCR.
+            app.logger.warning(
+                "[H-EXTRACT] Hetzner timeout (30s) — routing to OCR, skipping local spawn"
+            )
+            return "", 0
         except Exception as _e:
             app.logger.warning(
                 f"[H-EXTRACT] Hetzner unreachable ({_e}) — falling back to spawn"
@@ -7633,6 +7644,17 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
         )
 
     # ── Spawn fallback ───────────────────────────────────────────────────
+    # H-OOM (2026-09-10): the spawn worker runs fitz on the FULL bytes locally.
+    # On the 512MB box that OOMs the worker for large PDFs and kills the request
+    # before any document row is inserted. Cap local extraction to small PDFs;
+    # anything larger routes to background OCR by returning empty (memory-free).
+    if len(file_bytes) > _SPAWN_MAX_BYTES:
+        app.logger.warning(
+            f"[H-EXTRACT] {len(file_bytes):,}B exceeds local-spawn cap "
+            f"({_SPAWN_MAX_BYTES:,}B) — routing to background OCR (fitz OOM safety)"
+        )
+        return "", 0
+
     from extract_worker import extract_pdf_text_worker
 
     ctx = mp.get_context("spawn")
@@ -7664,6 +7686,13 @@ def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
 
 
 _EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 100
+# H-OOM (2026-09-10): max PDF size the LOCAL spawn worker (fitz) may process on
+# the 512MB Render box. fitz needs 3-5x the file size in RAM, so a 15.6MB image
+# PDF => 47-78MB per worker => OOM with 2 workers, killing the request before any
+# document row is inserted (verified: scanned Lot-5 pack never reached the DB).
+# Above this, skip local extraction and route to background OCR (Document AI —
+# network round-trip, no local RAM).
+_SPAWN_MAX_BYTES = 6 * 1024 * 1024  # 6 MB
 # S33 — raised from 25s. The previous value was sized only for local
 # pymupdf hangs. Now that image-only PDFs route to Document AI's
 # batchProcess OCR flow (docai_ocr.py, internal ceiling 90s — a network
@@ -7775,40 +7804,6 @@ def list_deals():
     except Exception as e:
         app.logger.exception("list_deals failed")
         app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
-
-
-@app.route("/api/deals/<deal_id>/market", methods=["GET"])
-@require_auth
-def get_deal_market(deal_id: str):
-    """On-read market data: computed FRESH from live feeds on each page load so the
-    market read is never a stale snapshot. Not persisted. Fail-safe -> null."""
-    if not supabase:
-        return jsonify({"market_data": None}), 200
-    try:
-        result = supabase.table("deals") \
-            .select("area_json,summary_json,guide_price") \
-            .eq("id", deal_id).eq("user_id", request.user_id).single().execute()
-        if not result.data:
-            return jsonify({"market_data": None}), 404
-        deal = result.data
-        housing = ((deal.get("area_json") or {}).get("housing") or {})
-        audit = (housing.get("_audit") or {})
-        prop = ((deal.get("summary_json") or {}).get("property") or {})
-        area_code = audit.get("hpi_area_code_used")
-        postcode = audit.get("postcode") or prop.get("postcode")
-        guide = deal.get("guide_price")
-        if guide is None:
-            _gpp = prop.get("guide_price_pence")
-            try: guide = (float(_gpp) / 100.0) if _gpp else None
-            except Exception: guide = None
-        from market_data import build_market_data
-        md = build_market_data(supabase_data_query, data_query,
-                               area_code=area_code, postcode=postcode, guide_price=guide)
-        return jsonify({"market_data": md}), 200
-    except Exception as e:
-        try: app.logger.warning(f"[get_deal_market] {deal_id}: {e}")
-        except Exception: pass
-        return jsonify({"market_data": None}), 200
 
 
 @app.route("/api/deals/<deal_id>", methods=["GET"])
