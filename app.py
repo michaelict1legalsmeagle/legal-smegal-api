@@ -266,6 +266,26 @@ HOUSING_DEFAULT_LIMIT = int(os.getenv("HOUSING_DEFAULT_LIMIT", "100"))
 HOUSING_DEFAULT_RADIUS_MILES = float(os.getenv("HOUSING_DEFAULT_RADIUS_MILES", "3"))
 HOUSING_CONFIDENCE_VALUE = float(os.getenv("HOUSING_CONFIDENCE_VALUE", "0.96"))
 
+# ── AREA-FETCH CONCURRENCY CONTAINMENT (2026-09-15) ───────────────────────────
+# ROOT CAUSE of the recurring 512MB OOM: area enrichment (_fetch_and_store) fans
+# out to a thread pool PER analysed deal, and NOTHING capped how many fan-outs ran
+# at once. Analysis fires it eagerly (S-EAGER-AREA self-POST), so a burst of 2-3
+# deals stacked N x pool concurrent area tasks — each holding a Hetzner result set
+# — across 2 gunicorn workers (~175MB each) with only ~160MB headroom. Confirmed
+# in code (app.py: _TPE(max_workers=12) + no global guard + eager self-POST), not
+# from a live memory profile.
+#
+# FIX: a PROCESS-GLOBAL bounded semaphore caps how many area tasks execute at once
+# ACROSS ALL fan-outs, so peak memory is bounded whether 1 deal or 10 are analysed
+# in a burst. Applied PER-TASK (see _run_timed) not per-fan-out, so 'housing' (the
+# early-verdict input) still competes fairly and lands fast — early-verdict latency
+# is NOT serialised behind other deals. Pool width is also capped. Both knobs are
+# env-overridable, so the pre-fix behaviour is one config change away (reversible):
+#   AREA_TASK_MAX_CONCURRENT=12 AREA_FETCH_POOL_WORKERS=12  restores the old code.
+AREA_TASK_MAX_CONCURRENT = max(1, int(os.getenv("AREA_TASK_MAX_CONCURRENT", "4")))
+AREA_FETCH_POOL_WORKERS  = max(1, int(os.getenv("AREA_FETCH_POOL_WORKERS", "4")))
+_AREA_TASK_SEM = threading.BoundedSemaphore(AREA_TASK_MAX_CONCURRENT)
+
 HOUSING_ENRICH_LATLNG = (os.getenv("HOUSING_ENRICH_LATLNG", "1").strip().lower() in {"1", "true", "yes", "on"})
 HOUSING_ENRICH_BATCH_LIMIT = int(os.getenv("HOUSING_ENRICH_BATCH_LIMIT", "10"))
 
@@ -7794,8 +7814,24 @@ def list_deals():
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
     try:
+        # 2026-09-15 OOM FIX: GET /api/deals returned ~18MB because select("*")
+        # shipped area_json (comps + census + inference + market cache) for EVERY
+        # deal — the single largest blob — on every dashboard load, blowing the
+        # 512MB worker. The list UI never reads area_json (verified across
+        # dashboard/deal-report/verdict/upload; it is only read from the
+        # /api/deals/<id> single-deal fetch). So select every real deals column
+        # EXCEPT area_json — no scalar the list renders is lost, and the heavy blob
+        # stops crossing the wire and parsing into worker memory on each load.
+        _LIST_COLS = (
+            "id, user_id, deal_name, title, address, postcode, lot_number, "
+            "guide_price, deal_type, auction_date, status, bid_ceiling, "
+            "hammer_price, hammer_date, outcome, completion_period, "
+            "completion_deadline, completion_actions, deal_score, product_type, "
+            "pack_hash, created_at, updated_at, "
+            "summary_json, financials_json, analysis_json"
+        )
         result = supabase.table("deals") \
-            .select("*") \
+            .select(_LIST_COLS) \
             .eq("user_id", request.user_id) \
             .neq("status", "archived") \
             .order("created_at", desc=True) \
@@ -11673,11 +11709,17 @@ def save_area(deal_id: str):
             def _run_timed(label, fn, args, kwargs):
                 """Run fn(*args, **kwargs), record elapsed in _timings, return (label, result)."""
                 _t0 = time.time()
-                try:
-                    _res = fn(*args, **kwargs)
-                except Exception as _fe:
-                    app.logger.warning(f"[area-fetch] {label} raised: {_fe}")
-                    _res = None
+                # Global permit (2026-09-15 OOM containment): cap concurrent area
+                # tasks across ALL fan-outs so a burst of analyses cannot stack
+                # result sets past the 512MB ceiling. A waiting thread holds only
+                # its closure (no connection, no result set), so queueing here is
+                # cheap. Released on exit even if fn raises (with-block guarantee).
+                with _AREA_TASK_SEM:
+                    try:
+                        _res = fn(*args, **kwargs)
+                    except Exception as _fe:
+                        app.logger.warning(f"[area-fetch] {label} raised: {_fe}")
+                        _res = None
                 _timings[label] = round(time.time() - _t0, 2)
                 return label, _res
 
@@ -11702,7 +11744,7 @@ def save_area(deal_id: str):
             ]
 
             _area_results = {}
-            with _TPE(max_workers=12, thread_name_prefix="area_fetch") as _pool:
+            with _TPE(max_workers=AREA_FETCH_POOL_WORKERS, thread_name_prefix="area_fetch") as _pool:
                 _label_futures = {
                     _pool.submit(_run_timed, lbl, fn, args, kw): lbl
                     for lbl, fn, args, kw in _area_task_specs
