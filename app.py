@@ -7831,10 +7831,37 @@ def get_deal_market(deal_id: str):
             _gpp = prop.get("guide_price_pence")
             try: guide = (float(_gpp) / 100.0) if _gpp else None
             except Exception: guide = None
+        # F-10 (2026-09-12): CACHE with a 24h TTL. Market data changes daily at most
+        # (HPI monthly, rates on change), but build_market_data runs a Hetzner scan of
+        # ~7.8M price-paid rows + a percentile over ~1,484 auction lots + HPI/rates —
+        # ~3.8s synchronously. Recomputing on every verdict load was the load delay.
+        # Serve the cached block if fresh; otherwise compute once and persist it back.
+        _area = deal.get("area_json") or {}
+        _cached = _area.get("market_data") if isinstance(_area, dict) else None
+        def _md_fresh(_md):
+            try:
+                from datetime import datetime, timedelta
+                _ts = str((_md or {}).get("computed_at", "")).replace("Z", "")
+                if not _ts:
+                    return False
+                return (datetime.utcnow() - datetime.fromisoformat(_ts)) < timedelta(hours=24)
+            except Exception:
+                return False
+        if _cached and _md_fresh(_cached):
+            return jsonify({"market_data": _cached, "cached": True}), 200
         from market_data import build_market_data
         md = build_market_data(supabase_data_query, data_query,
                                area_code=area_code, postcode=postcode, guide_price=guide)
-        return jsonify({"market_data": md}), 200
+        # persist for next load (best-effort; failure just means recompute next time)
+        try:
+            if isinstance(_area, dict):
+                _area["market_data"] = md
+                supabase.table("deals").update({"area_json": _json_sanitize(_area)}) \
+                    .eq("id", deal_id).eq("user_id", request.user_id).execute()
+        except Exception as _pe:
+            try: app.logger.warning(f"[get_deal_market] cache persist failed {deal_id}: {_pe}")
+            except Exception: pass
+        return jsonify({"market_data": md, "cached": False}), 200
     except Exception as e:
         try: app.logger.warning(f"[get_deal_market] {deal_id}: {e}")
         except Exception: pass
