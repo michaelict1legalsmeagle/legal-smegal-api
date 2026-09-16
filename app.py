@@ -285,6 +285,14 @@ HOUSING_CONFIDENCE_VALUE = float(os.getenv("HOUSING_CONFIDENCE_VALUE", "0.96"))
 AREA_TASK_MAX_CONCURRENT = max(1, int(os.getenv("AREA_TASK_MAX_CONCURRENT", "4")))
 AREA_FETCH_POOL_WORKERS  = max(1, int(os.getenv("AREA_FETCH_POOL_WORKERS", "4")))
 _AREA_TASK_SEM = threading.BoundedSemaphore(AREA_TASK_MAX_CONCURRENT)
+# 2026-09-16 LATENCY FIX: the global permit must gate ONLY the memory-heavy area
+# tasks (Overpass transport/amenities + census JSON-stat). It must NOT gate
+# 'housing' or the other light lookups: 'housing' is the verdict-critical input,
+# it is a LONG cross-Atlantic call, and it is memory-light (comps capped at 200
+# rows). Gating it meant each deal's housing held a scarce permit for the whole
+# call, so opening several deals queued each verdict behind the previous deal's
+# housing. Only the heavy tasks below draw a permit; everything else runs free.
+_AREA_HEAVY_TASKS = {"transport", "amenities", "_census"}
 
 HOUSING_ENRICH_LATLNG = (os.getenv("HOUSING_ENRICH_LATLNG", "1").strip().lower() in {"1", "true", "yes", "on"})
 HOUSING_ENRICH_BATCH_LIMIT = int(os.getenv("HOUSING_ENRICH_BATCH_LIMIT", "10"))
@@ -11715,17 +11723,24 @@ def save_area(deal_id: str):
             def _run_timed(label, fn, args, kwargs):
                 """Run fn(*args, **kwargs), record elapsed in _timings, return (label, result)."""
                 _t0 = time.time()
-                # Global permit (2026-09-15 OOM containment): cap concurrent area
-                # tasks across ALL fan-outs so a burst of analyses cannot stack
-                # result sets past the 512MB ceiling. A waiting thread holds only
-                # its closure (no connection, no result set), so queueing here is
-                # cheap. Released on exit even if fn raises (with-block guarantee).
-                with _AREA_TASK_SEM:
-                    try:
-                        _res = fn(*args, **kwargs)
-                    except Exception as _fe:
-                        app.logger.warning(f"[area-fetch] {label} raised: {_fe}")
-                        _res = None
+                # Global permit (2026-09-15 OOM containment, 2026-09-16 scoped):
+                # cap ONLY the memory-heavy tasks across ALL fan-outs so a burst
+                # of analyses cannot stack big result sets past the 512MB ceiling.
+                # Light tasks — crucially 'housing', the verdict-critical input —
+                # run WITHOUT a permit so the verdict is never queued behind
+                # another deal's long housing call. Heavy result sets are what
+                # threaten memory; a 200-row comps set does not.
+                _gated = label in _AREA_HEAVY_TASKS
+                if _gated:
+                    _AREA_TASK_SEM.acquire()
+                try:
+                    _res = fn(*args, **kwargs)
+                except Exception as _fe:
+                    app.logger.warning(f"[area-fetch] {label} raised: {_fe}")
+                    _res = None
+                finally:
+                    if _gated:
+                        _AREA_TASK_SEM.release()
                 _timings[label] = round(time.time() - _t0, 2)
                 return label, _res
 
