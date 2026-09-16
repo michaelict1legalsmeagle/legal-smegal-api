@@ -7,7 +7,7 @@ pdfplumber==0.11.10
 pymupdf==1.25.5
 PyJWT==2.13.0
 anthropic>=0.28.0,<1.0.0
-psycopg[binary]==3.2.10
+psycopg[binary,pool]==3.2.10
 beautifulsoup4==4.12.3
 reportlab==4.2.5
 stripe==10.4.0
