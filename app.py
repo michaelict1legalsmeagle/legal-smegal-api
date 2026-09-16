@@ -10052,10 +10052,16 @@ def get_dashboard():
     if not supabase:
         return jsonify({"error": "Database unavailable"}), 503
     try:
+        # 2026-09-15 OOM FIX: this handler pulled area_json (the largest blob) for
+        # EVERY deal only to compute a ~6KB aggregate it returns — area_json is never
+        # read in the body below. Dropping it removes ~65% of the in-memory parse on
+        # every dashboard load (same measured ratio as the /api/deals list fix:
+        # 18.9MB -> 6.7MB). summary_json/financials_json are genuinely aggregated;
+        # analysis_json is kept because has_analysis needs its presence.
         result = supabase.table("deals") \
             .select("id, deal_name, title, address, postcode, status, deal_score, "
                     "guide_price, auction_date, deal_type, created_at, updated_at, "
-                    "summary_json, financials_json, analysis_json, area_json") \
+                    "summary_json, financials_json, analysis_json") \
             .eq("user_id", request.user_id) \
             .neq("status", "archived") \
             .order("created_at", desc=True) \
