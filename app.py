@@ -383,82 +383,36 @@ def get_data_conn():
     """
     return psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row)
 
-# ── Hetzner connection: process-wide WARM POOL ───────────────────────────────
-# ROOT LATENCY FIX (2026-09-16): the previous thread-local connection was
-# recreated on EVERY area fetch — the ThreadPoolExecutor in _fetch_and_store is
-# created and torn down per fetch, so its threads (and their thread-local
-# connections) die each time. Every fresh Verdict therefore paid a ~7s
-# cross-Atlantic TCP+TLS+auth handshake to Hetzner (EU) from Render (US); that
-# handshake is the dominant part of the ~13s housing call (the PostGIS query is
-# 5ms). A PROCESS-WIDE pool keeps a small set of connections warm across all
-# fetches, so the handshake is paid at boot, not per verdict.
-#
-# Safety: the psycopg_pool import is GUARDED — if it is unavailable the code
-# falls back to the exact prior thread-local behaviour, so boot can never break.
-# Memory: min_size warm connections per worker (default 2, ~a few MB each),
-# sized small and env-tunable so the 512MB ceiling keeps ample headroom.
-_hetzner_tl = threading.local()          # retained for the fallback path
-_DATA_POOL = None
-_DATA_POOL_LOCK = threading.Lock()
-try:
-    from psycopg_pool import ConnectionPool as _PgPool
-    _DATA_POOL_AVAILABLE = True
-except Exception as _pool_imp_e:          # pragma: no cover
-    _PgPool = None
-    _DATA_POOL_AVAILABLE = False
-    print(f"[DATA_POOL] psycopg_pool unavailable ({_pool_imp_e}) — thread-local fallback")
-
-def _get_data_pool():
-    """Create (once, thread-safe) and return the process-wide warm Hetzner pool."""
-    global _DATA_POOL
-    if _DATA_POOL is not None:
-        return _DATA_POOL
-    with _DATA_POOL_LOCK:
-        if _DATA_POOL is None:
-            _DATA_POOL = _PgPool(
-                conninfo=DATA_DATABASE_URL,
-                min_size=int(os.getenv("DATA_POOL_MIN", "2")),
-                max_size=int(os.getenv("DATA_POOL_MAX", "6")),
-                max_idle=float(os.getenv("DATA_POOL_MAX_IDLE", "300")),
-                timeout=float(os.getenv("DATA_POOL_TIMEOUT", "15")),
-                kwargs={"row_factory": dict_row, "autocommit": True},
-                name="hetzner_data",
-                open=True,
-            )
-    return _DATA_POOL
+# ── Thread-local connection pool for Hetzner ─────────────────────────────────
+# PERF-FIX (2026-07-02): data_query() was opening a new TCP + TLS + auth
+# connection to Hetzner (EU) on every call from Render (US). get_housing_data()
+# makes 6 data_query() calls per area fetch; at ~7s per WAN connection that is
+# ~42s of pure connection overhead per Verdict page load — matching H2-TIMING
+# exactly (housing: 43.06s, 42.34s across two consecutive runs, B17 0NB).
+# The PostGIS query itself takes 5ms (EXPLAIN ANALYZE confirmed 2026-07-02).
+# Fix: one connection per background thread, reused across all queries in that
+# thread's lifetime. Re-established on any failure. autocommit=True since every
+# data_query() call is a read-only SELECT with no transaction semantics needed.
+_hetzner_tl = threading.local()
 
 def data_query(sql: str, params=None) -> list:
-    """Execute a read-only SELECT on Hetzner and return a list of dicts.
+    """Execute a SELECT query on Hetzner and return list of dicts.
 
-    Primary: borrow a WARM connection from the process-wide pool, so no per-call
-    cross-Atlantic handshake is paid. Fallback (psycopg_pool absent): the prior
-    thread-local persistent connection. Both reconnect + retry once on a
-    connection-level failure before returning [].
+    Uses a thread-local persistent connection — established once per
+    background thread (e.g. _fetch_and_store) and reused for all
+    subsequent calls in that thread. Reconnects automatically on any
+    connection-level failure, retrying the query once before giving up.
     """
     def _run(conn):
         with conn.cursor() as cur:
             cur.execute(sql, params or ())
             return [dict(r) for r in cur.fetchall()]
 
-    # ── Primary: process-wide warm pool ──
-    if _DATA_POOL_AVAILABLE:
-        try:
-            with _get_data_pool().connection() as conn:
-                return _run(conn)
-        except Exception as _pe1:
-            print(f"[DATA_QUERY ERROR pool] {_pe1}")
-            try:                          # one retry on another pooled connection
-                with _get_data_pool().connection() as conn:
-                    return _run(conn)
-            except Exception as _pe2:
-                print(f"[DATA_QUERY ERROR pool retry] {_pe2}")
-                return []
-
-    # ── Fallback: thread-local persistent connection (prior behaviour) ──
     def _new_conn():
         c = psycopg.connect(DATA_DATABASE_URL, row_factory=dict_row, autocommit=True)
         _hetzner_tl.conn = c
         return c
+
     try:
         conn = getattr(_hetzner_tl, 'conn', None)
         if conn is None or conn.closed:
@@ -4019,9 +3973,16 @@ def _get_transaction_liquidity(postcode: str, lad_code: str) -> Dict[str, Any]:
         # Local: last 12 months in postcode district
         import datetime as _dt
         cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=365)).strftime("%Y-%m-%d")
+        # PERF-FIX (2026-09-16): was `postcode ILIKE %s` — unindexable, forced a
+        # full 7.87M-row Parallel Seq Scan (~6.2s, EXPLAIN ANALYZE confirmed on
+        # live data). `UPPER(postcode) LIKE %s` is case-insensitive-equivalent to
+        # ILIKE (identical district set) and CAN use the functional index
+        # idx_pp2025_postcode_upper_pattern (UPPER(postcode) text_pattern_ops) as a
+        # left-anchored prefix range scan -> ~ms. This was the last comps query
+        # still scanning; the other five already use postcode_nospace.
         pp_rows = data_query(
-            "SELECT COUNT(*) AS cnt FROM public.price_paid_raw_2025 WHERE postcode ILIKE %s AND date_of_transfer >= %s",
-            (f"{district}%", cutoff)
+            "SELECT COUNT(*) AS cnt FROM public.price_paid_raw_2025 WHERE UPPER(postcode) LIKE %s AND date_of_transfer >= %s",
+            (f"{district.upper()}%", cutoff)
         )
         local_count = int(pp_rows[0].get("cnt", 0)) if pp_rows else 0
         local_qtly  = round((local_count or 0) / 4, 0)
