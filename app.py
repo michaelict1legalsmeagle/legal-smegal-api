@@ -14004,7 +14004,93 @@ def _write_events_to_db(events: list) -> int:
         return 0
 
 
-def _read_events_from_listings(days: int = 90) -> list:
+_AH_DIARY_URL  = "https://www.auctionhouse.co.uk/auction/future-auction-dates"
+_AH_DIARY_BASE = "https://www.auctionhouse.co.uk"
+_AH_DIARY_CACHE: Dict[str, Any] = {}
+_AH_DIARY_TTL = 21600  # 6h
+
+
+def _fetch_auction_house_diary(days: int = 120) -> list:
+    """
+    SOURCE OF TRUTH for the calendar/diary's Auction House dates.
+
+    Reads EVERY upcoming auction off the public diary page
+    (auctionhouse.co.uk/auction/future-auction-dates) — including auctions that
+    have no catalogue yet ("Enter a Lot"), which auction_listings (lot-level)
+    cannot provide, so the diary runs the full window, not just to the last
+    scraped lot. One event per (date, auctioneer). Real page data only — no
+    fabricated dates. Cached in-process 6h. Returns [] on any failure.
+    """
+    now = time.time()
+    cached = _AH_DIARY_CACHE.get("events")
+    if cached is not None and (now - _AH_DIARY_CACHE.get("_at", 0)) < _AH_DIARY_TTL:
+        rows = cached
+    else:
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+        except ImportError as e:
+            app.logger.warning("[ah_diary] deps missing: %s", e)
+            return list(cached) if cached is not None else []
+        try:
+            resp = requests.get(
+                _AH_DIARY_URL, timeout=12,
+                headers={"User-Agent": "Mozilla/5.0 (LegalSmegal diary fetch)"},
+            )
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+        except Exception as e:
+            app.logger.warning("[ah_diary] fetch failed: %s", e)
+            return list(cached) if cached is not None else []
+
+        parsed = []
+        for tr in soup.select("tr"):
+            tds = tr.select("td")
+            if len(tds) < 3:
+                continue
+            m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", tr.get_text(" ", strip=True))
+            if not m:
+                continue
+            try:
+                dd, mm, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                ev_date = datetime(yy, mm, dd).date()
+            except (ValueError, TypeError):
+                continue
+            auctioneer = tds[2].get_text(strip=True) or "Auction House"
+            venue      = tds[3].get_text(strip=True) if len(tds) >= 4 else ""
+            time_txt   = tds[1].get_text(strip=True) if len(tds) >= 2 else ""
+            link_el = tr.select_one("a[href*='/auction/lots/'], a[href*='/online/auction/']")
+            if link_el and link_el.get("href"):
+                href = link_el["href"]
+                link_url = href if href.startswith("http") else _AH_DIARY_BASE + href
+            else:
+                link_url = _AH_DIARY_URL
+            parsed.append({
+                "date":          ev_date.isoformat(),
+                "auctioneer":    auctioneer,
+                "venue_or_type": venue or "Auction",
+                "time":          time_txt or None,
+                "is_livestream": "live" in venue.lower(),
+                "source":        "auction_house_diary",
+                "source_url":    link_url,
+                "link_url":      link_url,
+            })
+
+        seen, rows = set(), []
+        for e in parsed:
+            k = (e["date"], e["auctioneer"].lower())
+            if k not in seen:
+                seen.add(k)
+                rows.append(e)
+        _AH_DIARY_CACHE["events"] = rows
+        _AH_DIARY_CACHE["_at"] = now
+
+    today_s  = datetime.utcnow().date().isoformat()
+    cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
+    return [e for e in rows if today_s <= e["date"] <= cutoff_s]
+
+
+def _read_events_from_listings(days: int = 90, exclude_auction_house: bool = False) -> list:
     """
     Build the dashboard Auction Diary from the discovery pipeline's own data.
 
@@ -14046,6 +14132,8 @@ def _read_events_from_listings(days: int = 90) -> list:
         house = (r.get("auction_house") or src.get("name") or "").strip()
         if not house:
             house = "Property Auction"
+        if exclude_auction_house and "auction house" in house.lower():
+            continue
         key = (date_s, house.lower())
         g = grouped.get(key)
         if g is None:
@@ -14082,9 +14170,9 @@ def auction_events_list():
     """
     GET /api/auction/events
 
-    Returns upcoming auction events for the dashboard Auction Diary,
-    derived from the discovery pipeline's own scraped data
-    (auction_listings) — one event per (auction_date, auction house).
+    Returns upcoming auction events for the dashboard Auction Diary + calendar.
+    Auction House dates come from its public diary page (all future dates);
+    other houses are derived from scraped lots. One event per (date, house).
 
     Query params:
       days=N  — window in days (default 90, max 365)
@@ -14101,15 +14189,25 @@ def auction_events_list():
     except (ValueError, TypeError):
         days = 90
 
-    # Diary is derived from the discovery pipeline's own scraped data
-    # (auction_listings), not a separate scrape. Empty window -> honest [].
-    events = _read_events_from_listings(days)
+    # Auction House diary page = source of truth for ALL its dates (incl. those
+    # with no catalogue yet). Other houses come from their scraped lots. Merge,
+    # de-dupe by (date, auctioneer). Empty result -> honest [] empty state.
+    ah_events    = _fetch_auction_house_diary(days)
+    other_events = _read_events_from_listings(days, exclude_auction_house=True)
+
+    merged = {}
+    for e in ah_events + other_events:
+        merged[(e["date"], (e.get("auctioneer") or "").lower())] = e
+    events = sorted(
+        merged.values(),
+        key=lambda e: (e["date"], (e.get("auctioneer") or "").lower()),
+    )[:300]
 
     return jsonify({
         "ok":     True,
         "events": events,
         "count":  len(events),
-        "source": "auction_listings",
+        "source": "auction_house_diary+listings",
     }), 200
 
 
