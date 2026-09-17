@@ -3422,7 +3422,19 @@ def calculate_workbench_ceiling(
     # Verdict's own legal_flags=[] call is untouched. This only makes
     # Workbench's *own* confidence honest about the flags Workbench itself
     # already receives — it does not reopen "should Verdict see flags."
-    _verdict_conf_obj = verdict_ceiling.get("confidence") or {}
+    # BUGFIX (2026-09-16): verdict_ceiling["confidence"] is polymorphic — a
+    # {raw,caps,final,label} dict on fresh compute, but a BARE FLOAT on persisted
+    # non-legacy verdicts. That float hit .get("final") here and 500'd /api/ceiling
+    # live (AttributeError: 'float' object has no attribute 'get'). Normalise to a
+    # dict first, mirroring the existing _legacy_scalar_normalised pattern (~L4373):
+    # scalar -> {"final": scalar} (no caps to carry), non-dict/non-number -> {}.
+    _verdict_conf_raw = verdict_ceiling.get("confidence")
+    if isinstance(_verdict_conf_raw, dict):
+        _verdict_conf_obj = _verdict_conf_raw
+    elif isinstance(_verdict_conf_raw, (int, float)):
+        _verdict_conf_obj = {"final": _verdict_conf_raw}
+    else:
+        _verdict_conf_obj = {}
     _verdict_conf_final = _verdict_conf_obj.get("final")
     try:
         _verdict_conf_final = float(_verdict_conf_final) if _verdict_conf_final is not None else None
