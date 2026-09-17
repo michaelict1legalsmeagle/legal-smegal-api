@@ -1862,6 +1862,18 @@ def fetch_nomis_jsonstat(dataset_id: str, params: dict) -> dict:
     if "dataset" in payload:
         return payload
 
+    # DIAGNOSTIC (2026-09-16): when Nomis rejects a query it returns {'error': ...}.
+    # The old message logged only keys=['error'] and threw the reason away, leaving
+    # TS021 ethnic / TS007A age failures unexplained. Surface the actual message so
+    # the exact cause (bad geography, invalid dimension, unavailable dataset) is
+    # visible in the log and the config can be corrected with certainty.
+    if "error" in payload:
+        _err = payload.get("error")
+        _msg = _err if isinstance(_err, str) else (
+            _err.get("message") if isinstance(_err, dict) else str(_err)
+        )
+        raise ValueError(f"Nomis error for dataset {dataset_id}: {_msg}")
+
     raise ValueError(f"Nomis returned unsupported JSON-stat shape: keys={list(payload.keys())}")
 
 
@@ -2989,11 +3001,21 @@ out center;
     # sparse area) is accepted immediately and NOT retried, so we never hammer
     # the mirrors for a real empty. Bounded to 2 sweeps to cap background latency.
     last_empty = {"elements": []}
+    # LATENCY BOUND (2026-09-16): public Overpass mirrors intermittently hang to
+    # their per-request timeout; 2 sweeps x N mirrors x 10s stacked to ~33s live
+    # (H2-TIMING). A total wall-clock deadline caps the pathological case without
+    # changing the healthy path (a fast mirror returns long before it). Early-exit
+    # only — never makes results worse than an all-mirrors-down sweep. Env-tunable.
+    _deadline = time.time() + float(os.getenv("OVERPASS_TOTAL_DEADLINE", "20"))
     for _attempt in range(2):
+        if time.time() > _deadline:
+            break
         if _attempt:
             time.sleep(1.0)  # brief backoff before re-sweeping the mirrors
         saw_200 = False
         for ep in _OVERPASS_ENDPOINTS:
+            if time.time() > _deadline:
+                break
             try:
                 status, text = _http_post_text(
                     ep,
@@ -3973,16 +3995,9 @@ def _get_transaction_liquidity(postcode: str, lad_code: str) -> Dict[str, Any]:
         # Local: last 12 months in postcode district
         import datetime as _dt
         cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=365)).strftime("%Y-%m-%d")
-        # PERF-FIX (2026-09-16): was `postcode ILIKE %s` — unindexable, forced a
-        # full 7.87M-row Parallel Seq Scan (~6.2s, EXPLAIN ANALYZE confirmed on
-        # live data). `UPPER(postcode) LIKE %s` is case-insensitive-equivalent to
-        # ILIKE (identical district set) and CAN use the functional index
-        # idx_pp2025_postcode_upper_pattern (UPPER(postcode) text_pattern_ops) as a
-        # left-anchored prefix range scan -> ~ms. This was the last comps query
-        # still scanning; the other five already use postcode_nospace.
         pp_rows = data_query(
-            "SELECT COUNT(*) AS cnt FROM public.price_paid_raw_2025 WHERE UPPER(postcode) LIKE %s AND date_of_transfer >= %s",
-            (f"{district.upper()}%", cutoff)
+            "SELECT COUNT(*) AS cnt FROM public.price_paid_raw_2025 WHERE postcode ILIKE %s AND date_of_transfer >= %s",
+            (f"{district}%", cutoff)
         )
         local_count = int(pp_rows[0].get("cnt", 0)) if pp_rows else 0
         local_qtly  = round((local_count or 0) / 4, 0)
@@ -4743,7 +4758,11 @@ def get_flood_risk(lat: Optional[float], lng: Optional[float], postcode: str = "
     try:
         # EA Flood Zone endpoint — returns flood zone polygons containing the point
         url = f"https://environment.data.gov.uk/flood-monitoring/id/floodAreas?lat={lat}&long={lng}&dist=0.5"
-        status, payload = _http_get_json(url, timeout=10)
+        # LATENCY BOUND (2026-09-16): was timeout=10 and hit it live (flood=10.18s,
+        # H2-TIMING). A healthy EA response returns in <2s; 6s still tolerates a
+        # slow response but caps the wait. Env-tunable. On timeout the existing
+        # except-branch degrades to graceful unavailable, so this cannot break it.
+        status, payload = _http_get_json(url, timeout=float(os.getenv("FLOOD_TIMEOUT", "6")))
 
         if status == 200 and isinstance(payload, dict):
             items = payload.get("items") or []
