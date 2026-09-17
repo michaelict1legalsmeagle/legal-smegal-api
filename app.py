@@ -14004,28 +14004,76 @@ def _write_events_to_db(events: list) -> int:
         return 0
 
 
-def _read_events_from_db(days: int = 90) -> list:
+def _read_events_from_listings(days: int = 90) -> list:
     """
-    Read upcoming auction events from Supabase auction_events table.
-    Returns [] if table missing or Supabase unavailable.
+    Build the dashboard Auction Diary from the discovery pipeline's own data.
+
+    Source of truth = auction_listings (populated by the discovery cron via
+    services.auction_scraper). One diary event per (auction_date, auction house);
+    the lot count shown is real, derived from the rows themselves.
+
+    No separate scrape, no fabricated dates:
+      - a lot with a NULL auction_date is excluded (the gte filter drops NULLs),
+      - an empty in-window result returns [] so the UI shows an honest empty state.
+
+    Returns [] if Supabase is unavailable or nothing is scheduled in-window.
     """
     if not supabase:
         return []
     try:
         today_s  = datetime.utcnow().date().isoformat()
         cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
-        res = supabase.table("auction_events") \
-            .select("date,auctioneer,venue_or_type,time,is_livestream,source,source_url,link_url") \
-            .gte("date", today_s) \
-            .lte("date", cutoff_s) \
-            .order("date") \
-            .order("auctioneer") \
-            .limit(200) \
+        res = supabase.table("auction_listings") \
+            .select("auction_date,auction_house,"
+                    "auction_sources!auction_listings_source_id_fkey(slug,name)") \
+            .gte("auction_date", today_s) \
+            .lte("auction_date", cutoff_s) \
+            .order("auction_date") \
+            .limit(5000) \
             .execute()
-        return res.data or []
+        rows = res.data or []
     except Exception as e:
-        app.logger.warning("[eig_events] DB read failed: %s", e)
+        app.logger.warning("[auction_diary] listings read failed: %s", e)
         return []
+
+    # Aggregate lots -> one event per (date, auction house). Lot count is real.
+    grouped: Dict[tuple, dict] = {}
+    for r in rows:
+        date_s = r.get("auction_date")
+        if not date_s:
+            continue
+        src   = r.get("auction_sources") or {}
+        house = (r.get("auction_house") or src.get("name") or "").strip()
+        if not house:
+            house = "Property Auction"
+        key = (date_s, house.lower())
+        g = grouped.get(key)
+        if g is None:
+            grouped[key] = {
+                "date":       date_s,
+                "auctioneer": house,
+                "link_url":   _auctioneer_url(house),
+                "_lots":      1,
+            }
+        else:
+            g["_lots"] += 1
+
+    events = []
+    for g in grouped.values():
+        n = g["_lots"]
+        events.append({
+            "date":          g["date"],
+            "auctioneer":    g["auctioneer"],
+            "venue_or_type": f"{n} lot{'s' if n != 1 else ''}",
+            "time":          None,
+            "is_livestream": False,
+            "source":        "auction_listings",
+            "source_url":    g["link_url"],
+            "link_url":      g["link_url"],
+        })
+
+    events.sort(key=lambda e: (e["date"], e["auctioneer"].lower()))
+    return events[:200]
 
 
 @app.route("/api/auction/events", methods=["GET", "OPTIONS"])
@@ -14034,9 +14082,9 @@ def auction_events_list():
     """
     GET /api/auction/events
 
-    Returns upcoming auction events for the dashboard Auction Diary.
-    Reads from Supabase auction_events table (persistent across restarts).
-    Falls back to in-process cache if DB unavailable.
+    Returns upcoming auction events for the dashboard Auction Diary,
+    derived from the discovery pipeline's own scraped data
+    (auction_listings) — one event per (auction_date, auction house).
 
     Query params:
       days=N  — window in days (default 90, max 365)
@@ -14053,25 +14101,15 @@ def auction_events_list():
     except (ValueError, TypeError):
         days = 90
 
-    # Try DB first
-    events = _read_events_from_db(days)
-    source = "db"
-
-    # Fall back to in-process cache if DB returned nothing
-    if not events:
-        cached = _EIG_MEM_CACHE.get("events")
-        cached_at = _EIG_MEM_CACHE.get("_at", 0)
-        if cached and (time.time() - cached_at) < _EIG_MEM_TTL:
-            today_s  = datetime.utcnow().date().isoformat()
-            cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
-            events = [e for e in cached if today_s <= str(e.get("date","")) <= cutoff_s]
-            source = "cache"
+    # Diary is derived from the discovery pipeline's own scraped data
+    # (auction_listings), not a separate scrape. Empty window -> honest [].
+    events = _read_events_from_listings(days)
 
     return jsonify({
         "ok":     True,
         "events": events,
         "count":  len(events),
-        "source": source,
+        "source": "auction_listings",
     }), 200
 
 
