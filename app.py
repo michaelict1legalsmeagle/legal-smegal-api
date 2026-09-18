@@ -13764,21 +13764,14 @@ def diag_deal_trace(deal_id: str):
 # ══════════════════════════════════════════════════════════════════════════════
 # AUCTION EVENTS — /api/auction/events
 #
-# Scrapes two EIG pages server-side, stores results in Supabase auction_events
-# table so data survives Render cold starts.
-#
-# Data flow:
-#   Daily cron → POST /api/auction/events/refresh (X-Scan-Secret gated)
-#              → _fetch_all_eig_events() scrapes EIG
-#              → writes rows to Supabase auction_events
-#   GET /api/auction/events → reads from Supabase auction_events
-#                           → falls back to in-process cache if DB unavailable
-#
-# Touches nothing outside this block and the two route functions below.
+# GET /api/auction/events builds the dashboard diary + calendar from:
+#   • Auction House + registered houses (Bond Wolfe, Loveitts, …) — dates read
+#     live from each house's own diary page (_fetch_auction_house_diary /
+#     _DIARY_HOUSES), cached 6h each.
+#   • Every other house — derived from scraped auction_listings.
 # ══════════════════════════════════════════════════════════════════════════════
 
 EIG_FUTURE_URL     = "https://www.eigpropertyauctions.co.uk/search/future-auctions"
-EIG_LIVESTREAM_URL = "https://www.eigpropertyauctions.co.uk/search/live-stream"
 
 # Auctioneer name → their own website URL.
 # Used as the link target in the dashboard diary so users go to the
@@ -13806,11 +13799,6 @@ _AUCTIONEER_URLS: Dict[str, str] = {
     "west midlands":    "https://www.westmidlandspropertysales.co.uk/auctions/",
 }
 
-# In-process fallback cache — used only when Supabase is unavailable
-_EIG_MEM_CACHE: Dict[str, Any] = {}
-_EIG_MEM_TTL = 21600  # 6 h
-
-
 def _auctioneer_url(name: Optional[str]) -> str:
     """Return the auction house own-site URL, or EIG future-auctions as fallback.
     Only returns auctioneer-specific URLs for houses we've verified work."""
@@ -13824,188 +13812,9 @@ def _auctioneer_url(name: Optional[str]) -> str:
     return EIG_FUTURE_URL
 
 
-def _fetch_eig_page(page_url: str, is_livestream: bool) -> list:
-    """
-    Fetch one EIG page and extract SaleEvent JSON-LD objects.
-    Returns a list of event dicts. Returns [] on any error.
-    """
-    try:
-        resp = requests.get(
-            page_url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-GB,en;q=0.9",
-            },
-            timeout=20,
-            allow_redirects=True,
-        )
-        if resp.status_code != 200:
-            app.logger.warning("[eig_events] HTTP %s from %s", resp.status_code, page_url)
-            return []
-    except Exception as e:
-        app.logger.warning("[eig_events] request failed for %s: %s", page_url, e)
-        return []
-
-    html   = resp.text
-    today  = datetime.utcnow().date()
-    events = []
-
-    # Extract all application/ld+json script blocks
-    script_re = re.compile(
-        r'<script[^>]+application/ld[+]json[^>]*>(.*?)</script>',
-        re.DOTALL | re.IGNORECASE,
-    )
-    for m in script_re.finditer(html):
-        try:
-            blob = json.loads(m.group(1).strip())
-        except (ValueError, TypeError):
-            continue
-
-        items = blob if isinstance(blob, list) else [blob]
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            if item.get("@type") not in ("SaleEvent", "Event", "BusinessEvent"):
-                continue
-
-            # Date — take first 10 chars of startDate ISO string
-            start_raw = str(item.get("startDate") or "")
-            if len(start_raw) < 10:
-                continue
-            date_str = start_raw[:10]
-            try:
-                event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            except ValueError:
-                continue
-            if event_date < today:
-                continue
-
-            # Auctioneer — performer.name, then organizer.name
-            performer = item.get("performer") or {}
-            organizer = item.get("organizer") or {}
-            if isinstance(performer, list):
-                performer = performer[0] if performer else {}
-            auctioneer = (
-                performer.get("name")
-                or organizer.get("name")
-                or None
-            )
-            # Skip if name is just the generic EIG platform name
-            if auctioneer and auctioneer.strip().lower() in (
-                "property auction", "auction house online", ""
-            ):
-                auctioneer = None
-
-            # Venue
-            location = item.get("location") or {}
-            if isinstance(location, list):
-                location = location[0] if location else {}
-            venue = location.get("name") or location.get("streetAddress") or None
-
-            # Time
-            time_str = None
-            if "T" in start_raw:
-                tp = start_raw.split("T", 1)[1][:5]
-                if re.match(r"\d{2}:\d{2}", tp) and tp != "00:00":
-                    time_str = tp
-
-            events.append({
-                "date":          date_str,
-                "auctioneer":    auctioneer[:120] if auctioneer else None,
-                "venue_or_type": venue[:120] if venue else None,
-                "time":          time_str,
-                "is_livestream": is_livestream,
-                "source":        "eig_live_stream" if is_livestream else "eig_future_auctions",
-                "source_url":    EIG_LIVESTREAM_URL if is_livestream else EIG_FUTURE_URL,
-                "link_url":      _auctioneer_url(auctioneer),
-            })
-
-    return events
-
-
-def _fetch_all_eig_events() -> list:
-    """
-    Scrape both EIG pages, merge, deduplicate, sort by date.
-    live-stream events take precedence over matching future-auction entries
-    (same auctioneer + date) so the is_livestream flag is preserved.
-    """
-    future   = _fetch_eig_page(EIG_FUTURE_URL,     is_livestream=False)
-    livestrm = _fetch_eig_page(EIG_LIVESTREAM_URL, is_livestream=True)
-
-    # Index live-stream events by (date, auctioneer_lower[:30])
-    ls_keys: set = set()
-    for e in livestrm:
-        ls_keys.add((e["date"], (e["auctioneer"] or "")[:30].lower()))
-
-    # Promote matching future events to livestream
-    merged = list(livestrm)
-    for e in future:
-        k = (e["date"], (e["auctioneer"] or "")[:30].lower())
-        if k not in ls_keys:
-            merged.append(e)
-            ls_keys.add(k)
-
-    merged.sort(key=lambda e: e["date"])
-    app.logger.info(
-        "[eig_events] fetched %d future + %d livestream = %d merged",
-        len(future), len(livestrm), len(merged),
-    )
-    return merged
-
-
-def _write_events_to_db(events: list) -> int:
-    """
-    Upsert auction events into Supabase auction_events table.
-    Returns count of rows written. Non-fatal on error.
-    Table schema (create via migration SQL):
-      id          uuid primary key default gen_random_uuid()
-      date        date not null
-      auctioneer  text
-      venue_or_type text
-      time        text
-      is_livestream boolean default false
-      source      text
-      source_url  text
-      link_url    text
-      fetched_at  timestamptz default now()
-    Unique constraint: (date, auctioneer) — upsert on conflict.
-    """
-    if not supabase or not events:
-        return 0
-    try:
-        fetched_at = now_iso()
-        rows = [
-            {
-                "date":          e["date"],
-                "auctioneer":    e.get("auctioneer"),
-                "venue_or_type": e.get("venue_or_type"),
-                "time":          e.get("time"),
-                "is_livestream": bool(e.get("is_livestream")),
-                "source":        e.get("source"),
-                "source_url":    e.get("source_url"),
-                "link_url":      e.get("link_url"),
-                "fetched_at":    fetched_at,
-            }
-            for e in events
-        ]
-        supabase.table("auction_events").upsert(
-            rows,
-            on_conflict="date,auctioneer",
-            ignore_duplicates=False,
-        ).execute()
-        return len(rows)
-    except Exception as e:
-        app.logger.warning("[eig_events] DB write failed: %s", e)
-        return 0
-
-
 _AH_DIARY_URL  = "https://www.auctionhouse.co.uk/auction/future-auction-dates"
 _AH_DIARY_BASE = "https://www.auctionhouse.co.uk"
+_AH_LOGO       = "https://cdn.eigpropertyauctions.co.uk/ams/images/96/oas/ah-logo.png"
 _AH_DIARY_CACHE: Dict[str, Any] = {}
 _AH_DIARY_TTL = 21600  # 6h
 
@@ -14074,6 +13883,7 @@ def _fetch_auction_house_diary(days: int = 120) -> list:
                 "source":        "auction_house_diary",
                 "source_url":    link_url,
                 "link_url":      link_url,
+                "logo":          _AH_LOGO,
             })
 
         seen, rows = set(), []
@@ -14090,7 +13900,120 @@ def _fetch_auction_house_diary(days: int = 120) -> list:
     return [e for e in rows if today_s <= e["date"] <= cutoff_s]
 
 
-def _read_events_from_listings(days: int = 90, exclude_auction_house: bool = False) -> list:
+# ── Auction-house diary registry ─────────────────────────────────────────────
+# Each house publishes its future auction DATES on a server-rendered page. We
+# read those dates directly, so a house shows in the diary/calendar even when no
+# lots have been scraped for it. Adding a house = one entry here (name, url,
+# logo, how to read its dates). No per-house frontend change — the logo rides on
+# the event.
+#   "iso_near": ISO datetimes sitting next to a marker (add-to-calendar blocks);
+#               ignores stray meta/deadline timestamps that lack the marker.
+#   "prose":    a date after a prefix, e.g. "Date: Tuesday 22nd Sep 2026".
+_DIARY_HOUSES = [
+    {
+        "name": "Bond Wolfe",
+        "url":  "https://www.bondwolfe.com/property-auctions-west-midlands/upcoming-property-auctions/",
+        "logo": "https://www.bondwolfe.com/wp-content/themes/bwa/assets/images/BW-rgb-logo.svg",
+        "strategy": "iso_near", "marker": "Property Auction",
+        "is_livestream": True,
+    },
+    {
+        "name": "Loveitts",
+        "url":  "https://www.loveitts.co.uk/auctions/upcoming-auctions",
+        "logo": "https://www.loveitts.co.uk/assets/img/logos/loveitts2024.svg",
+        "strategy": "prose", "prefix": "Date:",
+        "is_livestream": False,
+    },
+]
+_DIARY_HOUSE_CACHE: Dict[str, dict] = {}
+_DIARY_HOUSE_TTL = 21600  # 6h
+
+_MONTHS = {}
+for _i, _full in enumerate(
+    ["january", "february", "march", "april", "may", "june",
+     "july", "august", "september", "october", "november", "december"], start=1):
+    _MONTHS[_full] = _i
+    _MONTHS[_full[:3]] = _i
+
+
+def _diary_iso_dates(text: str, marker: str, within: int = 60) -> list:
+    """ISO dates (YYYY-MM-DD) immediately followed by `marker` — the add-to-
+    calendar blocks. Excludes stray ISO timestamps (page meta) lacking the marker."""
+    out = []
+    for m in re.finditer(r"(\d{4})-(\d{2})-(\d{2})[T ]\d{2}:\d{2}", text):
+        if marker.lower() in text[m.end():m.end() + within].lower():
+            out.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+    return out
+
+
+def _diary_prose_dates(text: str, prefix: str) -> list:
+    """Dates written '<prefix> <weekday> <day><ordinal> <month> <year>', e.g.
+    'Date: Tuesday 22nd Sep 2026'. The prefix scopes to auction dates and keeps
+    stray dates (viewing/deadline lines) out."""
+    out = []
+    pat = re.compile(
+        re.escape(prefix) + r"\s*[A-Za-z]+\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,})\s+(\d{4})",
+        re.I)
+    for m in pat.finditer(text):
+        mon = _MONTHS.get(m.group(2).lower())
+        if not mon:
+            continue
+        try:
+            out.append(datetime(int(m.group(3)), mon, int(m.group(1))).date().isoformat())
+        except (ValueError, TypeError):
+            pass
+    return out
+
+
+def _fetch_diary_house(house: dict, days: int = 120) -> list:
+    """Fetch one registered house's upcoming auction dates. Cached 6h per house.
+    Returns [] on any failure — that house just doesn't show (honest, no fake)."""
+    name = house["name"]
+    now  = time.time()
+    entry = _DIARY_HOUSE_CACHE.get(name)
+    if entry and (now - entry.get("_at", 0)) < _DIARY_HOUSE_TTL:
+        dates = entry["dates"]
+    else:
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+        except ImportError as e:
+            app.logger.warning("[diary:%s] deps missing: %s", name, e)
+            return []
+        try:
+            resp = requests.get(
+                house["url"], timeout=12,
+                headers={"User-Agent": "Mozilla/5.0 (LegalSmegal diary fetch)"},
+            )
+            resp.raise_for_status()
+            text = BeautifulSoup(resp.text, "html.parser").get_text(" ", strip=True)
+        except Exception as e:
+            app.logger.warning("[diary:%s] fetch failed: %s", name, e)
+            return list(entry["dates"]) if entry else []
+
+        if house.get("strategy") == "iso_near":
+            found = _diary_iso_dates(text, house.get("marker", ""))
+        else:
+            found = _diary_prose_dates(text, house.get("prefix", "Date:"))
+        dates = sorted(set(found))
+        _DIARY_HOUSE_CACHE[name] = {"dates": dates, "_at": now}
+
+    today_s  = datetime.utcnow().date().isoformat()
+    cutoff_s = (datetime.utcnow().date() + timedelta(days=days)).isoformat()
+    return [{
+        "date":          d,
+        "auctioneer":    name,
+        "venue_or_type": "Auction",
+        "time":          None,
+        "is_livestream": bool(house.get("is_livestream")),
+        "source":        "house_diary",
+        "source_url":    house["url"],
+        "link_url":      house["url"],
+        "logo":          house.get("logo", ""),
+    } for d in dates if today_s <= d <= cutoff_s]
+
+
+def _read_events_from_listings(days: int = 90, exclude_houses: list = None) -> list:
     """
     Build the dashboard Auction Diary from the discovery pipeline's own data.
 
@@ -14132,7 +14055,7 @@ def _read_events_from_listings(days: int = 90, exclude_auction_house: bool = Fal
         house = (r.get("auction_house") or src.get("name") or "").strip()
         if not house:
             house = "Property Auction"
-        if exclude_auction_house and "auction house" in house.lower():
+        if exclude_houses and any(x in house.lower() for x in exclude_houses):
             continue
         key = (date_s, house.lower())
         g = grouped.get(key)
@@ -14158,6 +14081,7 @@ def _read_events_from_listings(days: int = 90, exclude_auction_house: bool = Fal
             "source":        "auction_listings",
             "source_url":    g["link_url"],
             "link_url":      g["link_url"],
+            "logo":          "",
         })
 
     events.sort(key=lambda e: (e["date"], e["auctioneer"].lower()))
@@ -14192,11 +14116,30 @@ def auction_events_list():
     # Auction House diary page = source of truth for ALL its dates (incl. those
     # with no catalogue yet). Other houses come from their scraped lots. Merge,
     # de-dupe by (date, auctioneer). Empty result -> honest [] empty state.
-    ah_events    = _fetch_auction_house_diary(days)
-    other_events = _read_events_from_listings(days, exclude_auction_house=True)
+    # Diary/calendar events, source-of-truth first:
+    #   • Auction House — all dates off its diary page
+    #   • Registered houses (Bond Wolfe, Loveitts, …) — dates off their own pages
+    #   • Every other house — derived from scraped lots
+    # Houses sourced from a diary page are excluded from the lots derivation so a
+    # date isn't counted twice. Pages fetched concurrently (each cached 6h).
+    from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
+
+    fetchers = [partial(_fetch_auction_house_diary, days)] + \
+               [partial(_fetch_diary_house, h, days) for h in _DIARY_HOUSES]
+    diary_events = []
+    try:
+        with ThreadPoolExecutor(max_workers=min(6, len(fetchers))) as ex:
+            for res in ex.map(lambda f: f(), fetchers):
+                diary_events.extend(res or [])
+    except Exception as e:
+        app.logger.warning("[auction_events] diary fetch pool failed: %s", e)
+
+    exclude = ["auction house"] + [h["name"].lower() for h in _DIARY_HOUSES]
+    other_events = _read_events_from_listings(days, exclude_houses=exclude)
 
     merged = {}
-    for e in ah_events + other_events:
+    for e in diary_events + other_events:
         merged[(e["date"], (e.get("auctioneer") or "").lower())] = e
     events = sorted(
         merged.values(),
@@ -14207,55 +14150,7 @@ def auction_events_list():
         "ok":     True,
         "events": events,
         "count":  len(events),
-        "source": "auction_house_diary+listings",
-    }), 200
-
-
-@app.route("/api/auction/events/refresh", methods=["POST", "OPTIONS"])
-@limiter.limit("5 per minute")
-def auction_events_refresh():
-    """
-    POST /api/auction/events/refresh
-
-    Auth: X-Scan-Secret header only (matches AUCTION_SCAN_SECRET env var).
-    No JWT required — called by cron job which has no user session.
-    Scrapes both EIG pages and writes results to Supabase auction_events table.
-    Also updates in-process cache as secondary storage.
-
-    Requires X-Scan-Secret header matching AUCTION_SCAN_SECRET env var.
-    Called by the daily Render cron job and available for manual refresh.
-
-    No request body needed.
-    Response: { ok, count, source }
-    """
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-
-    if not AUCTION_SCAN_SECRET:
-        return jsonify({"error": "Set AUCTION_SCAN_SECRET env var to enable refresh"}), 503
-
-    provided = request.headers.get("X-Scan-Secret", "").strip()
-    if provided != AUCTION_SCAN_SECRET:
-        app.logger.warning("[eig_events/refresh] Unauthorised attempt")
-        return jsonify({"error": "Forbidden"}), 403
-
-    events = _fetch_all_eig_events()
-    if not events:
-        return jsonify({"ok": False, "error": "Both EIG pages returned 0 events", "count": 0}), 502
-
-    # Write to Supabase
-    written = _write_events_to_db(events)
-    app.logger.info("[eig_events/refresh] wrote %d rows to auction_events", written)
-
-    # Update in-process cache as fallback
-    _EIG_MEM_CACHE["events"] = events
-    _EIG_MEM_CACHE["_at"]    = time.time()
-
-    return jsonify({
-        "ok":     True,
-        "count":  len(events),
-        "written": written,
-        "source": "eig_future_auctions + eig_live_stream",
+        "source": "diary_pages+listings",
     }), 200
 
 
