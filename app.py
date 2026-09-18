@@ -13,6 +13,7 @@ import logging
 import threading
 import multiprocessing as mp
 import uuid
+import naptan_transport  # local NaPTAN transport reader (replaces live Overpass); repo root, next to app.py
 
 # S29 — Root logger configuration. Without this, neither app.logger (Flask's
 # logger) nor logging.getLogger(__name__) calls in this file or in imported
@@ -3045,6 +3046,23 @@ out center;
 
 
 def get_transport_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
+    """Transport source dispatcher.
+
+    Default: NaPTAN (static DfT register loaded on Hetzner, queried locally via
+    data_query) — no live Overpass call, so the card no longer blanks at random.
+    Set env TRANSPORT_SOURCE=osm to fall back to the old Overpass path below.
+    """
+    if os.getenv("TRANSPORT_SOURCE", "naptan").lower() == "osm":
+        return _get_transport_data_osm(lat, lng)
+    return naptan_transport.get_transport_data(
+        lat, lng,
+        data_query=data_query, now_iso=now_iso,
+        metric_ok=metric_ok, metric_unavailable=metric_unavailable,
+        safe_float=safe_float, radius_m=DEFAULT_OSM_RADIUS,
+    )
+
+
+def _get_transport_data_osm(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
     retrieved = now_iso()
     base_sources = [
         {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
