@@ -2987,7 +2987,7 @@ _OVERPASS_ENDPOINTS = [
     "https://overpass.private.coffee/api/interpreter",
 ]
 
-def overpass_query(lat: float, lng: float, selectors: str) -> Dict[str, Any]:
+def overpass_query(lat: float, lng: float, selectors: str, deadline_s: Optional[float] = None) -> Dict[str, Any]:
     """Query OSM Overpass with automatic failover across mirrors.
 
     Returns on the first endpoint that gives a valid 200 JSON body. A transient
@@ -3017,7 +3017,7 @@ out center;
     # (H2-TIMING). A total wall-clock deadline caps the pathological case without
     # changing the healthy path (a fast mirror returns long before it). Early-exit
     # only — never makes results worse than an all-mirrors-down sweep. Env-tunable.
-    _deadline = time.time() + float(os.getenv("OVERPASS_TOTAL_DEADLINE", "20"))
+    _deadline = time.time() + (float(deadline_s) if deadline_s is not None else float(os.getenv("OVERPASS_TOTAL_DEADLINE", "20")))
     for _attempt in range(2):
         if time.time() > _deadline:
             break
@@ -3287,7 +3287,7 @@ nwr["highway"="bus_stop"](around:2500,{lat},{lng});
         )
 
 
-def get_amenities_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
+def get_amenities_data(lat: Optional[float], lng: Optional[float], deadline_s: Optional[float] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     base_sources = [
         {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
@@ -3310,7 +3310,7 @@ nwr["tourism"](around:{radius},{lat},{lng});
 """.strip()
 
     try:
-        payload = overpass_query(lat, lng, selectors)
+        payload = overpass_query(lat, lng, selectors, deadline_s=deadline_s)
         elements = payload.get("elements", []) if isinstance(payload, dict) else []
         if not isinstance(elements, list):
             elements = []
@@ -10898,6 +10898,51 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
     return area_data
 
 
+def _maybe_heal_live_blocks(area: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Serve-side self-heal for live-external Area blocks that froze blank at enrichment.
+
+    Raw localAreaAnalysis blocks (amenities) are fetched once at enrichment and cached
+    in area_json with NO recompute path, so a transient Overpass miss becomes a permanent
+    dash on every later view. On serve we re-fetch a block cached as unavailable
+    (status != "ok") with a short deadline and substitute a fresh success into THIS
+    response only.
+
+    Deliberately does NOT write back to area_json: the cache has a documented inference
+    write-race (census / inference writers), so we add no third writer. A healed result is
+    kept in the in-process geo_cache (per ~110m cell, TTL) so repeat views within a worker
+    do not re-hit Overpass. A genuine sparse area (status "ok", zero counts) is never
+    re-fetched. Best-effort: any failure leaves the honest cached-unavailable state intact.
+    """
+    if not isinstance(area, dict):
+        return area
+    la = area.get("localAreaAnalysis")
+    if not isinstance(la, dict):
+        return area
+    loc = area.get("location") or {}
+    lat, lng = safe_float(loc.get("lat")), safe_float(loc.get("lng"))
+    if lat is None or lng is None:
+        return area
+
+    amen = la.get("amenities")
+    if isinstance(amen, dict) and amen.get("status") == "ok":
+        return area  # already good - nothing to heal
+
+    key = f"amenheal:{round(lat, 3)},{round(lng, 3)}"
+    healed = geo_cache_get(key)
+    if not (isinstance(healed, dict) and healed.get("status") == "ok"):
+        try:
+            fresh = get_amenities_data(lat, lng, deadline_s=8)
+            if isinstance(fresh, dict) and fresh.get("status") == "ok":
+                geo_cache_set(key, fresh)
+                healed = fresh
+        except Exception as _he:
+            app.logger.warning("[area-heal] amenities re-fetch failed: %s", _he)
+            healed = None
+    if isinstance(healed, dict) and healed.get("status") == "ok":
+        la["amenities"] = healed
+    return area
+
+
 @app.route("/api/deals/<deal_id>/area", methods=["GET"])
 @require_auth
 def get_area(deal_id: str):
@@ -10919,6 +10964,7 @@ def get_area(deal_id: str):
             return jsonify({"error": "Deal not found"}), 404
         area = result.data.get("area_json")
         area = _maybe_enrich_census_demographics(deal_id, area)
+        area = _maybe_heal_live_blocks(area)
         return jsonify({
             "ok":       True,
             "area":     area,
