@@ -3288,159 +3288,95 @@ nwr["highway"="bus_stop"](around:2500,{lat},{lng});
 
 
 def get_amenities_data(lat: Optional[float], lng: Optional[float], deadline_s: Optional[float] = None) -> Dict[str, Any]:
+    """Amenities from the LOCAL osm.poi table (loaded via load_osm_poi.py) instead of
+    live Overpass. Overpass failed intermittently and froze blank amenities into
+    area_json; this reads Hetzner Postgres with ST_DWithin (same pattern as NaPTAN),
+    so it cannot dash. `deadline_s` is accepted for caller compatibility and unused.
+
+    Unchanged contract the card reads:
+      metrics = {radiusMeters, total, buckets:{6 cats + other:{count,top[]}},
+                 points:[{lat,lng,cat,name}]}
+    Local data means total==0 is a TRUE sparse result (metric_ok), not a suspect empty.
+    """
     retrieved = now_iso()
     base_sources = [
-        {"label": "OpenStreetMap (Overpass API)", "url": "https://overpass-api.de/"},
-        {"label": "OpenStreetMap", "url": "https://www.openstreetmap.org"},
+        {"label": "OpenStreetMap POIs (local)", "url": "https://www.openstreetmap.org"},
+        {"label": "Hetzner (osm.poi)", "url": ""},
     ]
-
     if lat is None or lng is None:
         return metric_unavailable(
             "Amenities data not available: postcode could not be resolved to coordinates.",
-            base_sources,
-            retrieved,
+            base_sources, retrieved,
+        )
+
+    probe = data_query("SELECT to_regclass(%s) AS t;", ("osm.poi",))
+    if not probe or probe[0].get("t") is None:
+        return metric_unavailable(
+            "Amenities data unavailable: osm.poi is not loaded on the data box yet.",
+            base_sources, retrieved,
         )
 
     radius = DEFAULT_OSM_RADIUS
-    selectors = f"""
-nwr["amenity"](around:{radius},{lat},{lng});
-nwr["shop"](around:{radius},{lat},{lng});
-nwr["leisure"](around:{radius},{lat},{lng});
-nwr["tourism"](around:{radius},{lat},{lng});
-""".strip()
+    rows = data_query(
+        "SELECT category, name, lat, lng, "
+        "       ST_Distance(geog, ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography) AS d "
+        "FROM osm.poi "
+        "WHERE ST_DWithin(geog, ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography, %s) "
+        "ORDER BY d",
+        (lng, lat, lng, lat, radius),
+    ) or []
 
-    try:
-        payload = overpass_query(lat, lng, selectors, deadline_s=deadline_s)
-        elements = payload.get("elements", []) if isinstance(payload, dict) else []
-        if not isinstance(elements, list):
-            elements = []
+    buckets: Dict[str, Dict[str, Any]] = {
+        "foodDrink":  {"count": 0, "top": []},
+        "shopping":   {"count": 0, "top": []},
+        "healthcare": {"count": 0, "top": []},
+        "education":  {"count": 0, "top": []},
+        "leisure":    {"count": 0, "top": []},
+        "services":   {"count": 0, "top": []},
+        "other":      {"count": 0, "top": []},
+    }
+    points: List[Dict[str, Any]] = []
+    POINT_CAP = 300
 
-        buckets: Dict[str, Dict[str, Any]] = {
-            "foodDrink": {"count": 0, "top": []},
-            "shopping": {"count": 0, "top": []},
-            "healthcare": {"count": 0, "top": []},
-            "education": {"count": 0, "top": []},
-            "leisure": {"count": 0, "top": []},
-            "services": {"count": 0, "top": []},
-            "other": {"count": 0, "top": []},
-        }
+    for r in rows:
+        cat = r.get("category") or "other"
+        if cat not in buckets:
+            cat = "other"
+        b = buckets[cat]
+        b["count"] += 1
+        nm = (r.get("name") or "").strip()
+        if nm and len(b["top"]) < 6 and nm not in b["top"]:
+            b["top"].append(nm)
+        if len(points) < POINT_CAP:
+            plat, plng = safe_float(r.get("lat")), safe_float(r.get("lng"))
+            if plat is not None and plng is not None:
+                points.append({"lat": plat, "lng": plng, "cat": cat, "name": nm})
 
-        food_amenities = {"restaurant", "cafe", "pub", "bar", "fast_food", "food_court", "ice_cream", "biergarten"}
-        health_amenities = {"hospital", "clinic", "doctors", "dentist", "pharmacy", "veterinary"}
-        edu_amenities = {"school", "college", "university", "kindergarten", "childcare", "library"}
-        service_amenities = {
-            "bank", "atm", "post_office", "parcel_locker", "police", "fire_station",
-            "townhall", "community_centre", "courthouse", "place_of_worship"
-        }
+    total = sum(int(buckets[k]["count"]) for k in buckets)
 
-        def _bucket_for(tags: Dict[str, Any]) -> str:
-            a = tags.get("amenity")
-            s = tags.get("shop")
-            l = tags.get("leisure")
-            t = tags.get("tourism")
+    bullets: List[str] = []
+    def _line(label: str, key: str) -> None:
+        c = buckets[key]["count"]
+        tops = buckets[key]["top"]
+        if c and c > 0:
+            bullets.append(f"\u2022 {label}: {c}" + (f" (e.g., {', '.join(tops)})" if tops else ""))
+    _line("Food & drink", "foodDrink")
+    _line("Shops", "shopping")
+    _line("Healthcare", "healthcare")
+    _line("Education", "education")
+    _line("Leisure", "leisure")
+    _line("Services", "services")
 
-            if isinstance(a, str):
-                if a in food_amenities:
-                    return "foodDrink"
-                if a in health_amenities:
-                    return "healthcare"
-                if a in edu_amenities:
-                    return "education"
-                if a in service_amenities:
-                    return "services"
-                if a in {"cinema", "theatre", "arts_centre", "gym", "sports_centre", "swimming_pool", "park"}:
-                    return "leisure"
-
-            if isinstance(s, str):
-                return "shopping"
-            if isinstance(l, str) or isinstance(t, str):
-                return "leisure"
-
-            return "other"
-
-        def _push_top(bucket_key: str, name: str) -> None:
-            if not name:
-                return
-            arr = buckets[bucket_key]["top"]
-            if name not in arr:
-                arr.append(name)
-
-        for e in elements:
-            tags = (e or {}).get("tags") or {}
-            if not isinstance(tags, dict):
-                continue
-
-            bk = _bucket_for(tags)
-            buckets[bk]["count"] += 1
-
-            nm = tags.get("name")
-            name = nm.strip() if isinstance(nm, str) and nm.strip() else ""
-            _push_top(bk, name)
-
-        # Build points[] for map pins — real OSM coordinates per element.
-        amenity_points: List[Dict[str, Any]] = []
-        _seen_amenity_coords: set = set()
-        for _ae in elements:
-            _atags = (_ae or {}).get("tags") or {}
-            if not isinstance(_atags, dict):
-                continue
-            _alat = _ae.get("lat") or (_ae.get("center") or {}).get("lat")
-            _alng = _ae.get("lon") or (_ae.get("center") or {}).get("lon")
-            if _alat is None or _alng is None:
-                continue
-            _alat = safe_float(_alat)
-            _alng = safe_float(_alng)
-            if _alat is None or _alng is None:
-                continue
-            _ack = (round(_alat, 6), round(_alng, 6))
-            if _ack in _seen_amenity_coords:
-                continue
-            _seen_amenity_coords.add(_ack)
-            _acat = _bucket_for(_atags)
-            _anm = (_atags.get("name") or "").strip()
-            amenity_points.append({"lat": _alat, "lng": _alng, "cat": _acat, "name": _anm})
-
-        for k in buckets.keys():
-            buckets[k]["top"] = buckets[k]["top"][:6]
-
-        total = sum(int(buckets[k]["count"]) for k in buckets.keys())
-        if total == 0:
-            # Empty after the mirror re-sweep: for anything but a genuinely rural
-            # point this means OpenStreetMap/Overpass couldn't be reached, not that
-            # there are no amenities. Label it UNAVAILABLE (honest) rather than a
-            # false "no amenities here" — governance: never a fabricated all-clear.
-            return metric_unavailable("Amenities temporarily unavailable from OpenStreetMap (Overpass).", base_sources, retrieved)
-
-        bullets: List[str] = []
-
-        def _line(label: str, key: str) -> None:
-            c = buckets[key]["count"]
-            tops = buckets[key]["top"]
-            if c and c > 0:
-                bullets.append(f"• {label}: {c}" + (f" (e.g., {', '.join(tops)})" if tops else ""))
-
-        _line("Food & drink", "foodDrink")
-        _line("Shopping", "shopping")
-        _line("Healthcare", "healthcare")
-        _line("Education", "education")
-        _line("Leisure", "leisure")
-        _line("Services", "services")
-        if buckets["other"]["count"] >= 10:
-            bullets.append(f"• Other mapped POIs: {buckets['other']['count']}")
-
-        summary = f"Amenities (OSM within ~{radius}m): {total} mapped places.\n" + "\n".join(bullets)
-        out = metric_ok(summary, bullets, base_sources, retrieved, 0.90)
-        out["metrics"] = {"radiusMeters": radius, "total": total, "buckets": buckets, "points": amenity_points}
-        return out
-
-    except Exception as e:
-        return metric_unavailable(
-            f"Amenities data fetch failed: {str(e)}",
-            base_sources,
-            retrieved,
-        )
-
-
+    summary = (f"{total} amenities within ~{radius}m (local OSM POIs)."
+               if total > 0 else f"No amenities within ~{radius}m of this address.")
+    out = metric_ok(summary, bullets, base_sources, retrieved, 0.95 if total > 0 else 0.0)
+    out["metrics"] = {
+        "radiusMeters": radius,
+        "total": total,
+        "buckets": buckets,
+        "points": points,
+    }
+    return out
 def _supabase_execute_with_retry(build_query, attempts: int = 3, base_delay: float = 0.25):
     """Execute a supabase-py query with bounded retry on TRANSIENT connection
     errors (e.g. EAGAIN / '[Errno 11] Resource temporarily unavailable', which the
