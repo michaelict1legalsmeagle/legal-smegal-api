@@ -10899,47 +10899,56 @@ def _maybe_enrich_census_demographics(deal_id: str, area_data: Optional[Dict[str
 
 
 def _maybe_heal_live_blocks(area: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Serve-side self-heal for live-external Area blocks that froze blank at enrichment.
+    """Serve-side self-heal for the live-external amenities block.
 
-    Raw localAreaAnalysis blocks (amenities) are fetched once at enrichment and cached
-    in area_json with NO recompute path, so a transient Overpass miss becomes a permanent
-    dash on every later view. On serve we re-fetch a block cached as unavailable
-    (status != "ok") with a short deadline and substitute a fresh success into THIS
-    response only.
+    STORAGE SHAPE (verified against a stored row, 2026-09-19): deals.area_json holds the
+    blocks at the TOP LEVEL - area_json.amenities / .crime / .transport, and .lat / .lng.
+    There is NO 'localAreaAnalysis' wrapper in storage (the compute code wraps it, but
+    only the inner object is persisted), and the frontend reads a.amenities.metrics
+    accordingly. An earlier version of this helper read area['localAreaAnalysis'] and
+    area['location'] and therefore silently no-oped on every deal.
 
-    Deliberately does NOT write back to area_json: the cache has a documented inference
-    write-race (census / inference writers), so we add no third writer. A healed result is
-    kept in the in-process geo_cache (per ~110m cell, TTL) so repeat views within a worker
-    do not re-hit Overpass. A genuine sparse area (status "ok", zero counts) is never
-    re-fetched. Best-effort: any failure leaves the honest cached-unavailable state intact.
+    Amenities is fetched once at enrichment via Overpass with no recompute path, so a
+    transient miss (a fetch failure OR a false 200-with-no-elements) freezes a blank into
+    area_json. On serve we re-fetch whenever the cached block is not a real, non-empty
+    'ok' result and substitute a fresh success into THIS response only.
+
+    No area_json write-back (avoids the documented inference/census write-race); a healed
+    result (total > 0) is held in the in-process geo_cache so repeat views within a worker
+    do not re-hit Overpass. A genuinely amenity-less area returns ok/0 on re-fetch and is
+    left honestly blank. Best-effort: any failure leaves the cached state intact.
     """
     if not isinstance(area, dict):
         return area
-    la = area.get("localAreaAnalysis")
-    if not isinstance(la, dict):
-        return area
-    loc = area.get("location") or {}
-    lat, lng = safe_float(loc.get("lat")), safe_float(loc.get("lng"))
+    lat, lng = safe_float(area.get("lat")), safe_float(area.get("lng"))
     if lat is None or lng is None:
         return area
 
-    amen = la.get("amenities")
-    if isinstance(amen, dict) and amen.get("status") == "ok":
-        return area  # already good - nothing to heal
+    def _real_amenities(block: Any) -> bool:
+        if not isinstance(block, dict) or block.get("status") != "ok":
+            return False
+        try:
+            return int((block.get("metrics") or {}).get("total") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    if _real_amenities(area.get("amenities")):
+        return area  # real amenities already present - nothing to heal
 
     key = f"amenheal:{round(lat, 3)},{round(lng, 3)}"
     healed = geo_cache_get(key)
-    if not (isinstance(healed, dict) and healed.get("status") == "ok"):
+    if not _real_amenities(healed):
+        healed = None
         try:
             fresh = get_amenities_data(lat, lng, deadline_s=8)
-            if isinstance(fresh, dict) and fresh.get("status") == "ok":
+            if _real_amenities(fresh):
                 geo_cache_set(key, fresh)
                 healed = fresh
         except Exception as _he:
             app.logger.warning("[area-heal] amenities re-fetch failed: %s", _he)
             healed = None
-    if isinstance(healed, dict) and healed.get("status") == "ok":
-        la["amenities"] = healed
+    if _real_amenities(healed):
+        area["amenities"] = healed
     return area
 
 
