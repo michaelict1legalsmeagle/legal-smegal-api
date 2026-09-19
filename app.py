@@ -2801,7 +2801,15 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
     try:
         status, crimes = _http_get_json(url, timeout=20)
         if status != 200 or not isinstance(crimes, list):
-            crimes = []
+            # Governance: a failed/malformed fetch must NOT fall through to total=0,
+            # which downstream rendered as "-100% / Lower crime" (a fabricated safety
+            # claim). Report honest absence. A genuine HTTP 200 with an empty list is
+            # real "0 crimes this month" and still flows through below.
+            return metric_unavailable(
+                "Crime data temporarily unavailable (police.uk returned no valid response for this location).",
+                base_sources,
+                retrieved,
+            )
 
         counts: Dict[str, int] = {}
         for c in crimes:
@@ -2826,6 +2834,8 @@ def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]
         out["metrics"] = {
             "total": len(crimes),
             "categories": counts,
+            "month": (crimes[0].get("month") if crimes else None),  # all-crime = latest single month
+            "window": "latest month",
             "radius_hint": "Police API uses a fixed area around the point; see documentation.",
         }
         return out
@@ -4226,13 +4236,17 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         reg_rental   = _get_regional_rental_benchmark(lad_code)
         liquidity    = _get_transaction_liquidity(postcode, lad_code)
 
-        # Crime index: crimes per 1000 population vs national avg
-        # ONS 2023: ~82 crimes per 1000 population nationally (England & Wales)
+        # Crime "vs national" REMOVED - governance: no fake values.
+        # The old ratio divided a ~1-mile police.uk count (latest single month) by the
+        # WHOLE-LAD population against an annual 82/1000 baseline: geography AND time
+        # mismatched, so it always read -60% to -100% and, on an empty/failed fetch,
+        # produced a false "-100% / Lower crime". A coherent comparison needs a small-area
+        # population-normalised source (IoD crime domain), not loaded here. Until then we
+        # publish the live police.uk count + top category and assert NO vs-national figure.
         crime_total  = safe_float((area_data.get("crime") or {}).get("metrics", {}).get("total") or 0) or 0
-        pop_latest   = safe_float(pop.get("latest_value") or 0) or 10000
-        local_crime_rate   = (crime_total / pop_latest * 1000) if pop_latest > 0 else 0
-        national_crime_rate = 82.0  # ONS Crime Survey England and Wales 2023
-        crime_index  = round(local_crime_rate / national_crime_rate, 2) if national_crime_rate > 0 else None
+        local_crime_rate    = None
+        national_crime_rate = None
+        crime_index         = None
         _crime_is_scotland = (str((area_data.get("crime") or {}).get("metrics", {}).get("jurisdiction")
                                  or (area_data.get("crime") or {}).get("jurisdiction") or "").lower() == "scotland"
                               or _is_scotland_lsoa(str(area_data.get("lsoa_gss") or "")))  # nation-based: null for ANY Scottish deal, even a ward-join miss
@@ -4449,8 +4463,8 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                 })
             else:
                 drivers.append({
-                    "sign": "~" if crime_total < 300 else "-",
-                    "text": f"Crime {int(crime_total)}/yr · Police.uk"
+                    "sign": "~",  # monthly count, no national baseline - never imply lower/higher
+                    "text": f"Crime {int(crime_total)} recorded (latest month) · Police.uk"
                 })
 
         # Population trend — with magnitude
@@ -4558,8 +4572,8 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                     },
                     "crime": {
                         "local_total":      int(crime_total),
-                        "local_rate_per_1000": (None if _crime_is_scotland else round(local_crime_rate, 2)),
-                        "national_rate_per_1000": (None if _crime_is_scotland else national_crime_rate),
+                        "local_rate_per_1000": None,   # removed: mismatched-geography rate (governance: no fake values)
+                        "national_rate_per_1000": None,
                         "crime_index":      crime_index,
                         "source": (((area_data.get("crime") or {}).get("metrics", {}).get("source") or "Police Scotland")
                                    if _crime_is_scotland else "Police.uk"),
