@@ -7,24 +7,27 @@ so), which is why the Transport card blanks at random. NaPTAN is a static DfT
 register: load once, query locally via the app's existing data_query() with the
 same PostGIS pattern as nspl_postcodes. No external HTTP -> no hang, no false blank.
 
-CONTRACT (unchanged, so no frontend edit is needed). It returns the same envelope
-as the old function and sets:
+CONTRACT (unchanged, so no frontend edit is required for the counts/map). It
+returns the same envelope as the old function and sets:
   metrics = {
     "radiusMeters": int,
     "counts":  {"stations": int, "tram_stops": int, "public_transport": int, "bus_stops": int},
     "sample":  {"stations": [str], "tram": [str], "bus": [str]},
     "points":  [{"lat": float, "lng": float, "kind": "rail"|"tram"|"bus", "name": str}],
+    "nearest": {"rail": {"name","dist_m"}|None, "tram": ..|None, "bus": ..|None},
   }
-  counts.stations   = rail
-  counts.tram_stops = metro/tram
-  counts.bus_stops  = bus/coach
+  counts.stations   = rail WITHIN the card radius (drives the grade — stays honest
+                      to what is genuinely near; sparse rail rarely sits in 1.2km)
+  counts.tram_stops = metro/tram within radius
+  counts.bus_stops  = bus/coach within radius
   (ferry/air/other are NOT folded into these three — honest, not mislabelled.)
 
-ENHANCEMENT (additive keys the old path never produced; existing FE ignores them):
-  metrics["nearest"] = {"rail": {"name","dist_m"}|None, "tram": .., "bus": ..}
-and sample["stations"][0] is annotated with distance, e.g. "Peterlee (0.4 mi)",
-so the existing (previously always-blank) "Nearest station" row fills in with a
-real distance and NO html change.
+NEAREST-STATION FIX: "counts" is bounded by the card radius, but the nearest RAIL
+station is usually further out (sparse). So metrics["nearest"]["rail"] / ["tram"]
+are computed with a SEPARATE, wider, distance-capped lookup (near_cap_m, default
+16 km) that is independent of the card radius. That is what fills the frontend
+"Nearest station" row with a real name + distance, wherever a station is in reach,
+without inflating the grade. Beyond the cap -> None -> the row honestly shows "—".
 
 All app helpers are injected so this module has zero import of app.py (no cycle)
 and reuses app's exact metric_ok/metric_unavailable envelope.
@@ -32,12 +35,30 @@ and reuses app's exact metric_ok/metric_unavailable envelope.
 from typing import Any, Dict, List, Optional
 
 _MODE_TO_KIND = {"rail": "rail", "metro": "tram", "bus": "bus"}  # FE map only styles these
-_POINT_CAP = 250        # cap map pins by nearest; counts stay full
+_POINT_CAP = 250            # cap map pins by nearest; counts stay full
 _SAMPLE_CAP = {"rail": 6, "metro": 6, "bus": 8}
 
 
-def _mi(dist_m: float) -> str:
-    return f"{dist_m / 1609.34:.1f} mi"
+def _nearest(data_query, table, lng, lat, mode, cap_m, safe_float) -> Optional[Dict[str, Any]]:
+    """Nearest single stop of `mode` within cap_m metres, or None. Independent of
+    the card radius — this is what lets the 'Nearest station' row reach a station
+    that sits beyond the bus radius."""
+    rows = data_query(
+        f"SELECT stop_name, "
+        f"       ST_Distance(geog, ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography) AS d "
+        f"FROM {table} "
+        f"WHERE mode = %s "
+        f"  AND ST_DWithin(geog, ST_SetSRID(ST_MakePoint(%s,%s),4326)::geography, %s) "
+        f"ORDER BY d LIMIT 1",
+        (lng, lat, mode, lng, lat, cap_m),
+    ) or []
+    if not rows:
+        return None
+    name = (rows[0].get("stop_name") or "").strip()
+    d = safe_float(rows[0].get("d"))
+    if not name or d is None:
+        return None
+    return {"name": name, "dist_m": int(round(d))}
 
 
 def get_transport_data(
@@ -50,6 +71,7 @@ def get_transport_data(
     metric_unavailable,
     safe_float,
     radius_m: int = 1200,
+    near_cap_m: int = 16000,
     table: str = "naptan.stops",
 ) -> Dict[str, Any]:
     retrieved = now_iso()
@@ -65,7 +87,6 @@ def get_transport_data(
         )
 
     # Distinguish "table not loaded yet" from "genuinely no stops nearby".
-    schema, _, tbl = table.partition(".")
     probe = data_query("SELECT to_regclass(%s) AS t;", (table,))
     if not probe or probe[0].get("t") is None:
         return metric_unavailable(
@@ -86,14 +107,14 @@ def get_transport_data(
 
     rows = _fetch(radius_m)
     used_radius = radius_m
-    if not rows:                       # widen once, like the old OSM fallback — but local + cheap
+    if not rows:                       # widen once — local + cheap, no network
         rows = _fetch(2500)
         used_radius = 2500 if rows else radius_m
 
     counts = {"stations": 0, "tram_stops": 0, "public_transport": 0, "bus_stops": 0}
     sample: Dict[str, List[str]] = {"stations": [], "tram": [], "bus": []}
-    nearest: Dict[str, Optional[Dict[str, Any]]] = {"rail": None, "tram": None, "bus": None}
     points: List[Dict[str, Any]] = []
+    nearest_bus: Optional[Dict[str, Any]] = None
     seen_name = {"stations": set(), "tram": set(), "bus": set()}
 
     for r in rows:
@@ -113,14 +134,12 @@ def get_transport_data(
         else:
             counts["bus_stops"] += 1
             skey = "bus"
+            if nearest_bus is None and name and dist is not None:
+                nearest_bus = {"name": name, "dist_m": int(round(dist))}
         counts["public_transport"] += 1
 
-        # nearest per FE-kind (rows are distance-ordered, so first wins)
-        nk = "rail" if kind == "rail" else ("tram" if kind == "tram" else "bus")
-        if nearest[nk] is None and name and dist is not None:
-            nearest[nk] = {"name": name, "dist_m": int(round(dist))}
-
-        if name and name not in seen_name[skey] and len(sample[skey]) < _SAMPLE_CAP[mode if mode != "metro" else "metro"]:
+        cap = _SAMPLE_CAP["metro" if mode == "metro" else mode]
+        if name and name not in seen_name[skey] and len(sample[skey]) < cap:
             seen_name[skey].add(name)
             sample[skey].append(name)
 
@@ -131,28 +150,30 @@ def get_transport_data(
 
     total = counts["stations"] + counts["tram_stops"] + counts["bus_stops"]
 
-    # ENHANCEMENT: annotate the nearest station name with its distance so the
-    # existing "Nearest station" row (sample.stations[0]) shows "<name> (x.x mi)".
-    if nearest["rail"] and sample["stations"]:
-        n = nearest["rail"]
-        sample["stations"][0] = f"{n['name']} ({_mi(n['dist_m'])})"
-    elif nearest["tram"] and sample["tram"]:
-        n = nearest["tram"]
-        sample["tram"][0] = f"{n['name']} ({_mi(n['dist_m'])})"
+    # NEAREST — rail/metro searched wide (independent of the card radius) so the
+    # "Nearest station" row fills wherever a station is realistically in reach.
+    nearest = {
+        "rail": _nearest(data_query, table, lng, lat, "rail", near_cap_m, safe_float),
+        "tram": _nearest(data_query, table, lng, lat, "metro", near_cap_m, safe_float),
+        "bus":  nearest_bus,
+    }
 
-    if total == 0:
+    if total == 0 and not nearest["rail"] and not nearest["tram"]:
         out = metric_ok(
             f"No NaPTAN transport stops within ~{used_radius}m of this address.",
             [], sources, retrieved, 0.0,
         )
     else:
-        bullets = [f"• Rail: {counts['stations']} station(s) within ~{used_radius}m"
-                   + (f" (nearest: {sample['stations'][0]})" if sample["stations"] else "")]
+        bullets = []
+        if nearest["rail"]:
+            miles = nearest["rail"]["dist_m"] / 1609.34
+            bullets.append(f"• Nearest rail: {nearest['rail']['name']} (~{miles:.1f} mi)")
+        bullets.append(f"• Rail stations within ~{used_radius}m: {counts['stations']}")
         if counts["tram_stops"]:
-            bullets.append(f"• Metro/tram: {counts['tram_stops']} stop(s)")
-        bullets.append(f"• Bus: {counts['bus_stops']} stop(s) within ~{used_radius}m")
+            bullets.append(f"• Metro/tram within ~{used_radius}m: {counts['tram_stops']}")
+        bullets.append(f"• Bus stops within ~{used_radius}m: {counts['bus_stops']}")
         out = metric_ok(
-            "Transport (NaPTAN within ~%dm):\n%s" % (used_radius, "\n".join(bullets)),
+            "Transport (NaPTAN):\n" + "\n".join(bullets),
             bullets, sources, retrieved, 0.95,
         )
 
@@ -161,6 +182,6 @@ def get_transport_data(
         "counts": counts,
         "sample": sample,
         "points": points,
-        "nearest": nearest,     # additive; future FE can render "Peterlee · 0.4 mi"
+        "nearest": nearest,
     }
     return out
