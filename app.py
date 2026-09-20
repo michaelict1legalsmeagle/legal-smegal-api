@@ -7595,117 +7595,68 @@ def _extract_docx_text(file_bytes: bytes) -> Tuple[str, int]:
 def extract_pdf_text(file_bytes: bytes) -> Tuple[str, int]:
     """Extract text from PDF bytes. Returns (text, page_count).
 
-    H-EXTRACT (2026-07-01): production architecture.
+    H-EXTRACT (2026-07-01; spawn fallback REMOVED 2026-09-19): Hetzner only.
 
-    PRIMARY — Hetzner extraction microservice:
-      POST http://159.69.27.104:5002/extract  (EXTRACTION_SERVICE_URL)
-      Auth: X-Extraction-Secret header (EXTRACTION_SECRET)
-      Request: multipart file upload (avoids base64 33% overhead on large PDFs)
-      Response: {"text": str, "pages": int, "method": str}
-      Timeout: 30s — text PDFs complete in <5s even at 20MB on Hetzner.
-      Memory on Render: zero child processes. Worker blocks on network I/O
-      only — no fork, no spawn, no child process memory.
+    PRIMARY - Hetzner extraction microservice (EXTRACTION_SERVICE_URL):
+      multipart upload, X-Extraction-Secret auth, 30s timeout. Text PDFs
+      complete in <5s even at 20MB; the Render worker blocks on network I/O
+      only - no child process, no in-process PDF parsing, no dyno memory spike.
 
-    FALLBACK — spawn-based local extraction (extract_worker.py):
-      Used when Hetzner is unreachable, returns non-200, or times out.
-      Spawn child only imports fitz (~25MB child RSS vs ~175MB fork child).
-      Sufficient for normal-size PDFs without OOM risk on Render Starter.
-
-    Why multipart over base64 JSON:
-      Hetzner supports both. Multipart avoids encoding the bytes twice in
-      memory (file_bytes + 33% larger base64 string) before sending.
-      For a 20MB PDF: base64 adds 6.7MB of extra in-process allocation.
-
-    H-KILL (2026-06-29): hard timeout via child process retained in the
-    fallback path — SIGTERM/SIGKILL can forcibly terminate a stuck pymupdf
-    call; a thread cannot be terminated.
+    NO LOCAL SPAWN FALLBACK. The old fitz spawn ran on the 512MB Render web dyno
+    and OOM-killed the WHOLE service - one scanned deed in a legal pack took the
+    site down for every user (the generic-exception branch fell through to spawn
+    on a dropped Hetzner connection, which is a ConnectionError, not a Timeout).
+    EVERY Hetzner failure now - timeout, dropped connection, non-200, or
+    unconfigured - returns ("", 0), and the upload handler routes the document to
+    background OCR (a threaded network call to Document AI, no local parsing).
+    Degraded extraction is acceptable; crashing the service for everyone is not.
     """
     ext_url    = (os.getenv("EXTRACTION_SERVICE_URL") or "").strip()
     ext_secret = (os.getenv("EXTRACTION_SECRET") or "").strip()
 
-    if ext_url and ext_secret:
-        try:
-            resp = requests.post(
-                ext_url,
-                headers={"X-Extraction-Secret": ext_secret},
-                files={"file": ("document.pdf", file_bytes, "application/pdf")},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                d    = resp.json()
-                text = d.get("text", "")
-                pages = d.get("pages", 0)
-                app.logger.info(
-                    f"[H-EXTRACT] Hetzner: {len(text):,} chars, "
-                    f"{pages} pages via method={d.get('method')}"
-                )
-                return text, pages
-            app.logger.warning(
-                f"[H-EXTRACT] Hetzner returned {resp.status_code}: "
-                f"{resp.text[:200]} — falling back to spawn"
-            )
-        except requests.exceptions.Timeout:
-            # H-OOM (2026-09-10): a Hetzner TIMEOUT means the PDF was slow to
-            # parse — almost always a large image-only/scanned pack needing OCR.
-            # Do NOT fall back to the local spawn (fitz on full bytes OOMs the
-            # 512MB worker on large PDFs — the crash that dropped scanned packs
-            # before any row was inserted). Return empty so the upload handler
-            # routes it to background OCR.
-            app.logger.warning(
-                "[H-EXTRACT] Hetzner timeout (30s) — routing to OCR, skipping local spawn"
-            )
-            return "", 0
-        except Exception as _e:
-            app.logger.warning(
-                f"[H-EXTRACT] Hetzner unreachable ({_e}) — falling back to spawn"
-            )
-    else:
+    if not (ext_url and ext_secret):
         app.logger.warning(
-            "[H-EXTRACT] EXTRACTION_SERVICE_URL or EXTRACTION_SECRET not set "
-            "— using spawn fallback (set both on Render environment)"
+            "[H-EXTRACT] EXTRACTION_SERVICE_URL/EXTRACTION_SECRET not set - "
+            "returning empty so upload routes to background OCR (no local spawn)."
         )
-
-    # ── Spawn fallback ───────────────────────────────────────────────────
-    # H-OOM (2026-09-10): the spawn worker runs fitz on the FULL bytes locally.
-    # On the 512MB box that OOMs the worker for large PDFs and kills the request
-    # before any document row is inserted. Cap local extraction to small PDFs;
-    # anything larger routes to background OCR by returning empty (memory-free).
-    if len(file_bytes) > _SPAWN_MAX_BYTES:
-        app.logger.warning(
-            f"[H-EXTRACT] {len(file_bytes):,}B exceeds local-spawn cap "
-            f"({_SPAWN_MAX_BYTES:,}B) — routing to background OCR (fitz OOM safety)"
-        )
-        return "", 0
-
-    from extract_worker import extract_pdf_text_worker
-
-    ctx = mp.get_context("spawn")
-    q   = ctx.Queue()
-    p   = ctx.Process(target=extract_pdf_text_worker, args=(file_bytes, q), daemon=True)
-    p.start()
-    p.join(timeout=_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS)
-
-    if p.is_alive():
-        app.logger.warning(
-            f"[H-EXTRACT] Spawn TIMEOUT after {_EXTRACT_PDF_TEXT_TIMEOUT_SECONDS}s "
-            f"— terminating extraction process."
-        )
-        p.terminate()
-        p.join(timeout=5)
-        if p.is_alive():
-            p.kill()
-            p.join(timeout=5)
         return "", 0
 
     try:
-        return q.get_nowait()
-    except Exception:
+        resp = requests.post(
+            ext_url,
+            headers={"X-Extraction-Secret": ext_secret},
+            files={"file": ("document.pdf", file_bytes, "application/pdf")},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            d     = resp.json()
+            text  = d.get("text", "")
+            pages = d.get("pages", 0)
+            app.logger.info(
+                f"[H-EXTRACT] Hetzner: {len(text):,} chars, "
+                f"{pages} pages via method={d.get('method')}"
+            )
+            return text, pages
         app.logger.warning(
-            "[H-EXTRACT] Spawn exited without a result "
-            "(likely a native crash in fitz) — returning empty text."
+            f"[H-EXTRACT] Hetzner returned {resp.status_code}: "
+            f"{resp.text[:200]} - routing to background OCR (no local spawn)."
         )
         return "", 0
-
+    except requests.exceptions.Timeout:
+        app.logger.warning(
+            "[H-EXTRACT] Hetzner timeout (30s) - routing to background OCR "
+            "(scanned/large PDF; no local spawn)."
+        )
+        return "", 0
+    except Exception as _e:
+        # ANY other failure (ConnectionError/'Connection aborted', DNS, etc.) -
+        # this is the branch that used to fall through to the OOM spawn. It must
+        # also return empty and route to OCR. Never parse the PDF on the dyno.
+        app.logger.warning(
+            f"[H-EXTRACT] Hetzner unreachable ({_e}) - routing to background OCR "
+            "(no local spawn)."
+        )
+        return "", 0
 
 _EXTRACT_PDF_TEXT_TIMEOUT_SECONDS = 100
 # H-OOM (2026-09-10): max PDF size the LOCAL spawn worker (fitz) may process on
