@@ -302,7 +302,7 @@ _SEGMENT_CAPS: dict[str, float] = {
 #   "empirically_credible"  — Z at/near 1.0 against the outcome dataset.
 # source_type values mirror the _SEGMENT_RULES doctrine:
 #   "observed_distribution" | "structured_elicitation" | "external_source"
-#   | "backtested"
+#   | "backtested" | "unsourced_expert_judgement" (hand-set, no recorded source)
 # review_trigger: the explicit condition on which this value MUST be
 #   re-examined — no silent permanence.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -395,6 +395,27 @@ CALIBRATION_METADATA: dict[str, dict] = {
             ">=50 deals have recorded outcomes in deal_outcomes."
         ),
     },
+    "segment_route_fractions": {
+        "values": {"table": "_SEGMENT_RULES", "rule_count": None},  # count set after the table is defined
+        "calibration_status": "expert_prior",
+        "source_type": "unsourced_expert_judgement",
+        "basis": (
+            "V-SSOT A1 (2026-09-23): the per-defect fractions in _SEGMENT_RULES "
+            "(e.g. missing search: direct_cure_cost 0.008 + delay_finance_drag "
+            "0.012) are hand-set. No per-rule citation exists in the code or in "
+            "the recorded session history. S37 (2026-07-03) split the covenant / "
+            "title-guarantee / completion rules on real flag vocabulary "
+            "(58/660 flags) but left the fractions themselves unchanged. NOT "
+            "derived from completed-transaction outcomes."
+        ),
+        "sample_size_at_calibration": 0,
+        "calibrated_at": None,
+        "review_trigger": (
+            "Recalibrate via credibility_blend once >=50 deals have recorded "
+            "auction outcomes in deal_outcomes; any fraction changed before then "
+            "must record its source here."
+        ),
+    },
     "global_backstop": {
         "values": {"max_total_value_risk_adj": MAX_TOTAL_VALUE_RISK_ADJ},
         "calibration_status": "expert_prior",
@@ -415,6 +436,11 @@ CALIBRATION_METADATA: dict[str, dict] = {
 }
 
 
+RISK_CALIBRATION_KEYS = (
+    "segment_route_fractions", "segment_caps", "marginal_decay_rate", "global_backstop",
+)
+
+
 def get_calibration_disclosure() -> dict:
     """
     Machine-readable calibration disclosure for downstream surfaces (Verdict /
@@ -430,14 +456,18 @@ def get_calibration_disclosure() -> dict:
     a bare module-level dict, and a pre-built summary line so surfacing it
     costs the frontend one field read.
     """
-    statuses = {k: v["calibration_status"] for k, v in CALIBRATION_METADATA.items()}
+    # V-SSOT A2 (2026-09-23): computed over RISK-ADJUSTMENT parameters only.
+    # "size_adjustment_and_aggregation" is validated against sold prices (comps
+    # valuation), not against auction outcomes, and previously flipped this
+    # summary to "partially outcome-validated" with zero outcomes recorded.
+    statuses = {k: v["calibration_status"] for k, v in CALIBRATION_METADATA.items()
+                if k in RISK_CALIBRATION_KEYS}
     all_expert_prior = all(s == "expert_prior" for s in statuses.values())
     if all_expert_prior:
         summary = (
-            "Risk-adjustment calibration is currently expert-prior: grounded "
-            "in the observed distribution of 32 real analysed deals, not yet "
-            "validated against completed auction outcomes. Calibration "
-            "shifts automatically toward real outcomes as they are recorded."
+            "Risk adjustment is expert judgement, not yet validated against "
+            "any completed auction outcome. Per-defect percentages are hand-set; "
+            "caps and combination rules are shaped on 32 analysed deals."
         )
     else:
         summary = (
@@ -446,6 +476,7 @@ def get_calibration_disclosure() -> dict:
         )
     return {
         "summary": summary,
+        "status": "expert_prior" if all_expert_prior else "partially_credible",
         "parameters": CALIBRATION_METADATA,
         "methodology": "buhlmann_straub_credibility_pending_outcomes",
     }
@@ -861,6 +892,7 @@ _SEGMENT_RULES: list[tuple[list[str], dict]] = [
      {"delay_finance_drag": 0.010, "lender_certifiability_risk": 0.020,
       "residual_marketability_risk": 0.025}),
 ]
+CALIBRATION_METADATA["segment_route_fractions"]["values"]["rule_count"] = len(_SEGMENT_RULES)
 
 # Severity zero-gate: "note" flags carry no market consequence.
 # Severity does NOT scale matched route fractions — route type is the pricing truth.
