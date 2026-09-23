@@ -5394,6 +5394,32 @@ def _density_tier_radius(pc: str) -> Optional[float]:
     return None
 
 
+def _resolve_subject_tenure(subject_tenure_hint, pcd_nospace):
+    """V-SSOT B3 (2026-09-23): subject tenure resolved BEFORE the comps query so
+    the query can filter on it before the LIMIT. Tiers unchanged from the
+    previous in-function block: legal-pack hint first, then the postcode
+    majority-vote proxy, else None. Returns (tenure, warning_or_None)."""
+    if subject_tenure_hint:
+        _h = str(subject_tenure_hint).strip().upper()
+        if _h in ("F", "FH", "FREEHOLD"):
+            return "F", None
+        if _h in ("L", "LH", "LEASEHOLD"):
+            return "L", None
+    try:
+        _tr = data_query(
+            """SELECT duration, COUNT(*) AS cnt
+               FROM public.price_paid_raw_2025
+               WHERE postcode_nospace = %s AND duration IN ('F','L')
+               GROUP BY duration ORDER BY cnt DESC LIMIT 1""",
+            (pcd_nospace,)
+        )
+        if _tr:
+            return (str(_tr[0].get("duration") or "").upper() or None), None
+    except Exception as _e:
+        return None, f"subject_tenure_lookup_failed: {_e}"
+    return None, None
+
+
 def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit: Optional[int] = None, property_type: Optional[str] = None, guide_price: Optional[float] = None, subject_tenure_hint: Optional[str] = None, subject_address: Optional[str] = None, subject_internal_area: Optional[float] = None) -> Dict[str, Any]:
     retrieved = now_iso()
     pc = normalize_postcode(postcode)
@@ -5491,6 +5517,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
                 ST_MakePoint(n.lng, n.lat)::geography,
                 %s
               )
+          AND (%s::text IS NULL OR p.duration = %s::text)
         ORDER BY
             (%s::text IS NOT NULL AND UPPER(p.property_type) = UPPER(%s::text)) DESC,
             p.date_of_transfer DESC,
@@ -5498,6 +5525,9 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         LIMIT %s;
     """
     _hetzner_pcd_nospace = re.sub(r"\s+", "", pc.upper())
+    # V-SSOT B3: tenure is known before the query, so the 100-row LIMIT applies
+    # to same-tenure sales only (was: 100 most recent of ANY tenure, filtered after).
+    _pre_tenure, _pre_tenure_warning = _resolve_subject_tenure(subject_tenure_hint, _hetzner_pcd_nospace)
 
     try:
         # H1-RELIABILITY: retry-with-verification, carried over unchanged in
@@ -5520,7 +5550,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             _rpc_attempts += 1
             rows = data_query(
                 _HETZNER_COMPS_SQL,
-                (_hetzner_pcd_nospace, _radius_m, _pt_param, _pt_param, lim),
+                (_hetzner_pcd_nospace, _radius_m, _pre_tenure, _pre_tenure, _pt_param, _pt_param, lim),
             )
             if not isinstance(rows, list):
                 rows = []
@@ -5553,7 +5583,7 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             # radius before accepting "no comps for this postcode" as true.
             _verify_rows = data_query(
                 _HETZNER_COMPS_SQL,
-                (_hetzner_pcd_nospace, min(r_miles * 1.5, 10.0) * 1609.344, _pt_param, _pt_param, 50),
+                (_hetzner_pcd_nospace, min(r_miles * 1.5, 10.0) * 1609.344, _pre_tenure, _pre_tenure, _pt_param, _pt_param, 50),
             )
             # H1-DATEFIX: same date_of_transfer serialisation fix as the
             # main query loop above — this path also hits raw Hetzner rows.
@@ -5874,33 +5904,10 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         # price_paid_raw_2025 has no rows for the subject postcode. This
         # block consults the hint first so the proxy is consulted only when
         # the legal pack provided no admissible value.
-        _subject_tenure = None
-        if subject_tenure_hint:
-            _h = str(subject_tenure_hint).strip().upper()
-            if _h in ("F", "FH", "FREEHOLD"):
-                _subject_tenure = "F"
-            elif _h in ("L", "LH", "LEASEHOLD"):
-                _subject_tenure = "L"
-            # Other values ("Unknown", "Mixed", "Commonhold", etc.) fall
-            # through to tier 3 — conservative posture, since the Step-4
-            # filter expects F/L only.
-        if _subject_tenure is None:
-            # Tier 3: postcode majority-vote proxy (preserved verbatim)
-            # PERF-FIX (2026-07-03): was WHERE postcode = %s (unindexed, full
-            # 7.6M-row scan). Changed to postcode_nospace which has
-            # idx_pp2025_postcode_nospace — drops from ~12s to <1ms.
-            try:
-                _tr = data_query(
-                    """SELECT duration, COUNT(*) AS cnt
-                       FROM public.price_paid_raw_2025
-                       WHERE postcode_nospace = %s AND duration IN ('F','L')
-                       GROUP BY duration ORDER BY cnt DESC LIMIT 1""",
-                    (_hetzner_pcd_nospace,)
-                )
-                if _tr:
-                    _subject_tenure = str(_tr[0].get("duration") or "").upper() or None
-            except Exception as _e:
-                _audit["warnings"].append(f"subject_tenure_lookup_failed: {_e}")
+        # V-SSOT B3: resolved before the comps query (_resolve_subject_tenure, same tiers).
+        _subject_tenure = _pre_tenure
+        if _pre_tenure_warning:
+            _audit["warnings"].append(_pre_tenure_warning)
         # Tier 4: _subject_tenure remains None → the existing Step-4 guard
         # emits the canonical "subject_tenure_unknown: tenure filter skipped"
         # warning and the tenure-match similarity component at Step 8 stays
@@ -6198,36 +6205,43 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
             )
 
         # ── STEP 4: NEW BUILD ROUTING ────────────────────────────────────────
-        if _subject_old_new == "N":
-            _nb_only = [r for r in rows if str(r.get("old_new") or "").upper() == "N"]
+        # V-SSOT B1 (2026-09-23): HM Land Registry Price Paid Data encodes
+        # old_new as  Y = newly built,  N = established residential building.
+        # This step previously treated "N" as new-build (error introduced by a
+        # 7 May 2026 handover note), so labels were inverted and — for an unknown
+        # subject — it kept ONLY new builds whenever >=5 existed. Corrected here.
+        # Unknown subject status → no filter (no assumption made either way).
+        _audit["subject_new_build_source"] = (
+            "latest_sale_same_postcode" if _subject_old_new else "unresolved"
+        )
+        if _subject_old_new == "Y":
+            _nb_only = [r for r in rows if str(r.get("old_new") or "").upper() == "Y"]
             if len(_nb_only) >= 5:
                 rows = _nb_only
                 _audit["filters_applied"].append(f"new_build_preferred:{len(rows)}_nb_comps")
             else:
                 _audit["filters_skipped"].append(f"new_build_preferred:only_{len(_nb_only)}_nb_comps")
                 _audit["warnings"].append(f"New-build subject: only {len(_nb_only)} new-build comps available, using mixed stock (ceiling may be understated)")
-        elif _subject_old_new == "Y":
-            _established = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
+        elif _subject_old_new == "N":
+            _established = [r for r in rows if str(r.get("old_new") or "").upper() == "N"]
             if len(_established) >= 5:
                 rows = _established
                 _audit["filters_applied"].append(f"new_build_excluded:{len(rows)}_established_comps")
             else:
                 _audit["filters_skipped"].append("new_build_excluded:insufficient_established")
         else:
-            # Unknown: soft exclude new builds if majority are established
-            _established = [r for r in rows if str(r.get("old_new") or "").upper() != "N"]
-            if len(_established) >= 5:
-                rows = _established
+            _audit["filters_skipped"].append("new_build:subject_status_unknown_no_filter")
 
         # ── STEP 5: TENURE FILTER ────────────────────────────────────────────
         if _subject_tenure in ("F", "L"):
             _tenure_matched = [r for r in rows if str(r.get("duration") or "").upper() == _subject_tenure]
-            if len(_tenure_matched) >= 5:
-                rows = _tenure_matched
-                _audit["filters_applied"].append(f"tenure={'Freehold' if _subject_tenure=='F' else 'Leasehold'}:{len(rows)}_comps")
-            else:
-                _audit["filters_skipped"].append(f"tenure:only_{len(_tenure_matched)}_matched")
-                _audit["warnings"].append(f"Tenure contamination: cross-tenure comps included ({len(_tenure_matched)} same-tenure comps insufficient)")
+            # V-SSOT B2 (2026-09-23): ONE tenure rule, matching the ceiling engine
+            # (which rejects any tenure mismatch). The old "<5 matches → keep all
+            # tenures" fallback (7 May spec) fed comps the engine then rejected.
+            rows = _tenure_matched
+            _audit["filters_applied"].append(f"tenure={'Freehold' if _subject_tenure=='F' else 'Leasehold'}:{len(rows)}_comps")
+            if len(_tenure_matched) < 5:
+                _audit["warnings"].append(f"Only {len(_tenure_matched)} same-tenure comps — no cross-tenure comps used")
         else:
             _audit["warnings"].append("subject_tenure_unknown: tenure filter skipped")
 
@@ -10198,7 +10212,14 @@ def ceiling_endpoint():
 
         legal_flags      = body.get("legal_flags", [])
         financial_inputs = body.get("financial_inputs", {})
-        base_val         = body.get("base_valuation")
+        # V-SSOT A4 (2026-09-23): a caller-supplied base_valuation is NOT accepted.
+        # Verdict used to post the deal GUIDE PRICE here when no ceiling existed;
+        # the engine then returned it as the "comparable valuation"
+        # (base_method=external_override). The valuation base comes only from
+        # sold comparables. Any base_valuation in the body is ignored and logged.
+        if body.get("base_valuation") is not None:
+            app.logger.warning("[ceiling] base_valuation in request body ignored (V-SSOT A4)")
+        base_val         = None
         strategy         = body.get("strategy", "BTL")
         deal_id          = body.get("deal_id")
 
@@ -10418,103 +10439,22 @@ def ceiling_endpoint():
                     )
 
                 else:
-                    # Live recompute failed or no comps — fall back to persisted legacy ceiling.
-                    _legacy_ceil  = (_sj.get("ceiling") or {}) if isinstance(_sj, dict) else {}
-                    _legacy_base  = None
-                    _legacy_lo    = None
-                    _legacy_hi    = None
-                    try:
-                        _lb_raw = _legacy_ceil.get("base_valuation")
-                        if _lb_raw and float(_lb_raw) > 5000:
-                            _legacy_base = float(_lb_raw)
-                        _lcr    = (_legacy_ceil.get("ceiling_range") or
-                                   _legacy_ceil.get("valuation_range") or {})
-                        _lo_raw = _lcr.get("low")
-                        _hi_raw = _lcr.get("high")
-                        if _lo_raw and float(_lo_raw) > 5000:
-                            _legacy_lo = float(_lo_raw)
-                        if _hi_raw and float(_hi_raw) > 5000:
-                            _legacy_hi = float(_hi_raw)
-                    except (TypeError, ValueError):
-                        pass
-
-                    if _legacy_base and _legacy_base > 5000:
-                        _ub    = 0.05
-                        _v_mid = _legacy_base
-                        _v_lo  = _legacy_lo if _legacy_lo else round(_legacy_base * (1 - _ub), 2)
-                        _v_hi  = _legacy_hi if _legacy_hi else round(_legacy_base * (1 + _ub), 2)
-                        _src   = ("legacy_fallback_comp_recompute_failed"
-                                  if _live_comps else "legacy_fallback_no_comps")
-                        # Collect exclusion reasons for the audit trail
-                        _excl_reasons: dict = {}
-                        if _live_verdict:
-                            for _ex in ((_live_verdict.get("comparables") or {}).get("excluded") or []):
-                                _r = (_ex or {}).get("reason", "unknown")
-                                _excl_reasons[_r] = _excl_reasons.get(_r, 0) + 1
-                        verdict_result = {
-                            "_ceiling_type":  "verdict",
-                            "_legacy_source": True,
-                            "status":         "ok",
-                            "base": {
-                                "value":  _legacy_base,
-                                "method": _legacy_ceil.get("base_method", "legacy_ceiling"),
-                            },
-                            "base_valuation":  int(round(_legacy_base)),
-                            "base_method":     _legacy_ceil.get("base_method", "legacy_ceiling"),
-                            "valuation_range": {
-                                "low":              round(_v_lo, 2),
-                                "midpoint":         round(_v_mid, 2),
-                                "high":             round(_v_hi, 2),
-                                "uncertainty_band": _ub,
-                            },
-                            "ceiling_range": {
-                                "low":  int(round(_v_lo)),
-                                "high": int(round(_v_hi)),
-                            },
-                            "confidence": (_legacy_ceil.get("confidence") or
-                                           {"final": 0.45, "label": "Low confidence"}),
-                            "legal_pack_value_risks": {
-                                "method":            "property_value_risk_adjustment_only",
-                                "adjustment_factor": 1.0,
-                                "adjusted_value":    None,
-                                "risks":             [],
-                            },
-                            "audit": {
-                                "source_decision":          _src,
-                                "sold_comps_count":         len(_live_comps),
-                                "excluded_reasons_summary": _excl_reasons,
-                                "fallback_used":            True,
-                                "warnings": [
-                                    f"verdict built from legacy ceiling ({_src}). "
-                                    + (f"Comps excluded: {_excl_reasons}. "
-                                       if _excl_reasons else "")
-                                    + "Re-fetch area to recompute."
-                                ],
-                                "version":     VERSION if "VERSION" in dir() else "ceiling_relational_paper_valuation_v1",
-                                "assumptions": ["base from legacy summary_json.ceiling"],
-                            },
-                            "acquisition_costs":    None,
-                            "excluded_from_ceiling": [],
-                        }
-                        app.logger.info(
-                            f"[ceiling] deal={deal_id} {_src} "
-                            f"mid={_v_mid} excl={_excl_reasons}"
-                        )
-                    else:
-                        # No legacy base and comps insufficient — run engine anyway;
-                        # surfaces insufficient_evidence state correctly to the UI.
-                        verdict_result = _calc_verdict_ceiling(
-                            sold_comps=_live_comps,
-                            subject=_wb_subject if deal_id else {},
-                            base_valuation=float(base_val) if base_val else None,
-                            strategy=str(strategy),
-                            fallback_allowed=True,
-                        )
-                        _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
-                        app.logger.warning(
-                            f"[ceiling] deal={deal_id} no legacy base — "
-                            f"status={verdict_result.get('status')}"
-                        )
+                    # V-SSOT A5 (2026-09-23): the legacy-ceiling fallback that built a
+                    # status "ok" verdict from an old summary_json.ceiling base with an
+                    # invented ±5% band and a fixed 0.45 confidence is removed. No
+                    # comparable evidence → the engine's own ruling (insufficient_evidence).
+                    verdict_result = _calc_verdict_ceiling(
+                        sold_comps=_live_comps,
+                        subject=_wb_subject if deal_id else {},
+                        base_valuation=None,   # V-SSOT A4: never a caller-supplied base
+                        strategy=str(strategy),
+                        fallback_allowed=True,
+                    )
+                    _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)
+                    app.logger.warning(
+                        f"[ceiling] deal={deal_id} no comparable-derived verdict — "
+                        f"status={verdict_result.get('status')}"
+                    )
 
             # Workbench ceiling = verdict × active flag risk product
             result = _calc_workbench_ceiling(
@@ -10532,13 +10472,13 @@ def ceiling_endpoint():
             verdict_result = _calc_ceiling(
                 legal_flags=[],
                 financial_inputs=financial_inputs,
-                base_valuation=float(base_val) if base_val else None,
+                base_valuation=None,   # V-SSOT A4
                 strategy=str(strategy),
             )
             result = _calc_ceiling(
                 legal_flags=legal_flags,
                 financial_inputs=financial_inputs,
-                base_valuation=float(base_val) if base_val else None,
+                base_valuation=None,   # V-SSOT A4
                 strategy=str(strategy),
             )
             _apply_audit_confidence_cap(verdict_result, _area_data_for_cap)

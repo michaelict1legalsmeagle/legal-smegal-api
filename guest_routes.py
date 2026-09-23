@@ -302,7 +302,9 @@ def _extract_text(file_bytes: bytes, filename: str) -> tuple[str, int]:
             if ocr_text.strip():
                 # H-NOFITZ parity: a failed Hetzner pass returns pages=0, so take
                 # the real count from Document AI's one-per-page markers.
-                return ocr_text, len(re.findall(r"=== PAGE \S+ ===", ocr_text))
+                # Marker count when Document AI supplied markers; otherwise keep
+                # whatever the extraction service reported (never overwrite with 0).
+                return ocr_text, (len(re.findall(r"=== PAGE \S+ ===", ocr_text)) or pages)
             break  # OCR succeeded but returned nothing — not a transient failure, don't retry
         except Exception as e:
             if attempt < _OCR_MAX_ATTEMPTS:
