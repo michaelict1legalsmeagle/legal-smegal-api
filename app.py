@@ -7519,53 +7519,17 @@ def ai_explain():
 
 
 # ── PDF TEXT EXTRACTION ─────────────────────────────────────
-DOCUMENT_PATTERNS: Dict[str, List[str]] = {
-    # NOTE: detect_document_type returns the FIRST matching type in this order. SPECIFIC
-    # types must come before broad catch-alls. 'legal_pack' fires on the phrase "legal pack",
-    # which special-conditions / addendum / title documents routinely reference — so it MUST
-    # be checked LAST, or it swallows those specific types (this is what mis-tagged the
-    # Woodlands special conditions as 'legal_pack' and made them read as "not present").
-    "special_conditions":  ["special conditions", "special condition of sale", "conditions of sale"],
-    "addendum":            ["addendum", "day of sale", "lot amendment", "amendment notice",
-                            "late amendment", "revised conditions", "updated conditions",
-                            "pre auction notice", "vendor notice"],
-    "title_register":      ["title register", "hm land registry", "official copy of register",
-                            "land registry", "register of title", "property register",
-                            "proprietorship register", "charges register", "official copy"],
-    "title_plan":          ["title plan", "filed plan", "ordnance survey map",
-                            "administrative area", "title number"],
-    "local_auth_search":   ["local authority search", "con29", "llc1", "local land charges",
-                            "city council", "district council", "borough council",
-                            "regulated local authority", "enquiries of the local authority"],
-    "environmental":       ["groundsure", "homebuyer environmental", "environmental search",
-                            "flood risk", "ground risk", "chancel",
-                            "drainage search", "severn trent", "thames water",
-                            "anglian water", "water search", "regulated drainage",
-                            "combined drainage", "utilities search"],
-    "lease":               ["lease", "underlease", "sublease", "leasehold land",
-                            "lease dated", "term of years"],
-    "epc":                 ["energy performance", "epc", "energy certificate",
-                            "domestic energy", "energy rating"],
-    "survey":              ["structural survey", "building survey", "rics survey",
-                            "condition report", "level 2", "level 3", "homebuyer report"],
-    "auction_tcs":         ["auction terms", "auctioneer terms", "conditions of auction"],
-    "deed":                ["transfer deed", "conveyance", "tr1", "deed of",
-                            "ta6", "ta10", "seller property", "fittings and contents",
-                            "property information form"],
-    "tenancy_ast":         ["assured shorthold", "tenancy agreement", "rental agreement"],
-    "freehold":            ["freehold", "absolute freehold", "possessory freehold"],
-    # broad catch-all — MUST stay last
-    "legal_pack":          ["legal pack", "auction pack", "lot information", "information pack",
-                            "document archive", "pack archive"],
-}
+# D-CLASSIFIER (2026-09-23): document typing moved to doc_classifier.py (pure,
+# unit-tested, filename -> heading -> body, word-bounded). The old single-pass
+# first-substring DOCUMENT_PATTERNS typed searches/probate/TA6/title plans as
+# 'title_register'; under /summarise's 40k cap those crowded the EPC out of the
+# prompt and the report said "No EPC in Pack" with an EPC in the pack
+# (live: deal 3ca6f024…, Lot 12). Signature unchanged for all three call sites.
+from doc_classifier import classify_document as _classify_document
+
 
 def detect_document_type(filename: str, text: str) -> str:
-    combined = (filename + " " + (text or "")[:3000]).lower()
-    combined = re.sub(r"[_\-.]", " ", combined)
-    for doc_type, patterns in DOCUMENT_PATTERNS.items():
-        if any(p in combined for p in patterns):
-            return doc_type
-    return "unknown"
+    return _classify_document(filename, text)
 
 
 def _extract_docx_text(file_bytes: bytes) -> Tuple[str, int]:
