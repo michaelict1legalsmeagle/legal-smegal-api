@@ -8577,14 +8577,11 @@ def upload_document():
             return
 
         try:
-            _page_count = 0
-            try:
-                import fitz  # pymupdf — just for an accurate page count
-                _doc = fitz.open(stream=_file_bytes, filetype="pdf")
-                _page_count = len(_doc)
-                _doc.close()
-            except Exception:
-                pass
+            # H-NOFITZ (2026-09-23): page count from Document AI's own
+            # "=== PAGE N ===" markers (one per page, empty pages included — see
+            # docai_ocr._page_text_from_shard). Replaces a local fitz.open() of the
+            # scanned PDF on the 512MB web dyno — the exact workload that OOMs it.
+            _page_count = len(re.findall(r"=== PAGE \S+ ===", ocr_text or ""))
             _status = "complete" if ocr_text.strip() else "empty"
             _doc_type = detect_document_type(_filename, ocr_text) if ocr_text.strip() else None
             _update = {
@@ -12837,28 +12834,18 @@ def guest_upload_document():
         if not fname:
             fname = "document.pdf"
 
-        # Extract text using existing helpers
-        extracted_text = ""
+        # H-NOFITZ (2026-09-23): this no-auth legacy route parsed the PDF IN
+        # PROCESS (pdfplumber + fitz) on the 512MB web dyno — any caller able to
+        # create a guest deal could OOM the whole service with a large scan.
+        # Extraction now goes through extract_pdf_text (Hetzner only, never local).
+        # Same contract: empty text -> extraction_status "failed", as before.
+        extracted_text, page_count = "", 0
         try:
-            import pdfplumber as _pdp
-            with _pdp.open(_io.BytesIO(file_bytes)) as pdf:
-                pages = []
-                for pg in pdf.pages[:120]:
-                    t = (pg.extract_text() or "").strip()
-                    if t:
-                        pages.append(t)
-                extracted_text = "\n\n".join(pages)[:500_000]
+            extracted_text, page_count = extract_pdf_text(file_bytes)
+            extracted_text = (extracted_text or "")[:500_000]
         except Exception as ex:
-            app.logger.warning(f"[guest-upload] pdfplumber failed: {ex}")
-
-        page_count = 0
-        try:
-            import fitz as _fitz
-            doc = _fitz.open(stream=file_bytes, filetype="pdf")
-            page_count = doc.page_count
-            doc.close()
-        except Exception:
-            pass
+            app.logger.warning(f"[guest-upload] extraction failed: {ex}")
+            extracted_text, page_count = "", 0
 
         # Store in Supabase storage
         storage_path = f"guest/{deal_id}/{fname}"
@@ -12880,7 +12867,7 @@ def guest_upload_document():
             "page_count":     page_count or None,
             "storage_path":   storage_path,
             "extracted_text": extracted_text,
-            "doc_type":       "unknown",
+            "doc_type":       detect_document_type(fname, extracted_text),
             "extraction_status": "done" if extracted_text else "failed",
         }).execute()
 

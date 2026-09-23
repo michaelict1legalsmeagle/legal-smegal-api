@@ -300,7 +300,9 @@ def _extract_text(file_bytes: bytes, filename: str) -> tuple[str, int]:
             )
             ocr_text = _docai_ocr.extract_text_via_docai(file_bytes)
             if ocr_text.strip():
-                return ocr_text, pages
+                # H-NOFITZ parity: a failed Hetzner pass returns pages=0, so take
+                # the real count from Document AI's one-per-page markers.
+                return ocr_text, len(re.findall(r"=== PAGE \S+ ===", ocr_text))
             break  # OCR succeeded but returned nothing — not a transient failure, don't retry
         except Exception as e:
             if attempt < _OCR_MAX_ATTEMPTS:
@@ -318,18 +320,13 @@ def _extract_text(file_bytes: bytes, filename: str) -> tuple[str, int]:
 
 
 def _infer_doc_type(filename: str, text: str) -> str:
-    fn = filename.lower(); tx = text.lower()
-    if "special" in fn or "special conditions" in tx[:500]: return "special_conditions"
-    if "title" in fn and "plan" in fn:   return "title_plan"
-    if "title" in fn or "register" in fn: return "title_register"
-    if "lease" in fn or "leasehold" in tx[:300]: return "lease"
-    if "search" in fn and "local" in fn: return "local_auth_search"
-    if "environmental" in fn:            return "environmental"
-    if "epc" in fn or "energy performance" in tx[:300]: return "epc"
-    if "tenancy" in fn or "ast" in fn:   return "tenancy_ast"
-    if "auction" in fn and ("tc" in fn or "condition" in fn): return "auction_tcs"
-    if "addendum" in fn or "amendment" in fn: return "addendum"
-    return "unknown"
+    # D-CLASSIFIER (2026-09-23): one classifier for both products. The old
+    # filename-only substring rules here typed a local search named
+    # "Lot_12_07176229.pdf" as unknown and matched "ast"/"tc" inside words
+    # ("Eastleigh", "contract"). doc_classifier is pure (no app import), so no
+    # circular-import risk at module load.
+    from doc_classifier import classify_document
+    return classify_document(filename or "", text or "")
 
 # ── Report token ─────────────────────────────────────────────────────────────
 def _sign_report_token(session_id: str) -> str:
