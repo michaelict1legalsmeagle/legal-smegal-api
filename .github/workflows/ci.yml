@@ -24,7 +24,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          # Matches production (.python-version = 3.13.4 on Render). Tests must run
+          # on the interpreter that serves users, not an older one.
+          python-version: '3.13'
           cache: 'pip'
 
       - name: Install dependencies
