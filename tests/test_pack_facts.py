@@ -21,7 +21,8 @@ EPC_24SEP = ("\n\n=== PAGE 1 ===\n\nEnergy performance certificate (EPC)\n2c, Ta
 STATEMENT = ("\n\n=== PAGE 1 ===\n\nInvoice No:\n68210\nInvoice Date:\nMarch 17, 2026\nVAT Reg. No:\nOur Ref:\n"
              "Your Ref:\n990 6841 80\n2091\nRE: 2C TALBOT ROAD NORTH, WELLINGBOROUGH\nRents received for the Period:\n"
              "15/03/2026-14/04/2026\n£850.00\nCommission on Collection\nVAT\n£60.00\n£12.00\nInland Revenue Annual Return\n")
-REGISTER = "A: Property Register\n1 (01.07.2021) The Freehold land shown edged with red on the plan of the above title filed"
+REGISTER = ("A: Property Register\n1 (01.07.2021) The Freehold land shown edged with red on the plan of the above title filed"
+            " at the Registry and being 2c Talbot Road North, Wellingborough (NN8 1SF).")
 
 
 def test_epc_both_text_orders_give_the_same_facts():
@@ -66,8 +67,8 @@ def test_resolver_end_to_end():
 
 
 def test_conflicting_register_tenures_are_not_resolved():
-    docs = [{"file_name": "a", "doc_type": "title_register", "extracted_text": "The Freehold land", "extraction_status": "complete"},
-            {"file_name": "b", "doc_type": "title_register", "extracted_text": "The Leasehold land", "extraction_status": "complete"}]
+    docs = [{"file_name": "a", "doc_type": "title_register", "extracted_text": "The Freehold land being 2c Talbot Road North", "extraction_status": "complete"},
+            {"file_name": "b", "doc_type": "title_register", "extracted_text": "The Leasehold land being 2c Talbot Road North", "extraction_status": "complete"}]
     f = resolve_pack_facts(docs, ADDR, PC)
     assert f["tenure"] is None and f["tenure_ambiguous"]["values"] == ["Freehold", "Leasehold"]
 
@@ -78,3 +79,37 @@ def test_scottish_and_energy_report_area_formats():
     r = read_epc(sc, "AB11 8EN", "8 Brimmond Place, Aberdeen")
     assert r["floor_area_m2"] == 85.0 and r["type_code"] == "S"
     assert read_epc("Energy performance certificate\nAB11 8EN 8 Brimmond\n301 kWh/m2/year", "AB11 8EN", "8 Brimmond Place")["floor_area_m2"] is None
+
+
+def test_building_freehold_register_never_overrides_a_flat():   # live: 95b Woodside; Flat B, 18 Grosvenor Ave
+    docs = [{"file_name": "Official_Copy_Register.pdf", "doc_type": "title_register",
+             "extracted_text": "The Freehold land shown edged with red ... being 18 Grosvenor Avenue", "extraction_status": "complete"}]
+    f = resolve_pack_facts(docs, "Flat B, 18 Grosvenor Avenue, Highbury", "N5 2NP")
+    assert f["tenure"] is None and "building" in f["tenure_ambiguous"]["reason"]
+    f2 = resolve_pack_facts(docs, "95b Woodside, London", "SW19 7BA", subject_is_flat=True)
+    assert f2["tenure"] is None
+
+
+def test_register_for_another_property_is_ignored():
+    docs = [{"file_name": "r.pdf", "doc_type": "title_register",
+             "extracted_text": "The Freehold land ... being 14 Talbot Road North", "extraction_status": "complete"}]
+    assert resolve_pack_facts(docs, ADDR, PC)["tenure"] is None
+
+
+def test_hmlr_stamp_only_text_routes_to_ocr():    # live: Lot 34 Transfer, 19 pages, 1,991 chars, all stamps
+    from pack_facts import text_layer_is_unusable
+    stamp = ("\n\n=== PAGE 1 ===\n\nThese are the notes referred to on the following official copy\nTitle Number NN359419\n"
+             "The electronic official copy of the document follows this\nmessage.\nThis copy may not be the same size as the\n"
+             "original.\nPlease note that this is the only official copy we will issue. We will not issue\na paper official copy.\n"
+             + "".join(f"\n\n=== PAGE {i} ===\n\n This official copy is incomplete without the preceding notes page.\n" for i in range(2, 20)))
+    assert text_layer_is_unusable(stamp, 19) is True
+    assert text_layer_is_unusable("", 3) is True
+    assert text_layer_is_unusable(EPC_24SEP, 1) is False
+    assert text_layer_is_unusable(STATEMENT, 1) is False
+
+
+def test_font_garbled_text_routes_to_ocr():
+    from pack_facts import text_layer_is_unusable
+    garbled = "\x02\x05\x11\x13\x1a" * 60 + " EPC "
+    assert text_layer_is_unusable(garbled, 1) is True
+    assert text_layer_is_unusable("Freehold land £850.00 – “quoted” • ok " * 10, 1) is False
