@@ -182,8 +182,12 @@ def _iso(dmy: str) -> Optional[str]:
 
 
 # ── Resolver ────────────────────────────────────────────────────────────────
+def _is_flat_address(address: Optional[str]) -> bool:
+    return bool(re.search(r"\b(flat|apartment|maisonette)\b", address or "", re.I))
+
+
 def resolve_pack_facts(docs: List[Dict[str, Any]], subject_address: Optional[str],
-                       subject_postcode: Optional[str]) -> Dict[str, Any]:
+                       subject_postcode: Optional[str], subject_is_flat: bool = False) -> Dict[str, Any]:
     """docs: [{file_name, doc_type, extracted_text, extraction_status}]"""
     out: Dict[str, Any] = {"epc": None, "tenure": None, "rent": None, "unread_documents": []}
 
@@ -208,16 +212,33 @@ def resolve_pack_facts(docs: List[Dict[str, Any]], subject_address: Optional[str
             out["epc_conflict"] = [{"file": e["source_file"], "type": e["property_type_label"],
                                     "area": e["floor_area_m2"]} for e in epcs]
 
-    # Tenure — title registers only; freehold AND leasehold registers together → ambiguous
+    # Tenure — title registers only, and only registers that NAME the subject
+    # (house number). Freehold AND leasehold registers together → ambiguous.
+    # AUDIT 2026-09-24 (live): 2 leasehold-flat deals (95b Woodside SW19; Flat B,
+    # 18 Grosvenor Avenue) carry only the BUILDING's freehold register. A freehold
+    # register for a flat is the landlord's title, not the subject's interest, so
+    # it must never override the subject's tenure.
+    flat = subject_is_flat or _is_flat_address(subject_address) or \
+        bool(out.get("epc") and out["epc"].get("type_code") == "F")
+    tok = _house_token(subject_address)
     tenures, reg_files = set(), []
     for d in docs or []:
         if (d.get("doc_type") or "") == "title_register":
-            ts = read_register_tenures(d.get("extracted_text") or "")
-            if ts:
-                tenures.update(ts)
-                reg_files.append(d.get("file_name"))
+            txt = d.get("extracted_text") or ""
+            ts = read_register_tenures(txt)
+            if not ts:
+                continue
+            if tok and not re.search(r"(?<![0-9a-z])" + re.escape(tok) + r"(?![0-9a-z])", txt, re.I):
+                continue
+            tenures.update(ts)
+            reg_files.append(d.get("file_name"))
     if len(tenures) == 1:
-        out["tenure"] = {"value": tenures.pop(), "source_files": reg_files}
+        val = tenures.pop()
+        if flat and val == "Freehold":
+            out["tenure_ambiguous"] = {"values": ["Freehold"], "source_files": reg_files,
+                                       "reason": "freehold register in a flat's pack — the building's title, not the flat's"}
+        else:
+            out["tenure"] = {"value": val, "source_files": reg_files}
     elif len(tenures) > 1:
         out["tenure_ambiguous"] = {"values": sorted(tenures), "source_files": reg_files}
 
@@ -246,3 +267,51 @@ def resolve_pack_facts(docs: List[Dict[str, Any]], subject_address: Optional[str
             "source_files": sorted(f for f in files if f),
         }
     return out
+
+
+# ── OCR routing: a text layer that is only HM Land Registry stamps is NOT text ──
+# AUDIT 2026-09-24 (live): 50 documents on 38 of 111 deals (1,437 pages) were
+# stored "complete" although their only text was the HMLR official-copy notes
+# and the per-page stamp "This official copy is incomplete without the
+# preceding notes page." — the scanned body (lease terms, transfer covenants,
+# TA6 answers) was never OCR'd, because OCR ran only when extraction returned
+# NO text at all. Live distribution of genuine documents: p05 = 130
+# non-whitespace chars/page; every stamp-only document was < 40 after the
+# boilerplate below is removed.
+_HMLR_BOILERPLATE = re.compile(
+    r"this official copy is incomplete without the preceding notes page\.?"
+    r"|these are the notes referred to on the following official copy"
+    r"|the electronic official copy of the (?:document|register|title plan) follows this\s*message\.?"
+    r"|this copy may not be the same size as the\s*original\.?"
+    r"|please note that this is the only official copy we will issue\.?\s*we will not issue\s*a paper official copy\.?"
+    r"|title number\s+\S+"
+    r"|===\s*page\s+\S+\s*===",
+    re.I,
+)
+MIN_REAL_CHARS_PER_PAGE = 40
+
+
+def real_chars_per_page(text: Optional[str], pages: Optional[int]) -> float:
+    body = _HMLR_BOILERPLATE.sub("", text or "")
+    return len(re.sub(r"\s", "", body)) / max(int(pages or 0), 1)
+
+
+# Font-garbled text layers (broken encodings: text present but unreadable).
+# Live: 2 of 1,111 'complete' documents exceed this share (e.g. Lot 132 EPC).
+_READABLE = re.compile(r"[ -~\s£€²³–—’‘“”•…·]")
+MAX_UNREADABLE_SHARE = 0.20
+
+
+def unreadable_share(text: Optional[str]) -> float:
+    t = text or ""
+    return (len(t) - len(_READABLE.findall(t))) / len(t) if t else 0.0
+
+
+def text_layer_is_unusable(text: Optional[str], pages: Optional[int]) -> bool:
+    """True when extracted text is empty, only HMLR boilerplate/stamps, or
+    font-garbled → the document needs OCR."""
+    if not (text or "").strip():
+        return True
+    if real_chars_per_page(text, pages) < MIN_REAL_CHARS_PER_PAGE:
+        return True
+    return len(text) > 200 and unreadable_share(text) > MAX_UNREADABLE_SHARE
