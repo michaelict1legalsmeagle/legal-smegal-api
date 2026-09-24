@@ -48,6 +48,7 @@ FILENAME_RULES: List[Tuple[str, List[str]]] = [
     ("addendum",           ["addendum", "amendment", "amendments"]),
     ("probate",            ["probate", "grant of representation", "letters of administration"]),
     ("death_certificate",  ["death cert", "death certificate"]),
+    ("rent_statement",     ["rent statement", "rent statements", "rental statement", "rent schedule"]),  # V-PACK
     ("title_plan",         ["title plan", "filed plan"]),            # before register: "OC1 Title Plan"
     ("lease",              ["lease", "underlease"]),                 # before register: "Official copy of lease"
     # bare "register" deliberately absent: live packs carry "REGISTER_TO_BID" and "EPC_Register"
@@ -77,6 +78,9 @@ TEXT_RULES: List[Tuple[str, List[str]]] = [
                             "grant of representation", "hmcts probate", "probate registry"]),
     ("death_certificate",  ["deaths registration act", "entry of death",
                             "certified copy of an entry of death"]),
+    # V-PACK (2026-09-24): managing-agent statements carry the rent actually paid.
+    ("rent_statement",     ["rents received for the period", "rent received for the period",
+                            "commission on collection"]),
     # Water-company names ("thames water", "severn trent", "anglian water") deliberately
     # NOT used: now that environmental precedes title_register, an easement to a water
     # company in a register would be mistyped. Water searches are caught by their own

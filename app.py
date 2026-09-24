@@ -11273,6 +11273,73 @@ def save_area(deal_id: str):
     _summary     = deal.data.get("summary_json") or {}
     _prop        = _summary.get("property") or {}
 
+    # ── V-PACK (2026-09-24): subject facts from the pack's OWN documents ──────
+    # Order of evidence (register below the pack, LLM last):
+    #   tenure      ← title register "The Freehold/Leasehold land" (conflict → unchanged, flagged)
+    #   type, area  ← the pack's EPC certificate, address-matched to the subject
+    #   rent        ← managing-agent rent statements ("Rents received for the Period")
+    # Readers are order-robust (pack_facts.py): live, the same EPC PDF was stored
+    # label-adjacent on 23 Sep and labels-then-values on 24 Sep; the old readers
+    # lost type AND area on the second, and 2C Talbot Road was valued off semis.
+    _vpack_type_code = None
+    try:
+        from pack_facts import resolve_pack_facts as _resolve_pack_facts
+        _vp_docs = supabase.table("documents") \
+            .select("file_name, doc_type, extracted_text, extraction_status") \
+            .eq("deal_id", deal_id).eq("user_id", request.user_id).execute().data or []
+        _vp = _resolve_pack_facts(_vp_docs, _prop.get("address"),
+                                  _prop.get("postcode") or deal.data.get("postcode"))
+        _vp_changed = False
+        if _vp.get("tenure"):
+            _new_ten = _vp["tenure"]["value"]
+            if (_prop.get("tenure") or "") != _new_ten:
+                _prop["tenure_llm"] = _prop.get("tenure")
+                _prop["tenure"] = _new_ten
+            _prop["tenure_source"] = {"source": "title_register", "files": _vp["tenure"]["source_files"]}
+            _vp_changed = True
+        elif _vp.get("tenure_ambiguous"):
+            _prop["tenure_source"] = {"source": "ambiguous_registers", **_vp["tenure_ambiguous"]}
+            _vp_changed = True
+        _epc = _vp.get("epc")
+        if _epc:
+            _vpack_type_code = _epc.get("type_code")
+            if _epc.get("floor_area_m2"):
+                _prop["internal_area"] = _epc["floor_area_m2"]
+                _prop["internal_area_source"] = "epc_pack_certificate"
+                _prop["internal_area_confidence"] = "high"
+                _prop["internal_area_evidence"] = {
+                    "file": _epc.get("source_file"), "line": (_epc.get("evidence") or {}).get("area_line"),
+                    "certificate_number": _epc.get("certificate_number"),
+                    "address_match": _epc.get("address_match"),
+                }
+                if _epc.get("assessment_date"):
+                    _prop["internal_area_source_date"] = _epc["assessment_date"]
+            _prop["epc_pack_certificate"] = {
+                "file": _epc.get("source_file"), "property_type": _epc.get("property_type_label"),
+                "floor_area_m2": _epc.get("floor_area_m2"), "certificate_number": _epc.get("certificate_number"),
+                "assessment_date": _epc.get("assessment_date"), "address_match": _epc.get("address_match"),
+            }
+            _vp_changed = True
+        elif _vp.get("epc_conflict"):
+            _prop["epc_pack_conflict"] = _vp["epc_conflict"]
+            _vp_changed = True
+        if _vp.get("rent"):
+            _prop["rent_evidence"] = _vp["rent"]
+            _vp_changed = True
+        _unread = _vp.get("unread_documents") or []
+        if _unread or _summary.get("pack_unread_documents"):
+            _summary["pack_unread_documents"] = _unread
+            _vp_changed = True
+        if _vp_changed:
+            _summary["property"] = _prop
+            supabase.table("deals").update({"summary_json": _summary}) \
+                .eq("id", deal_id).eq("user_id", request.user_id).execute()
+        print(f"[V-PACK] {deal_id}: tenure={(_vp.get('tenure') or {}).get('value')} "
+              f"epc_type={_vpack_type_code} area={(_epc or {}).get('floor_area_m2')} "
+              f"rent={(_vp.get('rent') or {}).get('monthly_rent_gbp')} unread={len(_unread)}")
+    except Exception as _vpe:
+        print(f"[V-PACK warn] {deal_id}: {_vpe}")
+
     # S35-SIZE-MATCH (2026-06-25): resolve the subject's OWN floor area from its
     # legal-pack particulars (deterministic GIA from the room schedule). This is
     # the production subject-size source — exact-EPC match (handled downstream in
@@ -11531,7 +11598,8 @@ def save_area(deal_id: str):
             .eq("deal_id", deal_id).eq("user_id", request.user_id) \
             .eq("doc_type", "epc").execute()
         _epc_pack_text = "\n".join((d.get("extracted_text") or "") for d in (_epc_docs.data or []))
-        _epc_pack_type_code = _extract_epc_property_type_from_text(_epc_pack_text)
+        # V-PACK: the address-matched, order-robust reading wins.
+        _epc_pack_type_code = _vpack_type_code or _extract_epc_property_type_from_text(_epc_pack_text)
     except Exception as _eptc:
         print(f"[S37-EPC-PACK-TYPE fetch warn] {deal_id}: {_eptc}")
     _resolved_code, _type_source, _type_conf = _resolve_subject_type_code(
