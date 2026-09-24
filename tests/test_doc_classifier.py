@@ -119,3 +119,8 @@ def test_coal_and_drainage_are_environmental():
 
 def test_official_copy_lease_is_lease():
     assert c("Official_copy_lease_LA123.pdf", "") == "lease"
+
+
+def test_rent_statements_are_typed():         # live Lot 34: was 'unknown'
+    assert c("Lot_34_March_2026_-_Rent_Statement_-_Redacted.pdf", "") == "rent_statement"
+    assert c("scan.pdf", "RE: 2C TALBOT ROAD NORTH Rents received for the Period: 15/03/2026-14/04/2026 £850.00") == "rent_statement"
