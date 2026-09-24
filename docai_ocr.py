@@ -66,13 +66,48 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 
 logger = logging.getLogger(__name__)
 
-_DOCAI_TIMEOUT_SECONDS = 90  # hard ceiling on the whole OCR round-trip
+_DOCAI_TIMEOUT_SECONDS = 90  # legacy value — kept for reference; see _batch_timeout()
 _POLL_INTERVAL_SECONDS = 3
+
+# V-OCR (2026-09-24) — reliability. Live: 23 documents ended 'empty' (16 with all
+# 3 attempts raising), clustered per upload (6 of one 37-document pack), while
+# the code itself documents a typical batch round-trip of "~65-90s" against a
+# fixed 90 s ceiling — so a normal job under concurrent load could time out on
+# every attempt. Three changes:
+#   1. Synchronous process_document first (raw bytes, no GCS, no queue) — the
+#      online endpoint serves up to 15 pages; larger/rejected files fall back
+#      to batchProcess.
+#   2. batchProcess ceiling scales with file size (120 s + 30 s/MB, max 900 s)
+#      instead of a fixed 90 s.
+#   3. At most DOCAI_MAX_CONCURRENCY (default 2) OCR jobs per process at once,
+#      so a 37-document upload queues instead of stampeding the service.
+_BATCH_BASE_SECONDS = 120
+_BATCH_PER_MB_SECONDS = 30
+_BATCH_MAX_SECONDS = 900
+_OCR_SLOTS = threading.BoundedSemaphore(max(1, int(os.environ.get("DOCAI_MAX_CONCURRENCY", "2") or 2)))
+
+
+def _batch_timeout(n_bytes: int) -> int:
+    mb = max(0.0, (n_bytes or 0) / 1048576.0)
+    return int(min(_BATCH_MAX_SECONDS, _BATCH_BASE_SECONDS + _BATCH_PER_MB_SECONDS * mb))
+
+
+def _marked_text_from_shards(shards) -> tuple:
+    """Page-marked text from Document AI JSON shards (same format either path)."""
+    marked_parts = []
+    running_counter = 0
+    for doc_json in shards:
+        for page_number, page_text in _page_text_from_shard(doc_json):
+            running_counter += 1
+            label = page_number if page_number is not None else running_counter
+            marked_parts.append(f"\n\n=== PAGE {label} ===\n\n{page_text}")
+    return "".join(marked_parts), running_counter
 
 _docai_client = None
 _storage_client = None
@@ -196,6 +231,43 @@ def _page_text_from_shard(doc_json: dict) -> list:
 
 
 def extract_text_via_docai(file_bytes: bytes) -> str:
+    """V-OCR entry point (same signature/contract as before): sync first,
+    batch fallback, bounded concurrency. Raises on failure."""
+    with _OCR_SLOTS:
+        try:
+            return _extract_text_sync(file_bytes)
+        except Exception as e:
+            logger.info(f"docai_ocr: sync path not used ({type(e).__name__}: {e}) — using batchProcess")
+        return _extract_text_batch(file_bytes)
+
+
+def _extract_text_sync(file_bytes: bytes) -> str:
+    """Online process_document with raw bytes. Returns page-marked text in the
+    same format as the batch path. Raises if the processor rejects the file
+    (e.g. over the online page limit) so the caller falls back to batch."""
+    t0 = time.time()
+    project_number = os.environ["DOCAI_PROJECT_NUMBER"]
+    location = os.environ.get("DOCAI_LOCATION", "eu")
+    processor_id = os.environ["DOCAI_PROCESSOR_ID"]
+    from google.cloud import documentai
+    client = _get_docai_client()
+    name = f"projects/{project_number}/locations/{location}/processors/{processor_id}"
+    result = client.process_document(
+        request=documentai.ProcessRequest(
+            name=name,
+            raw_document=documentai.RawDocument(content=file_bytes, mime_type="application/pdf"),
+        ),
+        timeout=120,
+    )
+    doc_json = json.loads(documentai.Document.to_json(result.document))
+    combined, n_pages = _marked_text_from_shards([doc_json])
+    if n_pages == 0:
+        raise RuntimeError("Document AI online response had no pages")
+    logger.info(f"docai_ocr: extracted {len(combined):,} chars ({n_pages} pages) via online process in {time.time() - t0:.1f}s")
+    return combined
+
+
+def _extract_text_batch(file_bytes: bytes) -> str:
     """Sends file_bytes through Google Document AI's batchProcess OCR flow
     and returns page-marked text ("=== PAGE N ===" before each page, using
     Document AI's own page numbering — see _page_text_from_shard). Raises
@@ -251,11 +323,12 @@ def extract_text_via_docai(file_bytes: bytes) -> str:
         # Poll rather than operation.result(timeout=...) directly, so we can
         # enforce our own hard ceiling and log progress — a hung operation
         # should not be able to hold this request open indefinitely.
+        _limit = _batch_timeout(len(file_bytes))
         while not operation.done():
-            if time.time() - t0 > _DOCAI_TIMEOUT_SECONDS:
+            if time.time() - t0 > _limit:
                 raise TimeoutError(
                     f"Document AI batchProcess did not complete within "
-                    f"{_DOCAI_TIMEOUT_SECONDS}s"
+                    f"{_limit}s (operation {getattr(operation, 'operation', None) and operation.operation.name})"
                 )
             time.sleep(_POLL_INTERVAL_SECONDS)
 
@@ -279,16 +352,8 @@ def extract_text_via_docai(file_bytes: bytes) -> str:
         # (Document AI names them sequentially), and each page keeps its
         # own real pageNumber, so numbering stays correct even when a large
         # document is split across multiple output shards.
-        marked_parts = []
-        running_counter = 0
-        for blob in sorted(json_blobs, key=lambda b: b.name):
-            doc_json = json.loads(blob.download_as_text())
-            for page_number, page_text in _page_text_from_shard(doc_json):
-                running_counter += 1
-                label = page_number if page_number is not None else running_counter
-                marked_parts.append(f"\n\n=== PAGE {label} ===\n\n{page_text}")
-
-        combined = "".join(marked_parts)
+        combined, running_counter = _marked_text_from_shards(
+            json.loads(b.download_as_text()) for b in sorted(json_blobs, key=lambda b: b.name))
         logger.info(
             f"docai_ocr: extracted {len(combined):,} chars ({running_counter} "
             f"pages) via Document AI in {time.time() - t0:.1f}s (job {job_id})"

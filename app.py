@@ -6509,7 +6509,16 @@ def get_housing_data(postcode: str, radius_miles: Optional[float] = None, limit:
         _use_normalised = HOUSING_SIZE_NORMALISATION_ENABLED and len(_normalised_prices) >= 5
         _audit["area_normalised_count"] = _area_normalised_count
         if not _use_normalised and _subject_area:
-            _audit["warnings"].append(f"floor_area_normalisation_skipped: only {_area_normalised_count}/10 comps have floor area data")
+            # AUDIT 2026-09-24: the old text blamed data ("only 10/10 comps have
+            # floor area data") when the real reason was the S-SIZE-OFF switch —
+            # a false audit statement. State the actual reason.
+            if not HOUSING_SIZE_NORMALISATION_ENABLED:
+                _audit["warnings"].append(
+                    f"floor_area_normalisation_disabled: size adjustment switched off by design "
+                    f"(S-SIZE-OFF backtest, 2026-08-15); {_area_normalised_count}/{len(rows)} comps have floor area")
+            else:
+                _audit["warnings"].append(
+                    f"floor_area_normalisation_skipped: only {_area_normalised_count}/{len(rows)} comps have floor area data")
 
         # ── S-3: post-normalisation outlier bounds ──────────────────────────
         # Linear £/m² area-normalisation can produce extreme synthetic prices
@@ -8295,6 +8304,143 @@ def _reproducibility_gate(deal_id, deal_row):
     return None
 
 
+# ── V-OCR (2026-09-24): background OCR is a module-level function so it can be
+# re-run for documents that failed or were orphaned (dyno restart mid-OCR).
+# Body unchanged from the former nested _run_ocr_background except the longer
+# retry gaps. "All documents must be read": see _recover_unread_documents.
+def _run_ocr_for_document(_file_bytes: bytes, _document_id: str, _filename: str):
+    _bg_t0 = time.time()
+    # H4-RETRY (2026-06-27): up to 3 attempts with backoff before giving
+    # up. docai_ocr.extract_text_via_docai() itself is completely
+    # unchanged (same Document AI call, same 90s internal ceiling per
+    # attempt, same accuracy) — this only adds resilience against a
+    # transient failure (network blip, quota hiccup) on attempt 1,
+    # which previously had zero retry and went straight to 'empty'.
+    # Bounded at 3 attempts so worst case is known (~3 x 90s ceiling +
+    # backoff, not unbounded retrying) rather than open-ended.
+    _MAX_ATTEMPTS = 3
+    _BACKOFF_SECONDS = [20, 60]  # V-OCR: longer gaps — failures cluster under load
+    ocr_text = None
+    _last_error = None
+    for _attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            ocr_text = docai_ocr.extract_text_via_docai(_file_bytes)
+            _last_error = None
+            break
+        except Exception as e:
+            _last_error = e
+            app.logger.warning(
+                f"Background OCR attempt {_attempt}/{_MAX_ATTEMPTS} failed "
+                f"for {_filename!r} (document_id={_document_id}): {e}"
+            )
+            if _attempt < _MAX_ATTEMPTS:
+                time.sleep(_BACKOFF_SECONDS[_attempt - 1])
+
+    if _last_error is not None:
+        # All attempts exhausted — degrade gracefully, same end state
+        # as the pre-retry behaviour, just reached only after genuinely
+        # trying multiple times rather than failing on the first blip.
+        app.logger.warning(
+            f"Background OCR exhausted all {_MAX_ATTEMPTS} attempts for "
+            f"{_filename!r} (document_id={_document_id}): {_last_error}"
+        )
+        try:
+            supabase.table("documents").update({
+                "extraction_status": "empty",
+            }).eq("id", _document_id).execute()
+        except Exception as e2:
+            app.logger.warning(f"Failed to mark document {_document_id} "
+                                f"as 'empty' after exhausted OCR retries: {e2}")
+        return
+
+    try:
+        # H-NOFITZ (2026-09-23): page count from Document AI's own
+        # "=== PAGE N ===" markers (one per page, empty pages included — see
+        # docai_ocr._page_text_from_shard). Replaces a local fitz.open() of the
+        # scanned PDF on the 512MB web dyno — the exact workload that OOMs it.
+        _page_count = len(re.findall(r"=== PAGE \S+ ===", ocr_text or ""))
+        _status = "complete" if ocr_text.strip() else "empty"
+        _doc_type = detect_document_type(_filename, ocr_text) if ocr_text.strip() else None
+        _update = {
+            "extracted_text":    ocr_text[:500000] if ocr_text else None,
+            "extraction_status": _status,
+            "page_count":        _page_count,
+        }
+        if _doc_type:
+            _update["doc_type"] = _doc_type
+        supabase.table("documents").update(_update).eq("id", _document_id).execute()
+        print(
+            f"⏱️ [H3-TIMING] background OCR complete for {_filename!r} "
+            f"(document_id={_document_id}): status={_status} "
+            f"TOTAL={round(time.time() - _bg_t0, 2)}s"
+        )
+    except Exception as e:
+        app.logger.warning(f"Background OCR post-processing failed for "
+                            f"{_filename!r} (document_id={_document_id}): {e}")
+        try:
+            supabase.table("documents").update({
+                "extraction_status": "empty",
+            }).eq("id", _document_id).execute()
+        except Exception as e2:
+            app.logger.warning(f"Failed to mark document {_document_id} "
+                                f"as 'empty' after OCR post-processing failure: {e2}")
+
+
+
+_OCR_RETRY_AT: Dict[str, float] = {}      # document_id -> last re-OCR start (this process)
+_OCR_RETRY_MIN_GAP_SECONDS = 30 * 60
+_OCR_STALE_PROCESSING_SECONDS = 15 * 60
+
+
+def _recover_unread_documents(deal_id: str, user_id: str) -> List[str]:
+    """Re-run OCR, from the stored original, for documents that were never read:
+      * status 'empty'  (all OCR attempts failed), and
+      * status 'processing' older than 15 min (thread lost, e.g. a restart).
+    Each document is retried at most once per 30 min per process. Returns the
+    file names re-queued. Live (24 Sep): 23 'empty', 2 stuck since 14 Jul."""
+    requeued: List[str] = []
+    if docai_ocr is None:
+        return requeued
+    try:
+        rows = supabase.table("documents") \
+            .select("id, file_name, storage_path, extraction_status, created_at") \
+            .eq("deal_id", deal_id).eq("user_id", user_id) \
+            .in_("extraction_status", ["empty", "processing"]).execute().data or []
+    except Exception as e:
+        app.logger.warning(f"[V-OCR] recover: list failed for deal {deal_id}: {e}")
+        return requeued
+    now = time.time()
+    for r in rows:
+        doc_id = r.get("id")
+        path = r.get("storage_path") or ""
+        if not doc_id or not path or path.startswith("upload_failed/"):
+            continue
+        if r.get("extraction_status") == "processing":
+            try:
+                created = datetime.fromisoformat(str(r.get("created_at")).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                continue
+            if now - created < _OCR_STALE_PROCESSING_SECONDS:
+                continue
+        if now - _OCR_RETRY_AT.get(doc_id, 0) < _OCR_RETRY_MIN_GAP_SECONDS:
+            continue
+        try:
+            file_bytes = supabase.storage.from_("legal-packs").download(path)
+        except Exception as e:
+            app.logger.warning(f"[V-OCR] recover: download failed for {r.get('file_name')!r}: {e}")
+            continue
+        _OCR_RETRY_AT[doc_id] = now
+        try:
+            supabase.table("documents").update({"extraction_status": "processing"}).eq("id", doc_id).execute()
+        except Exception:
+            pass
+        threading.Thread(target=_run_ocr_for_document,
+                         args=(file_bytes, doc_id, r.get("file_name") or ""), daemon=True).start()
+        requeued.append(r.get("file_name") or doc_id)
+        app.logger.warning(f"[V-OCR] re-OCR queued for {r.get('file_name')!r} (was {r.get('extraction_status')})")
+    return requeued
+
+
 @app.route("/api/documents/upload", methods=["OPTIONS"])
 def upload_options():
     """Explicit OPTIONS handler so CORS preflight always gets a 200, not a 502."""
@@ -8425,7 +8571,12 @@ def upload_document():
             needs_ocr = False
         else:
             extracted_text, page_count = extract_pdf_text(file_bytes)
-            needs_ocr = (docai_ocr is not None) and (not extracted_text)
+            # V-OCR (2026-09-24): route to OCR when the text layer is empty OR is
+            # only HM Land Registry stamps/notes (pack_facts.text_layer_is_unusable).
+            # Live: 50 docs / 1,437 pages stored "complete" with only the stamp
+            # "This official copy is incomplete without the preceding notes page."
+            from pack_facts import text_layer_is_unusable as _text_unusable
+            needs_ocr = (docai_ocr is not None) and _text_unusable(extracted_text, page_count)
     except Exception as e:
         app.logger.warning(f"Extraction failed: {e} — routing to OCR")
         extracted_text, page_count = "", 0
@@ -8545,85 +8696,8 @@ def upload_document():
         f"REQUEST_TOTAL={_t_total}s (OCR continues in background)"
     )
 
-    def _run_ocr_background(_file_bytes: bytes, _document_id: str, _filename: str):
-        _bg_t0 = time.time()
-        # H4-RETRY (2026-06-27): up to 3 attempts with backoff before giving
-        # up. docai_ocr.extract_text_via_docai() itself is completely
-        # unchanged (same Document AI call, same 90s internal ceiling per
-        # attempt, same accuracy) — this only adds resilience against a
-        # transient failure (network blip, quota hiccup) on attempt 1,
-        # which previously had zero retry and went straight to 'empty'.
-        # Bounded at 3 attempts so worst case is known (~3 x 90s ceiling +
-        # backoff, not unbounded retrying) rather than open-ended.
-        _MAX_ATTEMPTS = 3
-        _BACKOFF_SECONDS = [5, 15]  # between attempt 1->2 and 2->3
-        ocr_text = None
-        _last_error = None
-        for _attempt in range(1, _MAX_ATTEMPTS + 1):
-            try:
-                ocr_text = docai_ocr.extract_text_via_docai(_file_bytes)
-                _last_error = None
-                break
-            except Exception as e:
-                _last_error = e
-                app.logger.warning(
-                    f"Background OCR attempt {_attempt}/{_MAX_ATTEMPTS} failed "
-                    f"for {_filename!r} (document_id={_document_id}): {e}"
-                )
-                if _attempt < _MAX_ATTEMPTS:
-                    time.sleep(_BACKOFF_SECONDS[_attempt - 1])
-
-        if _last_error is not None:
-            # All attempts exhausted — degrade gracefully, same end state
-            # as the pre-retry behaviour, just reached only after genuinely
-            # trying multiple times rather than failing on the first blip.
-            app.logger.warning(
-                f"Background OCR exhausted all {_MAX_ATTEMPTS} attempts for "
-                f"{_filename!r} (document_id={_document_id}): {_last_error}"
-            )
-            try:
-                supabase.table("documents").update({
-                    "extraction_status": "empty",
-                }).eq("id", _document_id).execute()
-            except Exception as e2:
-                app.logger.warning(f"Failed to mark document {_document_id} "
-                                    f"as 'empty' after exhausted OCR retries: {e2}")
-            return
-
-        try:
-            # H-NOFITZ (2026-09-23): page count from Document AI's own
-            # "=== PAGE N ===" markers (one per page, empty pages included — see
-            # docai_ocr._page_text_from_shard). Replaces a local fitz.open() of the
-            # scanned PDF on the 512MB web dyno — the exact workload that OOMs it.
-            _page_count = len(re.findall(r"=== PAGE \S+ ===", ocr_text or ""))
-            _status = "complete" if ocr_text.strip() else "empty"
-            _doc_type = detect_document_type(_filename, ocr_text) if ocr_text.strip() else None
-            _update = {
-                "extracted_text":    ocr_text[:500000] if ocr_text else None,
-                "extraction_status": _status,
-                "page_count":        _page_count,
-            }
-            if _doc_type:
-                _update["doc_type"] = _doc_type
-            supabase.table("documents").update(_update).eq("id", _document_id).execute()
-            print(
-                f"⏱️ [H3-TIMING] background OCR complete for {_filename!r} "
-                f"(document_id={_document_id}): status={_status} "
-                f"TOTAL={round(time.time() - _bg_t0, 2)}s"
-            )
-        except Exception as e:
-            app.logger.warning(f"Background OCR post-processing failed for "
-                                f"{_filename!r} (document_id={_document_id}): {e}")
-            try:
-                supabase.table("documents").update({
-                    "extraction_status": "empty",
-                }).eq("id", _document_id).execute()
-            except Exception as e2:
-                app.logger.warning(f"Failed to mark document {_document_id} "
-                                    f"as 'empty' after OCR post-processing failure: {e2}")
-
     t = threading.Thread(
-        target=_run_ocr_background,
+        target=_run_ocr_for_document,
         args=(file_bytes, document_id, filename),
         daemon=True,
     )
@@ -8823,7 +8897,12 @@ def summarise_deal(deal_id: str):
     # processing.html actually calls (runAnalysis() -> POST .../summarise),
     # so the guard belongs here, not just on the separate analyse_deal
     # endpoint. Frontend retries on 409 — see legalsmegal-processing.html.
+    # V-OCR (2026-09-24): "all documents must be read" — before analysing, re-run
+    # OCR once (from the stored original) for documents that failed or were
+    # orphaned; the frontend already retries on 409 until they finish.
+    _requeued = _recover_unread_documents(deal_id, request.user_id)
     _still_processing = [d.get("file_name") for d in documents if d.get("extraction_status") == "processing"]
+    _still_processing = sorted(set(_still_processing) | set(_requeued))
     if _still_processing:
         return jsonify({
             "error": "Some documents are still being processed (OCR in progress). Please try again shortly.",
@@ -8878,6 +8957,16 @@ def summarise_deal(deal_id: str):
             _parts.append(_chunk)
             _total += len(_chunk)
         truncated = ''.join(_parts)
+        # V-OCR (2026-09-24): documents that could not be read are NAMED in the
+        # context, so their absence of text is never mistaken for their absence
+        # from the pack (the "No EPC in Pack" class of false-missing flag).
+        _unread_names = [d.get('file_name') for d in documents
+                         if not (d.get('extracted_text') or '').strip() and d.get('file_name')]
+        if _unread_names:
+            truncated += ("=== DOCUMENTS IN THE PACK THAT COULD NOT BE READ (scanned; OCR failed) ===\n"
+                          + "\n".join(f"- {n}" for n in _unread_names)
+                          + "\nThese documents ARE present in the pack; their content was not available. "
+                            "Do not report them as missing.\n\n")
 
         # ── Database context verification — log what we're actually sending ──
         docs_with_text = sum(1 for d in documents if (d.get('extracted_text') or '').strip())
@@ -9569,7 +9658,12 @@ def analyse_deal(deal_id: str):
     # synchronous-but-slow behaviour it replaced. Caller should retry
     # shortly; frontend already has GET /api/documents/<deal_id> to poll
     # per-document status.
+    # V-OCR (2026-09-24): "all documents must be read" — before analysing, re-run
+    # OCR once (from the stored original) for documents that failed or were
+    # orphaned; the frontend already retries on 409 until they finish.
+    _requeued = _recover_unread_documents(deal_id, request.user_id)
     _still_processing = [d.get("file_name") for d in documents if d.get("extraction_status") == "processing"]
+    _still_processing = sorted(set(_still_processing) | set(_requeued))
     if _still_processing:
         return jsonify({
             "error": "Some documents are still being processed (OCR in progress). Please try again shortly.",
@@ -11288,7 +11382,8 @@ def save_area(deal_id: str):
             .select("file_name, doc_type, extracted_text, extraction_status") \
             .eq("deal_id", deal_id).eq("user_id", request.user_id).execute().data or []
         _vp = _resolve_pack_facts(_vp_docs, _prop.get("address"),
-                                  _prop.get("postcode") or deal.data.get("postcode"))
+                                  _prop.get("postcode") or deal.data.get("postcode"),
+                                  subject_is_flat=str(_prop.get("physical_type") or "").strip().lower() == "flat")
         _vp_changed = False
         if _vp.get("tenure"):
             _new_ten = _vp["tenure"]["value"]
