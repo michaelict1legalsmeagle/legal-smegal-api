@@ -491,9 +491,13 @@ def _generate_pdf_local(summary_json: dict, docs: list) -> bytes:
     kv("Property",address); kv("Postcode",postcode)
     kv("Tenure",tenure+(f" - {lease} years remaining" if lease else ""))
     kv("Guide price",guide); kv("Report date",today)
-    score_c = C_GREEN if (isinstance(score,(int,float)) and score>=70) else C_HIGH if (isinstance(score,(int,float)) and score>=50) else C_CRIT
-    sc_t = Table([[Paragraph(f"<b>{score}</b>",sty("scr2",fontName=MONO,fontSize=18,textColor=C_WHITE,alignment=TA_CENTER)),
-        Paragraph(f"<b>Pack Score / 100</b><br/>{viability}",sty("scv2",fontName=SANS,fontSize=8,textColor=C_BLACK,leading=11))]],
+    # PACK-COUNTS (2026-09-26): evidenced flag counts, not a /100 score
+    _fc = sj.get("flag_counts") or {}
+    _crit = int(_fc.get("critical") or 0)
+    score_c = C_CRIT if _crit > 0 else C_GREEN
+    _counts = f"{_crit} critical &middot; {int(_fc.get('high') or 0)} clarification &middot; {int(_fc.get('missing') or 0)} missing &middot; {int(_fc.get('note') or 0)} notes"
+    sc_t = Table([[Paragraph(f"<b>{_crit}</b>",sty("scr2",fontName=MONO,fontSize=18,textColor=C_WHITE,alignment=TA_CENTER)),
+        Paragraph(f"<b>Disclosure flags</b> &mdash; {_counts}<br/>{viability}",sty("scv2",fontName=SANS,fontSize=8,textColor=C_BLACK,leading=11))]],
         colWidths=[22*mm,W-22*mm])
     sc_t.setStyle(TableStyle([("BACKGROUND",(0,0),(0,0),score_c),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)]))

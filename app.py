@@ -10017,12 +10017,15 @@ def get_dashboard():
         result = supabase.table("deals") \
             .select("id, deal_name, title, address, postcode, status, deal_score, "
                     "guide_price, auction_date, deal_type, created_at, updated_at, "
-                    "summary_json, financials_json, analysis_json") \
+                    "financials_json, analysis_json, "
+                    # MEM-LIST (2026-09-26): same slim summary_json fields as /api/deals
+                    # (flag_counts, property, completion days) — not the ~212 kB blob.
+                    + ", ".join(f"{a}:summary_json->{p}" for a, p in _LIST_SJ_PATHS)) \
             .eq("user_id", request.user_id) \
             .neq("status", "archived") \
             .order("created_at", desc=True) \
             .execute()
-        deals = result.data or []
+        deals = [_list_row_rebuild(r) for r in (result.data or [])]
     except Exception as e:
         app.logger.exception("dashboard fetch failed")
         app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
@@ -10109,7 +10112,10 @@ def get_dashboard():
         "ok": True,
         "summary": {
             "total_deals":            total_deals,
-            "avg_deal_score":         round(avg_score, 1) if avg_score is not None else None,
+            "avg_deal_score":         round(avg_score, 1) if avg_score is not None else None,   # kept for API compatibility; no longer displayed
+            # PACK-COUNTS (2026-09-26): the page shows evidenced flag counts, not a /100 score
+            "critical_flags_total":   sum(int(((d.get("summary_json") or {}).get("flag_counts") or {}).get("critical") or 0) for d in deals),
+            "deals_with_critical":    sum(1 for d in deals if int(((d.get("summary_json") or {}).get("flag_counts") or {}).get("critical") or 0) > 0),
             "deals_analysed":         len(scored),
             "deals_with_financials":  len(with_fin),
             "avg_gross_yield_pct":    round(sum(gy_vals)/len(gy_vals), 2) if gy_vals else None,
