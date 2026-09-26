@@ -113,3 +113,11 @@ def test_font_garbled_text_routes_to_ocr():
     garbled = "\x02\x05\x11\x13\x1a" * 60 + " EPC "
     assert text_layer_is_unusable(garbled, 1) is True
     assert text_layer_is_unusable("Freehold land £850.00 – “quoted” • ok " * 10, 1) is False
+
+
+def test_rent_statement_tesseract_layout():     # Tesseract 5.3.4 output layout of the live Lot 34 file
+    ocr = ("RE: 2C TALBOT ROAD NORTH, WELLINGBOROUGH\n\nRents received for the Period: £850.00\n"
+           "15/09/2025-1 4/10/2025\nCommission on Collection £60.00\nVAT £12.00\n")
+    r = read_rent_statements(ocr, ADDR)
+    assert r == [{"period_start": "15/09/2025", "period_end": "14/10/2025", "rent_gbp": 850.0,
+                  "commission_gbp": 60.0, "commission_vat_gbp": 12.0}]

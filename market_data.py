@@ -110,7 +110,9 @@ def _read_auction(sq, guide_price):
             count(*) filter (where auction_date >= current_date - interval '12 months') nr,
             count(*) filter (where auction_date <  current_date - interval '12 months') np
             from market_auction_outcomes
-            where hammer_to_guide_ratio is not null and auction_date is not null {filt}""", params)
+            where hammer_to_guide_ratio is not null and auction_date is not null
+              and auction_date <= current_date   -- D4 (2026-09-26): future-dated rows are not outcomes
+              {filt}""", params)
         if not rows or rows[0].get("mr") is None or rows[0].get("mp") is None: return None, "insufficient dated lots"
         r = rows[0]
         if (r["nr"] or 0) < 8 or (r["np"] or 0) < 8: return None, "insufficient dated lots"

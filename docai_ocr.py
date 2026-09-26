@@ -238,7 +238,36 @@ def extract_text_via_docai(file_bytes: bytes) -> str:
             return _extract_text_sync(file_bytes)
         except Exception as e:
             logger.info(f"docai_ocr: sync path not used ({type(e).__name__}: {e}) — using batchProcess")
-        return _extract_text_batch(file_bytes)
+        try:
+            return _extract_text_batch(file_bytes)
+        except Exception as e:
+            if not os.environ.get("OCR_FALLBACK_URL"):
+                raise
+            logger.warning(f"docai_ocr: Document AI failed ({type(e).__name__}: {e}) — using Tesseract fallback")
+        return _extract_text_fallback(file_bytes)
+
+
+def _extract_text_fallback(file_bytes: bytes) -> str:
+    """V-OCR-FALLBACK (2026-09-24/26): second engine — open-source Tesseract on the
+    Hetzner box (hetzner/ocr_fallback/ocr_fallback_service.py). Returns exactly
+    what Tesseract reads, page-marked like Document AI. Raises on any failure so
+    the caller's retry / 'empty' handling still applies."""
+    import requests
+    url = os.environ["OCR_FALLBACK_URL"].rstrip("/") + "/ocr"
+    secret = os.environ.get("OCR_FALLBACK_SECRET", "")
+    mb = max(0.0, len(file_bytes) / 1048576.0)
+    timeout = int(min(900, 120 + 60 * mb))
+    t0 = time.time()
+    r = requests.post(url, data=file_bytes, timeout=timeout,
+                      headers={"X-OCR-Secret": secret, "Content-Type": "application/pdf"})
+    if r.status_code != 200:
+        raise RuntimeError(f"OCR fallback HTTP {r.status_code}: {r.text[:200]}")
+    j = r.json()
+    text = j.get("text") or ""
+    if not j.get("ok") or not text.strip():
+        raise RuntimeError(f"OCR fallback returned no text: {j.get('error')}")
+    logger.info(f"docai_ocr: extracted {len(text):,} chars ({j.get('pages')} pages) via {j.get('engine')} fallback in {time.time() - t0:.1f}s")
+    return text
 
 
 def _extract_text_sync(file_bytes: bytes) -> str:

@@ -135,13 +135,19 @@ def read_register_tenures(text: str) -> List[str]:
 
 
 # ── Rent actually paid (managing-agent statements) ──────────────────────────
+# V-OCR-FALLBACK: dates tolerate OCR's stray spaces INSIDE a digit group
+# ("1 4/10/2025"); only whitespace is removed afterwards — no digit is ever
+# added, changed or guessed. Two layouts, both seen live: text layer
+# "Period: <dates> £850.00" and Tesseract OCR "Period: £850.00 <dates>".
+_D = r"(\d\s?\d\s?/\s?\d\s?\d\s?/\s?\d\s?\d\s?\d\s?\d)"
 _STMT_PERIOD = re.compile(
     r"rents?\s+received\s+for\s+the\s+period\s*:?\s*"
-    r"(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})\s*£\s*([\d,]+\.\d{2})",
+    r"(?:" + _D + r"\s*-\s*" + _D + r"\s*£\s*([\d,]+\.\d{2})"
+    r"|£\s*([\d,]+\.\d{2})\s*" + _D + r"\s*-\s*" + _D + r")",
     re.I,
 )
 _STMT_COMMISSION = re.compile(
-    r"commission\s+on\s+collection\s*(?:vat\s*)?£\s*([\d,]+\.\d{2})\s*£\s*([\d,]+\.\d{2})",
+    r"commission\s+on\s+collection\s*(?:vat\s*)?£\s*([\d,]+\.\d{2})\s*(?:vat\s*)?£\s*([\d,]+\.\d{2})",
     re.I,
 )
 
@@ -165,7 +171,11 @@ def read_rent_statements(text: str, subject_address: Optional[str]) -> List[Dict
     flat = _WS.sub(" ", t)
     out = []
     for pm in _STMT_PERIOD.finditer(flat):
-        rec = {"period_start": pm.group(1), "period_end": pm.group(2), "rent_gbp": _money(pm.group(3))}
+        if pm.group(1):
+            a, b, amt = pm.group(1), pm.group(2), pm.group(3)
+        else:
+            amt, a, b = pm.group(4), pm.group(5), pm.group(6)
+        rec = {"period_start": re.sub(r"\s", "", a), "period_end": re.sub(r"\s", "", b), "rent_gbp": _money(amt)}
         cm = _STMT_COMMISSION.search(flat, pm.end(), pm.end() + 200)
         if cm:
             rec["commission_gbp"] = _money(cm.group(1))

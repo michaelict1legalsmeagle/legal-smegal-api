@@ -514,11 +514,11 @@ def _step_inference(
             if ratio < PRICE_BELOW_COMPS_THRESHOLD:
                 signals.append({
                     "id":         "price_below_comps",
-                    "direction":  "positive",
-                    "label":      "Guide price below comparable evidence",
+                    "direction":  "neutral",   # E4: all-type average is not like-for-like evidence
+                    "label":      "Guide price below local sales average (all types)",
                     "text":       (
                         f"Guide price £{int(guide_price):,} is {pct_below:.0f}% below "
-                        f"{comps['count']} comparables (avg £{comp_avg:,}) "
+                        f"{comps['count']} local sales of all property types (avg £{comp_avg:,}; not like-for-like) "
                         f"at {comps['tier']} level. "
                         f"Investigate condition, tenure and legal pack."
                     ),
@@ -528,11 +528,11 @@ def _step_inference(
                 pct_above = round((ratio - 1) * 100, 1)
                 signals.append({
                     "id":         "price_above_comps",
-                    "direction":  "negative",
-                    "label":      "Guide price above comparable evidence",
+                    "direction":  "neutral",   # E4: all-type average is not like-for-like evidence
+                    "label":      "Guide price above local sales average (all types)",
                     "text":       (
                         f"Guide price £{int(guide_price):,} is {pct_above:.0f}% above "
-                        f"{comps['count']} comparables (avg £{comp_avg:,}) "
+                        f"{comps['count']} local sales of all property types (avg £{comp_avg:,}; not like-for-like) "
                         f"at {comps['tier']} level. Limited discount to market."
                     ),
                     "source":     f"price_paid_raw_2025 ({comps['tier']} level)",
@@ -565,20 +565,19 @@ def _step_inference(
                 "direction":  "negative",
                 "label":      "MEES compliance risk",
                 "text":       (
-                    f"EPC rating {rating} — below minimum E threshold for residential letting. "
-                    f"Upgrade works required before re-letting. Estimated £3,000–£18,000 "
-                    f"depending on property. Factor into acquisition cost."
+                    f"EPC rating {rating} — below the minimum E rating for residential letting "
+                    f"(MEES). Improvement works or a registered exemption are required before letting."
                 ),
                 "source":     "epc_certificates",
             })
-        elif rating in ("D", "E"):
+        elif rating == "E":
+            # E5 (2026-09-26): E IS the current letting minimum (MEES) — it is not below it.
             signals.append({
-                "id":         "epc_upgrade_opportunity",
+                "id":         "epc_at_minimum",
                 "direction":  "neutral",
-                "label":      "EPC upgrade opportunity",
+                "label":      "EPC at letting minimum",
                 "text":       (
-                    f"EPC rating {rating} — one grade below current minimum for MEES compliance. "
-                    f"Upgrade to C or above may improve letting appeal and future-proof compliance."
+                    f"EPC rating E — at the current minimum rating for residential letting (MEES)."
                 ),
                 "source":     "epc_certificates",
             })
@@ -592,9 +591,7 @@ def _step_inference(
                 "direction":  "positive",
                 "label":      "Rental growth above national average",
                 "text":       (
-                    f"Local rents growing at {yoy:.1f}% YoY — "
-                    f"above the ~3–4% national average. "
-                    f"Signals tightening supply or strong demand. Verify local data."
+                    f"Local rents growing at {yoy:.1f}% YoY (area series). Verify local data."
                 ),
                 "source":     "uk_prms_monthly",
             })
@@ -694,60 +691,7 @@ def _compute_confidence(
 # ── Core enrichment function ───────────────────────────────────────────────────
 
 
-# ── Step 8: Ceiling engine wrapper ────────────────────────────────────────────
-def _step_ceiling(guide_price: Optional[float], comps: dict, rental: dict,
-                  strategy: str = "BTL") -> dict:
-    """
-    Additive wrapper around ceiling_engine.calculate_ceiling.
-    At discovery stage there are no legal flags — the ceiling reflects
-    structural auction discount applied to comps-anchored base only.
-    Result is stored as a quick-reference bid ceiling range for the card.
-    Full ceiling (with legal flags) runs separately after legal pack analysis.
-    """
-    result: dict = {"ok": False}
-    try:
-        from services.ceiling_engine import calculate_ceiling as _calc_ceiling
-    except ImportError:
-        result["error"] = "ceiling_engine_unavailable"
-        return result
-
-    fins: dict = {}
-    if comps and comps.get("avg_price") and float(comps["avg_price"]) > 5_000:
-        fins["comps_avg_value"] = float(comps["avg_price"])
-    if rental and rental.get("avg_rent_gbp") and float(rental["avg_rent_gbp"]) > 0:
-        fins["monthly_rent"] = float(rental["avg_rent_gbp"])
-
-    if not fins:
-        result["error"] = "insufficient_inputs"
-        return result
-
-    try:
-        out = _calc_ceiling(
-            legal_flags      = [],          # no flags at discovery stage
-            financial_inputs = fins,
-            base_valuation   = None,
-            strategy         = strategy,
-        )
-        if out.get("error"):
-            result["error"] = out["error"]
-            return result
-
-        cr = out.get("ceiling_range", {})
-        result.update({
-            "ok":               True,
-            "ceiling_low":      cr.get("low"),
-            "ceiling_high":     cr.get("high"),
-            "base_valuation":   out.get("base_valuation"),
-            "base_method":      out.get("base_method"),
-            "strategy":         out.get("strategy_used"),
-            "risk_discount_pct": out.get("risk_discount_pct"),
-            "confidence":       out.get("confidence"),
-            "note":             "No legal flags applied — discovery ceiling only.",
-        })
-    except Exception as e:
-        result["error"] = f"ceiling_error: {type(e).__name__}: {str(e)[:120]}"
-    return result
-
+# (Step 8 discovery ceiling wrapper removed — V-NOBID 2026-09-26)
 
 # ── Step 9: Planning context ────────────────────────────────────────────────
 def _step_planning(postcode: str) -> dict:
@@ -1044,34 +988,8 @@ def enrich_listing(
         steps_failed.append("inference")
         result["inference"] = {"error": "inference_failed"}
 
-    # Step 8 — Ceiling engine (discovery-mode: no legal flags)
-    _t = time.time()
-    step8 = _step_ceiling(
-        guide_price = guide_price,
-        comps       = result.get("comps", {}),
-        rental      = result.get("rental", {}),
-    )
-    step_timing["ceiling"] = round(time.time() - _t, 2)
-    if step8.get("ok"):
-        steps_completed.append("ceiling")
-        result["ceiling"] = {
-            "ceiling_low":      step8["ceiling_low"],
-            "ceiling_high":     step8["ceiling_high"],
-            "base_valuation":   step8["base_valuation"],
-            "base_method":      step8["base_method"],
-            "strategy":         step8["strategy"],
-            "risk_discount_pct": step8["risk_discount_pct"],
-            "confidence":       step8["confidence"],
-            "note":             step8["note"],
-        }
-        log.info("[ENRICH:%s] step:ceiling ok low=%s high=%s t=%.2fs",
-                 listing_id, step8["ceiling_low"], step8["ceiling_high"],
-                 step_timing["ceiling"])
-    else:
-        steps_failed.append("ceiling")
-        result["ceiling"] = {"error": step8.get("error")}
-        log.warning("[ENRICH:%s] step:ceiling FAIL err=%s t=%.2fs",
-                    listing_id, step8.get("error"), step_timing["ceiling"])
+    # V-NOBID (2026-09-26): no discovery bid ceiling. The product shows
+    # comparables, range and issues; the user decides the bid.
 
     # Step 9 — Planning context (article 4, conservation area)
     if postcode:

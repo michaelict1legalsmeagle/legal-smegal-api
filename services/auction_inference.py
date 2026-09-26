@@ -110,7 +110,7 @@ def _build_context(listing: dict, inv: dict) -> str:
     if comps.get("avg_price"):
         tier = comps.get("tier") or "local"
         cnt  = comps.get("count") or "n"
-        lines.append(f"Comparable sales average: £{float(comps['avg_price']):,.0f} ({cnt} sales, {tier} level)")
+        lines.append(f"Local sales average, ALL property types (not like-for-like comparables; do not treat as a value benchmark): £{float(comps['avg_price']):,.0f} ({cnt} sales, {tier} level)")
 
     # HPI
     hpi = inv.get("hpi") or {}
@@ -136,13 +136,7 @@ def _build_context(listing: dict, inv: dict) -> str:
     if epc.get("rating"):
         lines.append(f"EPC rating: {epc['rating'].upper()}")
 
-    # Ceiling
-    ceiling = inv.get("ceiling") or {}
-    if ceiling.get("ceiling_low") and ceiling.get("ceiling_high"):
-        lines.append(
-            f"Discovery bid ceiling (BTL, no legal flags): "
-            f"£{int(ceiling['ceiling_low']):,}–£{int(ceiling['ceiling_high']):,}"
-        )
+    # V-NOBID (2026-09-26): discovery bid ceiling line removed.
 
     # Planning
     planning = inv.get("planning") or {}

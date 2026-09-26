@@ -1,0 +1,26 @@
+# /etc/systemd/system/ocr-fallback.service — V-OCR-FALLBACK (2026-09-26)
+# Bounded so it can never starve production Postgres on the same box.
+# Reachable only via ufw: 8091/tcp from 74.220.51.0/24 and 74.220.59.0/24 (Render), default deny.
+[Unit]
+Description=LegalSmegal OCR fallback (Tesseract)
+After=network.target
+
+[Service]
+Type=simple
+User=ocrfallback
+Group=ocrfallback
+WorkingDirectory=/srv/ocr_fallback
+EnvironmentFile=/etc/ocr_fallback.env
+ExecStart=/srv/ocr_fallback/venv/bin/gunicorn --workers 1 --threads 2 --timeout 900 --bind 0.0.0.0:8091 ocr_fallback_service:app
+Restart=on-failure
+RestartSec=5
+MemoryMax=900M
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target

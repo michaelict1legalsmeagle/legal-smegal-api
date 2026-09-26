@@ -49,3 +49,49 @@ def test_worker_is_module_level_and_recovery_exists():
 
 def test_upload_routes_unusable_text_to_ocr():
     assert "needs_ocr = (docai_ocr is not None) and _text_unusable(extracted_text, page_count)" in APP
+
+
+def test_tesseract_fallback_after_document_ai_fails(monkeypatch):     # V-OCR-FALLBACK
+    monkeypatch.setenv("OCR_FALLBACK_URL", "https://ocr.example")
+    with patch.object(docai_ocr, "_extract_text_sync", side_effect=RuntimeError("sync")), \
+         patch.object(docai_ocr, "_extract_text_batch", side_effect=TimeoutError("batch")), \
+         patch.object(docai_ocr, "_extract_text_fallback", return_value="\n\n=== PAGE 1 ===\n\nT") as fb:
+        assert docai_ocr.extract_text_via_docai(b"%PDF").endswith("T")
+        fb.assert_called_once()
+    monkeypatch.delenv("OCR_FALLBACK_URL")
+    with patch.object(docai_ocr, "_extract_text_sync", side_effect=RuntimeError("sync")), \
+         patch.object(docai_ocr, "_extract_text_batch", side_effect=TimeoutError("batch")):
+        try:
+            docai_ocr.extract_text_via_docai(b"%PDF"); assert False, "should raise"
+        except TimeoutError:
+            pass
+
+
+def test_fallback_service_reads_a_scanned_pdf():
+    """Runs the real service on an image-only PDF (built here: text drawn onto an
+    image, no text layer). Skipped where tesseract/poppler are not installed (CI)."""
+    import shutil, pytest
+    if not (shutil.which("tesseract") and shutil.which("pdftoppm") and shutil.which("pdfinfo")):
+        pytest.skip("tesseract/poppler not available here")
+    PIL = pytest.importorskip("PIL")
+    from PIL import Image, ImageDraw, ImageFont
+    import io, importlib
+    img = Image.new("L", (1700, 2200), 255)
+    d = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 48)
+    except Exception:
+        pytest.skip("no truetype font for the synthetic scan")
+    d.text((150, 300), "Rents received for the Period: 850.00", fill=0, font=font)
+    d.text((150, 400), "15/09/2025-14/10/2025", fill=0, font=font)
+    buf = io.BytesIO(); img.save(buf, format="PDF", resolution=200)
+    sys.path.insert(0, os.path.join(ROOT, "hetzner", "ocr_fallback"))
+    os.environ["OCR_FALLBACK_SECRET"] = "t"
+    import ocr_fallback_service as svc
+    importlib.reload(svc)
+    c = svc.app.test_client()
+    assert c.post("/ocr", data=buf.getvalue(), headers={"X-OCR-Secret": "bad"}).status_code == 401
+    assert c.post("/ocr", data=b"not a pdf", headers={"X-OCR-Secret": "t"}).status_code == 415
+    r = c.post("/ocr", data=buf.getvalue(), headers={"X-OCR-Secret": "t"})
+    assert r.status_code == 200 and r.json["pages"] == 1
+    assert "=== PAGE 1 ===" in r.json["text"] and "Rents received for the Period" in r.json["text"]

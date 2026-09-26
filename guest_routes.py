@@ -357,114 +357,43 @@ def _verify_report_token(token: str) -> str | None:
         return None
 
 # ── LLM analysis ─────────────────────────────────────────────────────────────
-ANALYSIS_SYSTEM = """You are a UK auction property legal analyst. Your job is to FIND EVERY RISK in this legal pack. Be aggressive and thorough — an investor's money is at stake.
-
-Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (flags MUST come first):
-{
-  "flags": [
-    {
-      "severity": "critical|high|missing|note",
-      "title": "specific risk title — max 10 words",
-      "summation": "one sentence: what this means for the investor",
-      "evidence": "verbatim quote from document — max 30 words",
-      "implication": "financial or legal impact — max 20 words",
-      "action": "what investor must do — max 15 words",
-      "source_document": "document filename",
-      "source_clause": "clause number or null",
-      "source_page": null,
-      "legal_risk_weight": 7
-    }
-  ],
-  "flag_counts": {"critical": 0, "high": 0, "missing": 0, "note": 0},
-  "deal_score": 0,
-  "viability_statement": "2-3 sentences: investor verdict",
-  "property": {"address": "full address", "postcode": "postcode", "lot_number": "lot", "type": "BTL/HMO/Commercial/etc", "physical_type": "Flat/Detached/Semi-Detached/Terraced/Other", "tenure": "Freehold/Leasehold", "lease_years": null, "guide_price_pence": null},
-  "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": "working", "buyers_premium_pct": null, "vacant_possession": null},
-  "special_conditions": {
-    "buyers_premium_pct": null, "buyers_premium_gbp": null, "admin_fee_gbp": null,
-    "vat_elected": false, "seller_legal_costs_gbp": null, "search_fee_reimbursement": false,
-    "completion_days": null, "deposit_pct": null, "non_refundable_deposit": false,
-    "conditional_sale": false, "overage_clause": false, "addendum_present": false,
-    "addendum_date": null, "addendum_notes": null, "unusual_clauses": [],
-    "true_cost_additions_notes": null, "special_conditions_present": false,
-    "special_conditions_missing": false
-  },
-  "pack_completeness": {"completeness_pct": 0, "present_count": 0, "total": 13},
-  "documents_processed": 0
-}
-
-FLAG EXTRACTION RULES:
-1. NEVER return an empty flags array. Every legal pack has risks.
-2. Flag EVERY: restrictive covenants, chancel repair, mining/subsidence, flood risk, Japanese knotweed, Article 4, HMO licensing, short lease (<85 years), ground rent escalation, service charge >£2500/yr, absent landlord, possessory title, missing searches, auction clauses, tenancy issues, planning enforcement.
-3. Flag MISSING documents: Special Conditions, Title Register, Local Search, Environmental, EPC — each is a MISSING flag.
-4. Minimum 10-20 flags total.
-5. Scoring: Start 100. Deduct critical=-12, high=-6, missing=-4, note=-1.
-6. Evidence quotes MAX 30 words.
-7. A blank flags array is a SYSTEM FAILURE. Minimum 3 flags required."""
-
-def _run_llm_analysis(documents: list) -> dict:
-    PRIORITY = ["special_conditions","addendum","title_register","lease","title_plan",
-                "deed","freehold","tenancy_ast","local_auth_search","environmental",
-                "epc","survey","auction_tcs","unknown"]
-    docs_sorted = sorted(documents,
-        key=lambda d: PRIORITY.index(d.get("doc_type","unknown"))
-                      if d.get("doc_type","unknown") in PRIORITY else 99)
-
-    parts, total = [], 0
-    HARD_CAP, PER_DOC = 40000, 6000
-    for doc in docs_sorted:
-        txt = (doc.get("extracted_text") or "").strip()
-        if not txt: continue
-        label = f"=== {doc.get('doc_type','unknown').upper()}: {doc.get('file_name','')} ===\n"
-        capped = txt[:PER_DOC] + ("\n[...truncated...]" if len(txt) > PER_DOC else "")
-        chunk  = label + capped + "\n\n"
-        if total + len(chunk) > HARD_CAP:
-            rem = HARD_CAP - total - len(label) - 20
-            if rem > 300:
-                parts.append(label + txt[:rem] + "\n[...truncated...]\n\n")
-            break
-        parts.append(chunk); total += len(chunk)
-
-    if not "".join(parts).strip():
-        raise ValueError("no_text_extracted")
-
+# V-FULLREAD / V-FLAGS (2026-09-26): the one-off report uses the SAME full-pack
+# reader, prompt, evidence verifier and computed score as the platform
+# (pack_reader.analyse_pack). No character caps, temperature 0, no quota, no
+# placeholder flag. Any section failure fails the analysis.
+def _guest_llm_json(system: str, prompt: str) -> dict:
     client  = _get_anthropic()
     message = client.messages.create(
-        model="claude-sonnet-4-6", max_tokens=8192, temperature=0.1,
-        system=ANALYSIS_SYSTEM,
-        messages=[{"role": "user", "content": f"Analyse this auction legal pack:\n\n{''.join(parts)}"}],
+        model="claude-sonnet-4-6", max_tokens=20000, temperature=0,
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
     )
     content = message.content[0].text if message.content else ""
     logger.info(f"[guest2-llm] stop_reason={message.stop_reason}")
-
-    result = None
+    if message.stop_reason == "max_tokens":
+        raise ValueError("LLM response truncated at max_tokens")
     try:
-        result = json.loads(content.strip())
+        return json.loads(content.strip())
     except Exception:
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(),
                          flags=re.IGNORECASE | re.MULTILINE).strip()
         try:
-            result = json.loads(cleaned)
+            return json.loads(cleaned)
         except Exception:
             m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-            if m: result = json.loads(m.group(0))
-            else: raise ValueError(f"LLM non-JSON: {content[:200]}")
+            if m:
+                return json.loads(m.group(0))
+            raise ValueError(f"LLM non-JSON: {content[:200]}")
 
-    if not isinstance(result.get("flags"), list):
-        result["flags"] = []
-    if not result["flags"]:
-        result["flags"] = [{"severity":"note","title":"No specific flags raised",
-            "summation":"Always commission a solicitor review before bidding.",
-            "evidence":"System generated","implication":"No automated flags does not guarantee clean pack",
-            "action":"Commission independent solicitor review",
-            "source_document":"System","source_clause":None,"source_page":None,"legal_risk_weight":1}]
-    result["flag_counts"] = {
-        "critical": sum(1 for f in result["flags"] if (f.get("severity") or "").lower()=="critical"),
-        "high":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower()=="high"),
-        "missing":  sum(1 for f in result["flags"] if (f.get("severity") or "").lower()=="missing"),
-        "note":     sum(1 for f in result["flags"] if (f.get("severity") or "").lower()=="note"),
-    }
-    return result
+
+def _run_llm_analysis(documents: list) -> dict:
+    from pack_reader import analyse_pack
+    try:
+        from services.legal_analysis import build_pack_completeness as _pc
+    except ImportError:
+        from legal_analysis import build_pack_completeness as _pc
+    return analyse_pack(documents, _guest_llm_json, completeness_fn=_pc,
+                        log=lambda m: logger.info(m))
 
 # ── PDF generation (ReportLab) ───────────────────────────────────────────────
 def _generate_pdf_local(summary_json: dict, docs: list) -> bytes:
