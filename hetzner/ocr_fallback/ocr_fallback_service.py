@@ -11,8 +11,14 @@ Evidence it is needed: 23 documents 'empty' after Document AI, 2 stuck
 Lot_34_Rent_Statements_-_redacted.pdf, reads correctly with Tesseract 5.3.4
 (11 pages, "Rents received for the Period: £850.00 … 15/09/2025-14/10/2025").
 
+MEM-OCR (2026-09-26): with header "X-OCR-Engine: full" the service runs the
+WHOLE OCR job here — Google Document AI first (docai_ocr.py, same code as the
+API repo, configured by the DOCAI_* / GOOGLE_APPLICATION_CREDENTIALS_JSON env
+vars in /etc/ocr_fallback.env), then Tesseract if Document AI fails. Render no
+longer OCRs in its own 512 MB memory.
+
 API
-  POST /ocr     header X-OCR-Secret: <OCR_FALLBACK_SECRET>
+  POST /ocr     header X-OCR-Secret: <OCR_FALLBACK_SECRET>   [X-OCR-Engine: full]
                 body: raw PDF bytes (Content-Type: application/pdf), max 40 MB
   -> 200 {"ok": true, "text": "...", "pages": n, "engine": "tesseract <ver>", "dpi": 300}
   -> 4xx/5xx {"ok": false, "error": "..."}
@@ -93,9 +99,19 @@ def ocr():
         return jsonify({"ok": False, "error": "empty or oversized body"}), 413
     if data[:5] != b"%PDF-":
         return jsonify({"ok": False, "error": "not a PDF"}), 415
-    if not _LOCK.acquire(timeout=600):
+    if not _LOCK.acquire(timeout=1500):   # one job at a time; Document AI batch can take minutes
         return jsonify({"ok": False, "error": "busy"}), 503
     try:
+        if request.headers.get("X-OCR-Engine", "").lower() == "full":
+            try:
+                import docai_ocr   # /srv/ocr_fallback/docai_ocr.py (copy of the API repo file)
+                text = docai_ocr._extract_text_local(data)   # OCR_REMOTE_URL / OCR_FALLBACK_URL unset here
+                if text and text.strip():
+                    return jsonify({"ok": True, "text": text, "pages": text.count("=== PAGE "),
+                                    "engine": "document-ai"})
+                raise RuntimeError("Document AI returned no text")
+            except Exception as e:
+                app.logger.warning(f"Document AI failed ({type(e).__name__}: {e}) - using Tesseract")
         r = ocr_pdf(data)
         return jsonify({"ok": True, "text": r["text"], "pages": r["pages"], "engine": _tess_version(), "dpi": DPI})
     except Exception as e:

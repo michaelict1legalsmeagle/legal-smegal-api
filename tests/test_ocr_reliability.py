@@ -95,3 +95,35 @@ def test_fallback_service_reads_a_scanned_pdf():
     r = c.post("/ocr", data=buf.getvalue(), headers={"X-OCR-Secret": "t"})
     assert r.status_code == 200 and r.json["pages"] == 1
     assert "=== PAGE 1 ===" in r.json["text"] and "Rents received for the Period" in r.json["text"]
+
+
+def test_remote_ocr_used_when_configured(monkeypatch):     # MEM-OCR: Render sends the file, never OCRs locally
+    monkeypatch.setenv("OCR_REMOTE_URL", "https://ocr.example")
+    class R:
+        status_code = 200
+        def json(self): return {"ok": True, "text": "\n\n=== PAGE 1 ===\n\nX", "pages": 1, "engine": "document-ai"}
+    with patch("requests.post", return_value=R()) as post, \
+         patch.object(docai_ocr, "_extract_text_local", side_effect=AssertionError("must not OCR locally")):
+        assert docai_ocr.extract_text_via_docai(b"%PDF").endswith("X")
+        assert post.call_args.kwargs["headers"]["X-OCR-Engine"] == "full"
+    monkeypatch.delenv("OCR_REMOTE_URL")
+
+
+def test_list_rows_are_rebuilt_slim():                     # MEM-LIST
+    # app.py cannot be imported in CI (needs live env) — exec just the helper from source
+    src = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
+    a = src.index("_LIST_SJ_PATHS = ["); b = src.index("@app.route(\"/api/deals\", methods=[\"GET\"])")
+    ns = {}; exec(src[a:b], ns)
+    class _app: _list_row_rebuild = staticmethod(ns["_list_row_rebuild"])
+    assert "summary_json, financials_json" not in src[src.index("def list_deals():"):src.index("def list_deals():") + 3000]
+    row = {"id": "d1", "sj_property": {"address": "2c Talbot Road North"}, "sj_prop": None, "sj_auction_date": None,
+           "sj_flag_counts": {"critical": 4, "high": 29, "missing": 3, "note": 47}, "sj_pack_pct": 62,
+           "sj_fcs": None, "sj_listing_url": None, "sj_sc_days": 28, "sj_ct_days": None,
+           "wb_cv": 269797, "wb_rav": 184406, "wb_pct": -32, "wb_af": None, "wb_ta": None, "vc_cv": None, "c_cv": None}
+    out = _app._list_row_rebuild(row)
+    sj = out["summary_json"]
+    assert sj["property"]["address"] == "2c Talbot Road North"
+    assert sj["flag_counts"]["total"] == 83
+    assert sj["special_conditions"] == {"completion_days": 28}
+    assert sj["workbench_ceiling"] == {"comparable_valuation": 269797, "risk_adjusted_value": 184406, "adjustment_pct": -32}
+    assert not any(k.startswith(("sj_", "wb_", "vc_", "c_cv")) for k in out)

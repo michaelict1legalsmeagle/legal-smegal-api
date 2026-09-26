@@ -7756,6 +7756,62 @@ def get_profile():
         return jsonify({"plan": "free", "summaries_used": 0, "analyses_used": 0}), 200
 
 
+# MEM-LIST (2026-09-26): the summary_json fields the list pages read
+# (legalsmegal-dashboard.html list mapping; legalsmegal-deal-report.html calendar).
+# alias -> PostgREST JSON path. Rebuilt into the same summary_json shape, so the
+# frontend is unchanged.
+_LIST_SJ_PATHS = [
+    ("sj_property", "property"), ("sj_prop", "prop"), ("sj_auction_date", "auction_date"),
+    ("sj_flag_counts", "flag_counts"), ("sj_pack_pct", "pack_completeness->completeness_pct"),
+    ("sj_fcs", "financial_current_standing"), ("sj_listing_url", "meta->listing_url"),
+    ("sj_sc_days", "special_conditions->completion_days"),
+    ("sj_ct_days", "completion_terms->completion_days"),
+    ("wb_cv", "workbench_ceiling->comparable_valuation"),
+    ("wb_rav", "workbench_ceiling->risk_adjusted_value"),
+    ("wb_pct", "workbench_ceiling->adjustment_pct"),
+    ("wb_af", "workbench_ceiling->adjustment_factor"),
+    ("wb_ta", "workbench_ceiling->total_adjustment"),
+    ("vc_cv", "verdict_ceiling->comparable_valuation"),
+    ("c_cv", "ceiling->comparable_valuation"),
+]
+
+
+def _list_row_rebuild(r):
+    """Rebuild a slim summary_json with the same keys/shape the list pages read."""
+    r = dict(r or {})
+    g = {a: r.pop(a, None) for a, _ in _LIST_SJ_PATHS}
+    sj = {}
+    for key, alias in (("property", "sj_property"), ("prop", "sj_prop"), ("auction_date", "sj_auction_date"),
+                       ("financial_current_standing", "sj_fcs")):
+        if g[alias] is not None:
+            sj[key] = g[alias]
+    fc = g["sj_flag_counts"]
+    if isinstance(fc, dict):
+        fc = dict(fc)
+        if fc.get("total") is None:   # dashboard reads fc.total first; notes included
+            fc["total"] = sum(v for v in fc.values() if isinstance(v, (int, float)))
+        sj["flag_counts"] = fc
+    if g["sj_pack_pct"] is not None:
+        sj["pack_completeness"] = {"completeness_pct": g["sj_pack_pct"]}
+    if g["sj_listing_url"] is not None:
+        sj["meta"] = {"listing_url": g["sj_listing_url"]}
+    if g["sj_sc_days"] is not None:
+        sj["special_conditions"] = {"completion_days": g["sj_sc_days"]}
+    if g["sj_ct_days"] is not None:
+        sj["completion_terms"] = {"completion_days": g["sj_ct_days"]}
+    wb = {k: g[a] for k, a in (("comparable_valuation", "wb_cv"), ("risk_adjusted_value", "wb_rav"),
+                               ("adjustment_pct", "wb_pct"), ("adjustment_factor", "wb_af"),
+                               ("total_adjustment", "wb_ta")) if g[a] is not None}
+    if wb:
+        sj["workbench_ceiling"] = wb
+    if g["vc_cv"] is not None:
+        sj["verdict_ceiling"] = {"comparable_valuation": g["vc_cv"]}
+    if g["c_cv"] is not None:
+        sj["ceiling"] = {"comparable_valuation": g["c_cv"]}
+    r["summary_json"] = sj or None
+    return r
+
+
 @app.route("/api/deals", methods=["GET"])
 @require_auth
 def list_deals():
@@ -7777,7 +7833,13 @@ def list_deals():
             "hammer_price, hammer_date, outcome, completion_period, "
             "completion_deadline, completion_actions, deal_score, product_type, "
             "pack_hash, created_at, updated_at, "
-            "summary_json, financials_json, analysis_json"
+            "financials_json, analysis_json, "
+            # MEM-LIST (2026-09-26): summary_json is NOT fetched whole any more.
+            # Full-read analyses are ~212 kB each (flags + workbench ceiling); the
+            # list shipped ~8 MB and the 512 MB worker ran out of memory
+            # (Render OOM 26 Sep 17:13/17:33/17:56 UTC). Only the fields the
+            # Dashboard and Deal Report calendar read are selected, inside Postgres.
+            + ", ".join(f"{a}:summary_json->{p}" for a, p in _LIST_SJ_PATHS)
         )
         result = supabase.table("deals") \
             .select(_LIST_COLS) \
@@ -7785,7 +7847,8 @@ def list_deals():
             .neq("status", "archived") \
             .order("created_at", desc=True) \
             .execute()
-        return jsonify({"ok": True, "deals": result.data}), 200
+        deals = [_list_row_rebuild(r) for r in (result.data or [])]
+        return jsonify({"ok": True, "deals": deals}), 200
     except Exception as e:
         app.logger.exception("list_deals failed")
         app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500

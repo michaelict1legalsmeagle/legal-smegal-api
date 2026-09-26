@@ -232,7 +232,40 @@ def _page_text_from_shard(doc_json: dict) -> list:
 
 def extract_text_via_docai(file_bytes: bytes) -> str:
     """V-OCR entry point (same signature/contract as before): sync first,
-    batch fallback, bounded concurrency. Raises on failure."""
+    batch fallback, bounded concurrency. Raises on failure.
+
+    MEM-OCR (2026-09-26): when OCR_REMOTE_URL is set (Render), the WHOLE OCR
+    job runs on the Hetzner OCR service — Document AI there, then Tesseract —
+    and Render only sends the file and receives text. Render ran out of memory
+    at 17:56 UTC while two large scans (20 + 19 pages) were being OCR'd on it.
+    Unset = the in-process path below (used on the Hetzner box itself)."""
+    if os.environ.get("OCR_REMOTE_URL"):
+        return _extract_text_remote(file_bytes)
+    return _extract_text_local(file_bytes)
+
+
+def _extract_text_remote(file_bytes: bytes) -> str:
+    import requests
+    url = os.environ["OCR_REMOTE_URL"].rstrip("/") + "/ocr"
+    secret = os.environ.get("OCR_FALLBACK_SECRET", "")
+    mb = max(0.0, len(file_bytes) / 1048576.0)
+    timeout = int(min(1800, 600 + 90 * mb))      # Document AI batch can take minutes; then Tesseract
+    t0 = time.time()
+    r = requests.post(url, data=file_bytes, timeout=timeout,
+                      headers={"X-OCR-Secret": secret, "X-OCR-Engine": "full",
+                               "Content-Type": "application/pdf"})
+    if r.status_code != 200:
+        raise RuntimeError(f"OCR service HTTP {r.status_code}: {r.text[:200]}")
+    j = r.json()
+    text = j.get("text") or ""
+    if not j.get("ok") or not text.strip():
+        raise RuntimeError(f"OCR service returned no text: {j.get('error')}")
+    logger.info(f"docai_ocr: extracted {len(text):,} chars ({j.get('pages')} pages) on OCR service "
+                f"via {j.get('engine')} in {time.time() - t0:.1f}s")
+    return text
+
+
+def _extract_text_local(file_bytes: bytes) -> str:
     with _OCR_SLOTS:
         try:
             return _extract_text_sync(file_bytes)

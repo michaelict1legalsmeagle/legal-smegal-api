@@ -33,7 +33,11 @@ from flag_evidence import (FLAG_RULES, compute_deal_score, dedupe_flags,
 PIPELINE_VERSION = "fullread-1"
 SECTION_CHARS = 100_000        # ~25k tokens of pack text per call
 SECTION_OVERLAP = 1_500        # overlap when one document spans sections
-MAX_WORKERS = 3                # parallel section calls
+# MEM-READ (2026-09-26): sections are analysed ONE at a time by default. Three at
+# once overlapped with the 512 MB Render OOM at 17:13 UTC (analysis finishing).
+# Slower on big packs, lower peak memory. Override with PACK_READER_WORKERS.
+import os as _os
+MAX_WORKERS = max(1, int(_os.environ.get("PACK_READER_WORKERS", "1") or 1))
 STORAGE_TRUNCATION_MARKER = "[LEGALSMEGAL: TEXT TRUNCATED AT STORAGE"   # see app._store_text
 
 PRIORITY = ["special_conditions", "addendum", "legal_pack", "auction_tcs",

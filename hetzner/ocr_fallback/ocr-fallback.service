@@ -11,7 +11,9 @@ User=ocrfallback
 Group=ocrfallback
 WorkingDirectory=/srv/ocr_fallback
 EnvironmentFile=/etc/ocr_fallback.env
-ExecStart=/srv/ocr_fallback/venv/bin/gunicorn --workers 1 --threads 2 --timeout 900 --bind 0.0.0.0:8091 ocr_fallback_service:app
+# gunicorn 26 writes its control socket under $HOME; this user has none (and ProtectHome)
+Environment=HOME=/tmp
+ExecStart=/srv/ocr_fallback/venv/bin/gunicorn --workers 1 --threads 2 --timeout 1800 --bind 0.0.0.0:8091 ocr_fallback_service:app
 Restart=on-failure
 RestartSec=5
 MemoryMax=900M
