@@ -123,3 +123,22 @@ def test_completion_unit_is_carried_end_to_end():      # G1b
     assert '"completion_period": _cd, "completion_period_type": _ctype' in src   # written from the pack
     assert '("sj_ct_type", "completion_terms->completion_type")' in src           # list carries the unit
     assert '/api/bank-holidays' in src and 'https://www.gov.uk/bank-holidays.json' in src
+
+
+def test_waterfall_split_matches_engine_attribution():   # WF-ATTR
+    from services import ceiling_engine as ce
+    risks = [{"title": "cure", "segments": {"direct_cure_cost": 0.032}},
+             {"title": "delay", "segments": {"delay_finance_drag": 0.063}},
+             {"title": "indem", "segments": {"indemnity_insurance_cost": 0.024}},
+             {"title": "lender", "segments": {"lender_certifiability_risk": 0.025}},
+             {"title": "resid", "segments": {"residual_marketability_risk": 0.156}}]
+    total = 600763.2 - 480535.46
+    m = ce._build_market_consequence_adjustments(risks, 600763.2, total)
+    amounts = {k: v["amount"] for k, v in m.items()}
+    assert sum(amounts.values()) == round(total)
+    # live deal c7738a96 — the engine's own capped/decayed attribution
+    assert amounts == {"direct_cure_cost": 4806, "delay_finance_drag": 18924, "indemnity_insurance_cost": 901,
+                       "lender_certifiability_risk": 1877, "residual_marketability_risk": 93720}
+    # per-flag items inside a segment sum to that segment
+    for v in m.values():
+        assert sum(i["amount"] for i in v["items"]) == v["amount"]

@@ -1062,21 +1062,32 @@ def _build_market_consequence_adjustments(
         seg: sum(i["_raw_amount"] for i in raw_buckets[seg])
         for seg in SEGMENTS
     }
-    grand_raw = sum(seg_raw_totals.values())
+    # WF-ATTR (2026-09-26): share the total out by what each segment ACTUALLY
+    # contributed — after _SEGMENT_CAPS, the 0.5^rank decay and the global
+    # backstop (legal_pack_segment_contributions, the same numbers that produce
+    # total_adjustment). Previously the split used the raw pre-cap/pre-decay sums,
+    # so the waterfall bars disagreed with the engine's own attribution (live deal
+    # c7738a96: residual resale shown £62,519 vs £93,720 contributed; indemnity
+    # £9,618 vs £901). The total never changed; only the split was wrong.
+    _attr = (legal_pack_segment_contributions(risks) or {}).get("contributions") or {}
+    seg_weights: dict[str, float] = {
+        s: float(_attr.get(s, 0.0)) for s in SEGMENTS
+    } if _attr else dict(seg_raw_totals)
+    grand_w = sum(seg_weights.values())
 
     # Scale so segments sum exactly to total_adjustment
     canonical_total = round(total_adjustment or 0.0)
-    active_segs = [s for s in SEGMENTS if seg_raw_totals[s] > 0]
+    active_segs = [s for s in SEGMENTS if seg_weights[s] > 0]
 
     scaled_amounts: dict[str, int] = {}
-    if canonical_total > 0 and grand_raw > 0:
+    if canonical_total > 0 and grand_w > 0:
         allocated = 0
         for idx, seg in enumerate(active_segs):
             if idx == len(active_segs) - 1:
                 # Last active segment absorbs rounding residual
                 scaled_amounts[seg] = canonical_total - allocated
             else:
-                amt = round(canonical_total * seg_raw_totals[seg] / grand_raw)
+                amt = round(canonical_total * seg_weights[seg] / grand_w)
                 scaled_amounts[seg] = amt
                 allocated += amt
     else:
