@@ -114,3 +114,12 @@ def test_storage_truncation_is_reported():
     _, cov = pr.build_sections(docs)
     assert cov["documents_truncated_at_storage"] == ["huge.pdf"]
     assert cov["documents_read_in_full"] == 0
+
+
+def test_completion_unit_is_carried_end_to_end():      # G1b
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "app.py"), encoding="utf-8").read()
+    assert '"completion_period_type",' in src                         # PATCH whitelist
+    assert '"completion_period": _cd, "completion_period_type": _ctype' in src   # written from the pack
+    assert '("sj_ct_type", "completion_terms->completion_type")' in src           # list carries the unit
+    assert '/api/bank-holidays' in src and 'https://www.gov.uk/bank-holidays.json' in src

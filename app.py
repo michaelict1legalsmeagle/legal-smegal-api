@@ -7766,6 +7766,7 @@ _LIST_SJ_PATHS = [
     ("sj_fcs", "financial_current_standing"), ("sj_listing_url", "meta->listing_url"),
     ("sj_sc_days", "special_conditions->completion_days"),
     ("sj_ct_days", "completion_terms->completion_days"),
+    ("sj_ct_type", "completion_terms->completion_type"),
     ("wb_cv", "workbench_ceiling->comparable_valuation"),
     ("wb_rav", "workbench_ceiling->risk_adjusted_value"),
     ("wb_pct", "workbench_ceiling->adjustment_pct"),
@@ -7797,8 +7798,8 @@ def _list_row_rebuild(r):
         sj["meta"] = {"listing_url": g["sj_listing_url"]}
     if g["sj_sc_days"] is not None:
         sj["special_conditions"] = {"completion_days": g["sj_sc_days"]}
-    if g["sj_ct_days"] is not None:
-        sj["completion_terms"] = {"completion_days": g["sj_ct_days"]}
+    if g["sj_ct_days"] is not None or g["sj_ct_type"] is not None:
+        sj["completion_terms"] = {"completion_days": g["sj_ct_days"], "completion_type": g["sj_ct_type"]}
     wb = {k: g[a] for k, a in (("comparable_valuation", "wb_cv"), ("risk_adjusted_value", "wb_rav"),
                                ("adjustment_pct", "wb_pct"), ("adjustment_factor", "wb_af"),
                                ("total_adjustment", "wb_ta")) if g[a] is not None}
@@ -7830,7 +7831,7 @@ def list_deals():
         _LIST_COLS = (
             "id, user_id, deal_name, title, address, postcode, lot_number, "
             "guide_price, deal_type, auction_date, status, bid_ceiling, "
-            "hammer_price, hammer_date, outcome, completion_period, "
+            "hammer_price, hammer_date, outcome, completion_period, completion_period_type, "
             "completion_deadline, completion_actions, deal_score, product_type, "
             "pack_hash, created_at, updated_at, "
             "financials_json, analysis_json, "
@@ -8054,10 +8055,14 @@ def update_deal(deal_id: str):
         "deal_name", "title", "postcode", "lot_number", "guide_price",
         "deal_type", "auction_date", "status", "bid_ceiling", "hammer_price", "outcome",
         "completion_period", "completion_deadline", "completion_actions",
+        "completion_period_type",
         "summary_json", "analysis_json", "area_json", "financials_json",
         "deal_score", "address", "product_type",
     }
     updates = {k: v for k, v in data.items() if k in allowed}
+    # G1b (2026-09-26): completion period unit — 'working' or 'calendar' only
+    if "completion_period_type" in updates and updates["completion_period_type"] not in (None, "working", "calendar"):
+        return jsonify({"error": "completion_period_type must be 'working' or 'calendar'"}), 400
     if not updates:
         return jsonify({"error": "No valid fields to update"}), 400
     updates["updated_at"] = now_iso()
@@ -9346,7 +9351,10 @@ def summarise_deal(deal_id: str):
                            or (result.get("completion_terms") or {}).get("completion_days"))
                     _cd = int(str(_cd).strip()) if _cd not in (None, "") and str(_cd).strip().isdigit() else None
                     if _cd and 0 < _cd < 400:
-                        supabase.table("deals").update({"completion_period": _cd}) \
+                        # G1b: the unit comes from the pack ("working"/"calendar"); null if not stated
+                        _ctype = (result.get("completion_terms") or {}).get("completion_type")
+                        _ctype = _ctype if _ctype in ("working", "calendar") else None
+                        supabase.table("deals").update({"completion_period": _cd, "completion_period_type": _ctype}) \
                             .eq("id", _deal_id).is_("completion_period", "null").execute()
                 except Exception as _cpe:
                     app.logger.warning(f"[G1] completion_period from pack failed {_deal_id}: {_cpe}")
@@ -10017,6 +10025,7 @@ def get_dashboard():
         result = supabase.table("deals") \
             .select("id, deal_name, title, address, postcode, status, deal_score, "
                     "guide_price, auction_date, deal_type, created_at, updated_at, "
+                    "completion_period, completion_period_type, "
                     "financials_json, analysis_json, "
                     # MEM-LIST (2026-09-26): same slim summary_json fields as /api/deals
                     # (flag_counts, property, completion days) — not the ~212 kB blob.
@@ -10096,6 +10105,13 @@ def get_dashboard():
             # G1: user-set period, else the pack's stated period, else null (no default)
             "completion_period": (d.get("completion_period")
                                   or _pack_completion_days(d.get("summary_json"))),
+            # G1b: unit of the period — user/pack-set type; if the pack stated the period, its type
+            # the pack's unit applies when the period is the pack's own figure (set by G1 from the pack)
+            "completion_period_type": (d.get("completion_period_type")
+                                       or (((d.get("summary_json") or {}).get("completion_terms") or {}).get("completion_type")
+                                           if (not d.get("completion_period")
+                                               or d.get("completion_period") == _pack_completion_days(d.get("summary_json")))
+                                           else None)),
             "completion_period_source": ("user" if d.get("completion_period")
                                          else ("pack" if _pack_completion_days(d.get("summary_json")) else None)),
             "completion_actions": d.get("completion_actions") or [],
@@ -14695,6 +14711,37 @@ def join_waitlist():
             app.logger.error(f"[waitlist] insert failed: {e}")
             return jsonify({"ok": False, "error": "could not save"}), 500
     return jsonify({"ok": True}), 200
+
+
+_BANK_HOL_CACHE = {"at": 0.0, "data": None}
+
+
+def _bank_holidays():
+    """G1b (2026-09-26): UK bank holidays from the official GOV.UK feed
+    (https://www.gov.uk/bank-holidays.json), cached for 24 h. Never hand-typed.
+    Returns {division: [YYYY-MM-DD, ...]} or None if the feed is unreachable."""
+    import time as _t
+    if _BANK_HOL_CACHE["data"] and _t.time() - _BANK_HOL_CACHE["at"] < 86400:
+        return _BANK_HOL_CACHE["data"]
+    try:
+        r = requests.get("https://www.gov.uk/bank-holidays.json", timeout=10)
+        r.raise_for_status()
+        j = r.json()
+        data = {div: sorted(e["date"] for e in (j.get(div) or {}).get("events", []))
+                for div in ("england-and-wales", "scotland", "northern-ireland")}
+        _BANK_HOL_CACHE.update(at=_t.time(), data=data)
+        return data
+    except Exception as e:
+        app.logger.warning(f"[bank-holidays] GOV.UK feed unavailable: {e}")
+        return _BANK_HOL_CACHE["data"]
+
+
+@app.route("/api/bank-holidays", methods=["GET"])
+def bank_holidays_route():
+    data = _bank_holidays()
+    if not data:
+        return jsonify({"ok": False, "error": "GOV.UK bank-holiday feed unavailable"}), 503
+    return jsonify({"ok": True, "source": "https://www.gov.uk/bank-holidays.json", "divisions": data}), 200
 
 
 def _pack_completion_days(sj):
