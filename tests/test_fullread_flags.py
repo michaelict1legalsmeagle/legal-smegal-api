@@ -142,3 +142,11 @@ def test_waterfall_split_matches_engine_attribution():   # WF-ATTR
     # per-flag items inside a segment sum to that segment
     for v in m.values():
         assert sum(i["amount"] for i in v["items"]) == v["amount"]
+
+
+def test_old_split_workbench_is_not_reused():            # WF-ATTR reuse rule
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "services", "ceiling_engine.py"), encoding="utf-8").read()
+    assert 'MCA_ATTRIBUTION_VERSION = "capped_decayed_v1"' in src
+    assert '"mca_attribution": MCA_ATTRIBUTION_VERSION' in src
+    assert '_existing_wb.get("mca_attribution") == MCA_ATTRIBUTION_VERSION' in src

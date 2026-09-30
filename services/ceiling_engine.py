@@ -1013,6 +1013,9 @@ def _flag_to_segments(flag: dict) -> dict[str, float]:
     return {"residual_marketability_risk": round(fallback_frac, 6)}
 
 
+MCA_ATTRIBUTION_VERSION = "capped_decayed_v1"   # WF-ATTR: bars follow segment_attribution
+
+
 def _build_market_consequence_adjustments(
     risks: list[dict],
     comparable_valuation: float,
@@ -3552,6 +3555,9 @@ def calculate_workbench_ceiling(
         "total_adjustment":              _total_adj,
         "adjustment_pct":               _adj_pct,
         "market_consequence_adjustments": _mca,
+        # WF-ATTR (2026-09-26): version of the bar split. Persisted workbenches without
+        # it carry the old raw-proportional split and are recomputed (see reuse rule).
+        "mca_attribution": MCA_ATTRIBUTION_VERSION,
         "active_flag_count":   len(active_legal_flags),
         "all_flags_resolved":  all_resolved,
         "verdict_midpoint":    verdict_mid,      # backward compat
@@ -4547,6 +4553,10 @@ def ensure_ceiling_owned_objects(
         and _wb_check_val > 0
         and _wb_has_segments      # stale pre-r6 objects must be recomputed
         and _wb_has_attribution   # stale pre-F-05 objects must be recomputed
+        # WF-ATTR (2026-09-26): bars persisted before the split followed the engine's
+        # own attribution must be recomputed, or the old split shows forever
+        # (confirmed live: c7738a96 still showed £62,519 residual after deploy).
+        and _existing_wb.get("mca_attribution") == MCA_ATTRIBUTION_VERSION
     )
 
     if _wb_valid:
