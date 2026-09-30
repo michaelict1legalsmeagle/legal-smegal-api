@@ -150,3 +150,14 @@ def test_old_split_workbench_is_not_reused():            # WF-ATTR reuse rule
     assert 'MCA_ATTRIBUTION_VERSION = "capped_decayed_v1"' in src
     assert '"mca_attribution": MCA_ATTRIBUTION_VERSION' in src
     assert '_existing_wb.get("mca_attribution") == MCA_ATTRIBUTION_VERSION' in src
+
+
+def test_verdict_and_workbench_risk_are_stored_separately():   # RISK-SCOPE
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "app.py"), encoding="utf-8").read()
+    i = src.index('_scope = str(body.get("scope") or "workbench").lower()')
+    blk = src[i:i + 600]
+    assert '_sj2["verdict_risk"] = result' in blk and '_sj2["workbench_ceiling"] = result' in blk
+    assert 'if _mid and _mid > 5000 and _scope != "verdict":' in src          # bid_ceiling not overwritten by Verdict
+    assert 'request.args.get("view") == "verdict"' in src                       # Verdict reads its own figure
+    assert 'result["verdict_risk"]      = _workbench_ceil' in src               # seeded at analysis

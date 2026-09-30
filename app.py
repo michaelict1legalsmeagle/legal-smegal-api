@@ -8037,6 +8037,17 @@ def get_deal(deal_id: str):
                     deal["summary_json"] = _sj
             except Exception as _be:
                 app.logger.warning(f"[get_deal] backfill failed for {deal_id}: {_be}")
+        # RISK-SCOPE (2026-09-30): the Verdict page asks for ?view=verdict and gets
+        # its own all-flags risk object in the workbench_ceiling slot it already
+        # reads; _verdict_risk_missing tells it to compute one (scope=verdict).
+        if request.args.get("view") == "verdict":
+            _vsj = dict(deal.get("summary_json") or {})
+            if isinstance(_vsj.get("verdict_risk"), dict):
+                _vsj["workbench_ceiling"] = _vsj["verdict_risk"]
+                _vsj["_verdict_risk_missing"] = False
+            else:
+                _vsj["_verdict_risk_missing"] = True
+            deal = dict(deal); deal["summary_json"] = _vsj
         return jsonify({"ok": True, "deal": deal}), 200
     except Exception as e:
         app.logger.exception("get_deal failed")
@@ -9250,6 +9261,9 @@ def summarise_deal(deal_id: str):
                         # Real comp evidence exists — persist all three owned objects.
                         result["verdict_ceiling"]   = _verdict_ceil
                         result["workbench_ceiling"] = _workbench_ceil
+                        # RISK-SCOPE: at analysis no flag has been resolved, so the raw
+                        # (Verdict, all flags) risk equals the workbench risk.
+                        result["verdict_risk"]      = _workbench_ceil
                         result["ceiling"]           = _verdict_ceil  # legacy alias = verdict (canonical base)
                         app.logger.info(
                             f"[ceiling] deal={_deal_id} strategy={_strategy} "
@@ -10130,8 +10144,10 @@ def get_dashboard():
             "total_deals":            total_deals,
             "avg_deal_score":         round(avg_score, 1) if avg_score is not None else None,   # kept for API compatibility; no longer displayed
             # PACK-COUNTS (2026-09-26): the page shows evidenced flag counts, not a /100 score
-            "critical_flags_total":   sum(int(((d.get("summary_json") or {}).get("flag_counts") or {}).get("critical") or 0) for d in deals),
-            "deals_with_critical":    sum(1 for d in deals if int(((d.get("summary_json") or {}).get("flag_counts") or {}).get("critical") or 0) > 0),
+            # operational counts: Workbench-adjusted (resolved flags excluded) when the user
+            # has reviewed flags, else the analysis counts — the same basis as each row
+            "critical_flags_total":   sum(_op_critical(d) for d in deals),
+            "deals_with_critical":    sum(1 for d in deals if _op_critical(d) > 0),
             "deals_analysed":         len(scored),
             "deals_with_financials":  len(with_fin),
             "avg_gross_yield_pct":    round(sum(gy_vals)/len(gy_vals), 2) if gy_vals else None,
@@ -10576,21 +10592,30 @@ def ceiling_endpoint():
                 if not isinstance(_sj2, dict):
                     _sj2 = {}
                 _sj2["verdict_ceiling"]   = verdict_result
-                _sj2["workbench_ceiling"] = result
+                # RISK-SCOPE (2026-09-30): Verdict (all flags = raw deal risk) and Workbench
+                # (unresolved flags = user-adjusted risk) are different figures by recorded
+                # doctrine (14 Jun). They were both written to workbench_ceiling, so each
+                # page overwrote the other (live c7738a96: 20.0% after 2 resolved flags ->
+                # 22.9% after a Verdict load). Each scope now has its own field.
+                _scope = str(body.get("scope") or "workbench").lower()
+                if _scope == "verdict":
+                    _sj2["verdict_risk"] = result
+                else:
+                    _sj2["workbench_ceiling"] = result
                 # Fix 8: ceiling alias = verdict_result (comparable base, no risk deduction).
                 # Consistent with _recompute_deal_ceiling which also sets ceiling = verdict.
                 # Pages using the legacy ceiling fallback see the comparable base, not the
                 # risk-reduced workbench — which is the safer display value for that context.
                 _sj2["ceiling"] = verdict_result
-                if _fs is not None:
+                if _fs is not None and _scope != "verdict":
                     _sj2["financial_current_standing"] = _fs
 
                 _update = {"summary_json": _sj2, "updated_at": now_iso()}
-                if _mid and _mid > 5000:
+                if _mid and _mid > 5000 and _scope != "verdict":
                     _update["bid_ceiling"] = int(round(_mid))
                 supabase.table("deals").update(_update).eq("id", deal_id).eq("user_id", request.user_id).execute()
                 if _mid and _mid > 5000:
-                    print(f"[ceiling] Stored workbench ceiling £{int(round(_mid)):,} for {deal_id}")
+                    print(f"[ceiling] Stored {'verdict risk' if _scope == 'verdict' else 'workbench ceiling'} £{int(round(_mid)):,} for {deal_id}")
             except Exception as _se:
                 print(f"[ceiling] Store to DB failed: {_se}")
         elif deal_id and not _ceiling_is_real:
@@ -14742,6 +14767,18 @@ def bank_holidays_route():
     if not data:
         return jsonify({"ok": False, "error": "GOV.UK bank-holiday feed unavailable"}), 503
     return jsonify({"ok": True, "source": "https://www.gov.uk/bank-holidays.json", "divisions": data}), 200
+
+
+def _op_critical(d):
+    """Critical-flag count on the Dashboard's operational basis (RISK-SCOPE):
+    analysis_json.flag_counts (Workbench, resolved excluded) if present, else the
+    analysis summary's counts. Matches the per-row figure the Dashboard shows."""
+    fc = ((d.get("analysis_json") or {}).get("flag_counts")
+          or (d.get("summary_json") or {}).get("flag_counts") or {})
+    try:
+        return int(fc.get("critical") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _pack_completion_days(sj):
