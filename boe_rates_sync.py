@@ -42,6 +42,12 @@ SERIES = {
     "IUDBEDR": "Bank Rate",
     "IUMBV34": "2yr fixed 75% LTV",
     "IUMBV42": "5yr fixed 75% LTV",
+    # FIN-CORE (30 Sep 2026) — comparison benchmarks for the Financials 10-year card.
+    # Both codes confirmed on bankofengland.co.uk/boeapps/database (category pages
+    # "Fixed rate bond deposits" and "Nominal par yield, 10 year"). Rows are seeded
+    # with a NULL rate by sql/20260930_bench_rates_fincore.sql; the first run fills them.
+    "IUMB6RH": "2yr fixed-rate savings bond (households, quoted)",
+    "IUMAMNPY": "10yr gilt nominal par yield (monthly average)",
 }
 
 BOE_BASE = "https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp"

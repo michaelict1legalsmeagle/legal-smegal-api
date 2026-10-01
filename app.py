@@ -7714,12 +7714,7 @@ def create_deal():
                     "guide_price":        data.get("guide_price"),
                     "target_yield":       6.0,
                     "ltv_pct":            75.0,
-                    "finance_rate_pct":   5.14,
-                    "management_pct":     12.0,
-                    "maintenance_pct":    1.0,
-                    "legal_fees":         1500.0,
-                    "void_weeks":         2.0,
-                    "hold_years":         10.0,
+                    # FIN-CORE: no invented model defaults seeded (rate, management, maintenance, legal, voids, hold)
                 }
             },
         }).execute()
@@ -9778,7 +9773,22 @@ def get_me():
         app.logger.error("Unhandled exception: %s", e, exc_info=True); return jsonify({"error": "An internal error occurred"}), 500
 
 
+# ── AREA HISTORY (AREA-HIST, 30 Sep 2026) ───────────────────
+# Decade HPI scenarios + ONS rent growth for the Financials 10-year projection,
+# computed from stored official series for the deal's own local authority.
+import area_history as _area_history
+app.register_blueprint(_area_history.register(require_auth, lambda: supabase, supabase_data_query))
+
 # ── FINANCIAL MODEL ──────────────────────────────────────────
+
+# FIN-CORE (30 Sep 2026): settings the Financials page owns. Stored as sent so a
+# reload restores them; never defaulted here.
+_FIN_PAGE_KEYS = (
+    "mortgage_term_years", "nation", "additional_dwelling", "buyer_entity", "occupancy_pct",
+    "cost_inflation_pct", "sale_cost_pct", "rent_growth_pct", "growth_worst_pct",
+    "growth_base_pct", "growth_best_pct", "mortgage_type", "_user_fields",
+)
+
 
 def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
     """Calculate property investment yields from raw inputs. All GBP in £ (float)."""
@@ -9798,30 +9808,35 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
     purchase_price      = safe_float(inputs.get("purchase_price"))  # was _gbp — _gbp divides ints>10000 by 100 (151000→1510). purchase_price is always user-entered pounds, never pence.
     guide_price         = _gbp(inputs.get("guide_price"))
-    renovation_cost     = _gbp(inputs.get("renovation_cost")) or 0.0
-    monthly_rent        = _gbp(inputs.get("monthly_rent"))
-    annual_rent         = _gbp(inputs.get("annual_rent"))
+    renovation_cost     = safe_float(inputs.get("renovation_cost")) or 0.0
+    monthly_rent        = safe_float(inputs.get("monthly_rent"))
+    annual_rent         = safe_float(inputs.get("annual_rent"))
     void_weeks          = safe_float(inputs.get("void_weeks")) or 0.0
     management_pct      = _pct(inputs.get("management_pct")) or 0.0
-    service_charge_pa   = _gbp(inputs.get("service_charge_pa")) or 0.0
-    ground_rent_pa      = _gbp(inputs.get("ground_rent_pa")) or 0.0
-    insurance_pa        = _gbp(inputs.get("insurance_pa")) or 0.0
-    maintenance_pct     = _pct(inputs.get("maintenance_pct")) or 1.0
+    service_charge_pa   = safe_float(inputs.get("service_charge_pa")) or 0.0
+    ground_rent_pa      = safe_float(inputs.get("ground_rent_pa")) or 0.0
+    insurance_pa        = safe_float(inputs.get("insurance_pa")) or 0.0
+    maintenance_pct     = _pct(inputs.get("maintenance_pct")) or 0.0   # FIN-CORE: no hidden 1% default
     buyers_premium_pct  = _pct(inputs.get("buyers_premium_pct")) or 0.0
-    stamp_duty          = _gbp(inputs.get("stamp_duty")) or 0.0
-    legal_fees          = _gbp(inputs.get("legal_fees")) or 1500.0
-    survey_cost         = _gbp(inputs.get("survey_cost")) or 0.0
+    # FIN-CORE: every money field the page sends is pounds. _gbp() divides whole
+    # numbers over 10,000 by 100 (a pence heuristic) — £11,500 SDLT became £115.
+    stamp_duty          = safe_float(inputs.get("stamp_duty")) or 0.0
+    legal_fees          = safe_float(inputs.get("legal_fees")) or 0.0   # FIN-CORE: no hidden £1,500 default
+    admin_fee           = safe_float(inputs.get("admin_fee")) or 0.0    # FIN-CORE: was missing from the total
+    acquisition_insurance = safe_float(inputs.get("acquisition_insurance")) or 0.0
+    survey_cost         = safe_float(inputs.get("survey_cost")) or 0.0
     finance_rate_pct    = _pct(inputs.get("finance_rate_pct")) or 0.0
     ltv_pct             = _pct(inputs.get("ltv_pct")) or 0.0
     target_yield        = _pct(inputs.get("target_yield")) or 6.0
     exit_price          = _gbp(inputs.get("exit_price"))
-    hold_years          = safe_float(inputs.get("hold_years")) or 5.0
+    hold_years          = safe_float(inputs.get("hold_years")) or 10.0  # matches the page horizon
 
     if purchase_price is None:
         return {"ok": False, "error": "purchase_price is required"}
 
     buyers_premium      = purchase_price * (buyers_premium_pct / 100.0)
-    total_acquisition   = purchase_price + buyers_premium + stamp_duty + legal_fees + survey_cost
+    total_acquisition   = (purchase_price + buyers_premium + stamp_duty + legal_fees + survey_cost
+                           + admin_fee + acquisition_insurance)   # FIN-CORE: same total as the page
     total_invested      = total_acquisition + renovation_cost
 
     if annual_rent is None and monthly_rent is not None:
@@ -9881,10 +9896,14 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
             "legal_fees": _r2(legal_fees), "survey_cost": _r2(survey_cost),
             "finance_rate_pct": _r2(finance_rate_pct), "ltv_pct": _r2(ltv_pct),
             "target_yield": _r2(target_yield), "exit_price": _r2(exit_price), "hold_years": _r2(hold_years),
+            "admin_fee": _r2(admin_fee), "acquisition_insurance": _r2(acquisition_insurance),
+            # FIN-CORE: page-only settings echoed so a reload restores exactly what was saved
+            **{k: inputs.get(k) for k in _FIN_PAGE_KEYS if inputs.get(k) is not None},
         },
         "acquisition": {
             "buyers_premium": _r2(buyers_premium), "stamp_duty": _r2(stamp_duty),
             "legal_fees": _r2(legal_fees), "survey_cost": _r2(survey_cost),
+            "admin_fee": _r2(admin_fee), "acquisition_insurance": _r2(acquisition_insurance),
             "total_acquisition": _r2(total_acquisition), "renovation_cost": _r2(renovation_cost),
             "total_invested": _r2(total_invested),
         },
@@ -9944,12 +9963,7 @@ def get_financials(deal_id: str):
                     "renovation_cost":   None,
                     "target_yield":      6.0,
                     "ltv_pct":           75.0,
-                    "finance_rate_pct":  5.14,
-                    "management_pct":    12.0,
-                    "maintenance_pct":   1.0,
-                    "legal_fees":        1500.0,
-                    "void_weeks":        2.0,
-                    "hold_years":        10.0,
+                    # FIN-CORE: no invented model defaults seeded (rate, management, maintenance, legal, voids, hold)
                 }
             }
         return jsonify({"ok": True, "financials": financials}), 200
@@ -10005,6 +10019,10 @@ def save_financials(deal_id: str):
             _fe_flags["manual_ceiling"] = data["manual_ceiling"]
     if data.get("_purchase_price_is_user_entered"):
         _fe_flags["_purchase_price_is_user_entered"] = True
+    # FIN-CORE: the figures the page displayed, computed by legalsmegal-fincore.js,
+    # stored as-is so other pages can show the same numbers.
+    if isinstance(data.get("page_figures"), dict):
+        _fe_flags["page_figures"] = data["page_figures"]
 
     if _fe_flags:
         result = dict(result)  # avoid mutating

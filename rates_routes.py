@@ -107,6 +107,9 @@ def get_rates():
     # Group lenders by strategy in the exact frontend shape.
     lenders = {s: [] for s in _STRATEGIES}
     newest_as_of = None
+    # FIN-CORE: staleness judged per strategy by its OLDEST row — an April seed
+    # row can no longer hide behind a fresh September BTL row.
+    oldest_by_strategy = {}
     for r in lender_rows:
         strat = r.get("strategy")
         if strat in lenders:
@@ -114,19 +117,45 @@ def get_rates():
             ao = str(r.get("as_of") or "")[:10]
             if ao and (newest_as_of is None or ao > newest_as_of):
                 newest_as_of = ao
+            prev = oldest_by_strategy.get(strat)
+            if not ao:
+                oldest_by_strategy[strat] = ""
+            elif prev is None or (prev != "" and ao < prev):
+                oldest_by_strategy[strat] = ao
+    strategy_meta = {}
+    for strat in _STRATEGIES:
+        if not lenders[strat]:
+            continue
+        oldest = oldest_by_strategy.get(strat)
+        strategy_meta[strat] = {
+            "oldest_as_of": oldest or None,
+            "stale": (not oldest) or _age_days(oldest) > LENDER_STALE_DAYS,
+        }
 
     # Benchmark block.
-    bench = {"bank_rate": None, "fix2_75": None, "fix5_75": None, "as_of": None, "stale": True}
+    bench = {"bank_rate": None, "fix2_75": None, "fix5_75": None, "as_of": None, "stale": True,
+             # FIN-CORE comparison series, each with its own date (null until the sync fills it)
+             "savings_2y": None, "savings_2y_as_of": None, "gilt_10y": None, "gilt_10y_as_of": None,
+             "bank_rate_as_of": None}
     bench_as_of = None
     for b in bench_rows:
         code, rate = b.get("series_code"), _num(b.get("rate_pct"))
+        ao = str(b.get("as_of") or "")[:10]
         if code == "IUDBEDR":
             bench["bank_rate"] = rate
+            bench["bank_rate_as_of"] = ao or None
         elif code == "IUMBV34":
             bench["fix2_75"] = rate
         elif code == "IUMBV42":
             bench["fix5_75"] = rate
-        ao = str(b.get("as_of") or "")[:10]
+        elif code == "IUMB6RH":
+            bench["savings_2y"] = rate
+            bench["savings_2y_as_of"] = ao or None
+            continue  # comparison series do not drive the mortgage benchmark date
+        elif code == "IUMAMNPY":
+            bench["gilt_10y"] = rate
+            bench["gilt_10y_as_of"] = ao or None
+            continue
         if ao and (bench_as_of is None or ao > bench_as_of):
             bench_as_of = ao
     if bench_as_of:
@@ -154,6 +183,7 @@ def get_rates():
             "lender_as_of": newest_as_of,
             "lender_stale": lender_stale,
             "threshold_days": LENDER_STALE_DAYS,
+            "strategies": strategy_meta,
         },
         "bench": bench,
         "cross_check": {
