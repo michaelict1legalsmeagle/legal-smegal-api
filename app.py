@@ -9787,6 +9787,7 @@ _FIN_PAGE_KEYS = (
     "mortgage_term_years", "nation", "additional_dwelling", "buyer_entity", "occupancy_pct",
     "cost_inflation_pct", "sale_cost_pct", "rent_growth_pct", "growth_worst_pct",
     "growth_base_pct", "growth_best_pct", "mortgage_type", "_user_fields",
+    "lender_fee", "pack_costs", "bridging_cost",   # FIN-CORE rev 5
 )
 
 
@@ -9824,6 +9825,9 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
     legal_fees          = safe_float(inputs.get("legal_fees")) or 0.0   # FIN-CORE: no hidden £1,500 default
     admin_fee           = safe_float(inputs.get("admin_fee")) or 0.0    # FIN-CORE: was missing from the total
     acquisition_insurance = safe_float(inputs.get("acquisition_insurance")) or 0.0
+    lender_fee          = safe_float(inputs.get("lender_fee")) or 0.0      # FIN-CORE rev 5
+    pack_costs          = safe_float(inputs.get("pack_costs")) or 0.0
+    bridging_cost       = safe_float(inputs.get("bridging_cost")) or 0.0
     survey_cost         = safe_float(inputs.get("survey_cost")) or 0.0
     finance_rate_pct    = _pct(inputs.get("finance_rate_pct")) or 0.0
     ltv_pct             = _pct(inputs.get("ltv_pct")) or 0.0
@@ -9836,7 +9840,7 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
     buyers_premium      = purchase_price * (buyers_premium_pct / 100.0)
     total_acquisition   = (purchase_price + buyers_premium + stamp_duty + legal_fees + survey_cost
-                           + admin_fee + acquisition_insurance)   # FIN-CORE: same total as the page
+                           + admin_fee + acquisition_insurance + lender_fee + pack_costs + bridging_cost)   # FIN-CORE: same total as the page
     total_invested      = total_acquisition + renovation_cost
 
     if annual_rent is None and monthly_rent is not None:

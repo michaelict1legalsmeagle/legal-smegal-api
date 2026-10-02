@@ -139,3 +139,11 @@ def test_whole_pound_amounts_over_10k_are_not_divided_by_100():
     r = calc({"purchase_price": 200000, "stamp_duty": 11500, "renovation_cost": 25000})
     assert r["acquisition"]["stamp_duty"] == 11500        # was £115 via the pence heuristic
     assert r["acquisition"]["renovation_cost"] == 25000   # was £250
+
+
+def test_rev5_lender_fee_pack_costs_and_bridging_count_in_total():
+    calc = _load_calc()
+    r = calc({"purchase_price": 200000, "stamp_duty": 11500, "lender_fee": 1495, "pack_costs": 1078.8, "bridging_cost": 0})
+    # 200,000 + 11,500 + 1,495 + 1,078.80 = 214,073.80
+    assert r["acquisition"]["total_acquisition"] == 214073.8
+    assert r["inputs"]["lender_fee"] == 1495 and r["inputs"]["pack_costs"] == 1078.8
