@@ -120,3 +120,10 @@ def test_no_hpi_lists_unadjusted_sales():
 def test_sales_list_is_capped_but_total_is_true():
     out = _make(APP, _sales([200000 + i * 100 for i in range(45)], 2021))("SW1A1AA", "terraced", "T")
     assert out["sales_total"] == 45 and len(out["sales"]) == 30
+
+
+def test_scope_is_recorded_as_postcode():
+    out = _make(APP, SCENARIOS["one"])("SN139LZ", "terraced", "T")
+    assert out["scope"] == "postcode" and out["scope_value"] == "SN13 9LZ"
+    out = _make(APP, SCENARIOS["none"])("B11AA", "terraced", "T")
+    assert out["scope_value"] == "B1 1AA"

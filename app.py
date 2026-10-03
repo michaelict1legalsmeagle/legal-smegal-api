@@ -10908,9 +10908,14 @@ def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) ->
     # page can show the street evidence in EVERY state (blended, too varied, too few),
     # not only when it is blended. value / n / cv / credibility are computed exactly
     # as before (guarded by tests/test_same_street_evidence.py).
+    # S-SCOPE-LABEL (2026-10-03): record WHAT was searched. The match is the subject's
+    # postcode unit (postcode_nospace), not the whole street, and the page labels from
+    # this field so the wording can never drift from the query.
+    _pc_fmt = (pcd_nospace[:-3] + " " + pcd_nospace[-3:]) if len(pcd_nospace or "") > 3 else pcd_nospace
     out = {"status": "insufficient", "value": None, "credibility": 0.0, "n": 0, "cv": None,
            "sales": [], "sales_total": 0, "window_months": [18, 60],
-           "cv_limit": SAME_STREET_CV_LIMIT, "hpi_month": None}
+           "cv_limit": SAME_STREET_CV_LIMIT, "hpi_month": None,
+           "scope": "postcode", "scope_value": _pc_fmt}
 
     def _sale_rows(rows, adjusted=None):
         _o = []
