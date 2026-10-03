@@ -9187,7 +9187,17 @@ def summarise_deal(deal_id: str):
 
                     # Build subject dict for relational comparable engine
                     _prop = result.get("property") or {}
+                    # S-STREET-FIX: same blend as _recompute_deal_ceiling (shared helper).
+                    _sm_pt = [c.get("property_type") for c in _comps
+                              if isinstance(c, dict) and c.get("property_type")]
+                    _sm_inf = max(set(_sm_pt), key=_sm_pt.count) if _sm_pt else None
+                    _sm_ss = (_same_street_for_subject(
+                                  _prop.get("postcode"),
+                                  _sm_inf or _prop.get("physical_type") or _prop.get("type"))
+                              if _comps else {"status": "off"})
                     _subject = {
+                        "_same_street_value":       _sm_ss.get("value"),
+                        "_same_street_credibility": _sm_ss.get("credibility"),
                         "property_type": _prop.get("physical_type") or _prop.get("type") or _deal_data.get("deal_type"),
                         "tenure":        _prop.get("tenure") or _fins_inputs.get("tenure"),
                         "lease_length":  _prop.get("lease_length") or _fins_inputs.get("lease_length"),
@@ -10500,6 +10510,15 @@ def ceiling_endpoint():
                 # Try live recompute from area_json sold comps first.
                 _live_verdict = None
                 _live_comps   = _wb_comps if deal_id else []
+                if _live_comps and isinstance(_wb_subject, dict):
+                    # S-STREET-FIX: same blend as _recompute_deal_ceiling (shared helper).
+                    _wb_pt = [c.get("property_type") for c in _live_comps
+                              if isinstance(c, dict) and c.get("property_type")]
+                    _wb_inf = max(set(_wb_pt), key=_wb_pt.count) if _wb_pt else None
+                    _wb_ss = _same_street_for_subject(
+                        _wb_prop.get("postcode"), _wb_inf or _wb_subject.get("property_type"))
+                    _wb_subject["_same_street_value"] = _wb_ss.get("value")
+                    _wb_subject["_same_street_credibility"] = _wb_ss.get("credibility")
                 if _live_comps and _calc_verdict_ceiling:
                     try:
                         _live_verdict = _calc_verdict_ceiling(
@@ -10940,6 +10959,44 @@ def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) ->
     return out
 
 
+
+def _same_street_token(type_hint):
+    """S-STREET-FIX (2026-10-03): map a subject type to the blend's (token, PPD code).
+
+    Accepts a Land Registry code (D/S/T/F) or free text ("Semi-detached",
+    "Flat/Maisonette", "end terrace"...). Root cause fixed: the S-STREET-BLEND
+    wiring (15 Aug) derived the token by substring-matching text, but its primary
+    input is the comps' majority property_type, which is a single-letter PPD code
+    ("T", "F", ...) - "t" never contains "terrac", so the blend never ran on any
+    deal with comps (0 of 98 stored verdicts carried it, 3 Oct 2026). Codes are now
+    mapped directly; text is matched as before. Anything else -> (None, None)."""
+    t = str(type_hint or "").strip()
+    _code_tok = {"F": "flat", "S": "semi", "T": "terraced", "D": "detached"}
+    if t.upper() in _code_tok:
+        return _code_tok[t.upper()], t.upper()
+    tl = t.lower()
+    tok = ("flat" if ("flat" in tl or "apart" in tl or "maison" in tl)
+           else "semi" if "semi" in tl
+           else "terraced" if "terrac" in tl
+           else "detached" if "detach" in tl else None)
+    code = {"flat": "F", "semi": "S", "terraced": "T", "detached": "D"}.get(tok)
+    return (tok, code) if code else (None, None)
+
+
+def _same_street_for_subject(postcode, type_hint) -> dict:
+    """S-STREET-FIX (2026-10-03): one entry point for every verdict path
+    (_recompute_deal_ceiling, /api/ceiling recompute fallback, summarise_deal), so
+    all three blend identically. Returns the _compute_same_street_blend result, or
+    {"status": "off"} when postcode/type cannot be resolved. Never raises."""
+    try:
+        _pc = re.sub(r"\s+", "", str(postcode or "").upper())
+        _tok, _code = _same_street_token(type_hint)
+        if _pc and _tok and _code:
+            return _compute_same_street_blend(_pc, _tok, _code)
+        return {"status": "off"}
+    except Exception as _e:
+        return {"status": "error", "error": str(_e)}
+
 def _json_sanitize(obj):
     """Convert non-JSON-native values (Decimal, date/datetime) to JSON-safe
     types IN PLACE, so a large area_json can be written to a Supabase json/jsonb
@@ -11059,22 +11116,13 @@ def _recompute_deal_ceiling(deal_id: str, area_data: dict):
         # S-STREET-BLEND (2026-08-15): compute same-street credibility evidence and
         # hang value+Z on the subject dict; ceiling_engine blends at base_value and it
         # cascades to verdict/workbench. Reversible via SAME_STREET_BLEND_ENABLED (engine).
-        _ss = {"status": "off"}
-        try:
-            import re as _re_ss
-            _ss_pc = _re_ss.sub(r"\\s+", "", str(_prop_rc.get("postcode") or "").upper())
-            _ss_t  = str(_inferred_pt or _prop_rc.get("physical_type") or _prop_rc.get("type") or "").lower()
-            _ss_tok = ("flat" if ("flat" in _ss_t or "apart" in _ss_t or "maison" in _ss_t)
-                       else "semi" if "semi" in _ss_t
-                       else "terraced" if "terrac" in _ss_t
-                       else "detached" if "detach" in _ss_t else None)
-            _ss_code = {"flat": "F", "semi": "S", "terraced": "T", "detached": "D"}.get(_ss_tok)
-            if _ss_pc and _ss_tok and _ss_code:
-                _ss = _compute_same_street_blend(_ss_pc, _ss_tok, _ss_code)
-                if isinstance(_housing, dict):
-                    _housing["_same_street"] = _ss     # persisted for the frontend divergence badge
-        except Exception as _e_ss:
-            _ss = {"status": "error", "error": str(_e_ss)}
+        # S-STREET-FIX (2026-10-03): shared helper; codes (T/F/S/D) now map directly.
+        _ss = _same_street_for_subject(
+            _prop_rc.get("postcode"),
+            _inferred_pt or _prop_rc.get("physical_type") or _prop_rc.get("type"),
+        )
+        if _ss.get("status") != "off" and isinstance(_housing, dict):
+            _housing["_same_street"] = _ss     # persisted for the Verdict same-street line
         _subject_rc = {
             "property_type":        _inferred_pt or _prop_rc.get("physical_type") or _prop_rc.get("type") or _d.get("deal_type"),
             "_same_street_value":       _ss.get("value"),
