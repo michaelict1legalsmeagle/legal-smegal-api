@@ -10894,6 +10894,8 @@ def get_area(deal_id: str):
 
 
 SAME_STREET_BLEND_K = 4  # S-STREET-BLEND: Bühlmann credibility constant (Z = n/(n+K), capped 0.85)
+SAME_STREET_CV_LIMIT = 0.20     # S-STREET-BLEND consistency gate (unchanged value; named so it can be reported)
+SAME_STREET_SALES_SHOWN = 30    # S-STREET-EVIDENCE: max individual sales persisted for display
 
 def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) -> dict:
     """Same-street credibility evidence for the valuation blend (S-STREET-BLEND,
@@ -10902,7 +10904,23 @@ def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) ->
     to the latest month using the by-type LAD series, and returns a consistency-gated
     median + credibility Z. Verified on the live book: corrects tight-street mis-
     valuations both ways; noisy streets (CV>0.20) excluded. Read-only; never fabricates."""
-    out = {"status": "insufficient", "value": None, "credibility": 0.0, "n": 0, "cv": None}
+    # S-STREET-EVIDENCE (2026-10-03): also return the individual sales so the Verdict
+    # page can show the street evidence in EVERY state (blended, too varied, too few),
+    # not only when it is blended. value / n / cv / credibility are computed exactly
+    # as before (guarded by tests/test_same_street_evidence.py).
+    out = {"status": "insufficient", "value": None, "credibility": 0.0, "n": 0, "cv": None,
+           "sales": [], "sales_total": 0, "window_months": [18, 60],
+           "cv_limit": SAME_STREET_CV_LIMIT, "hpi_month": None}
+
+    def _sale_rows(rows, adjusted=None):
+        _o = []
+        for _i, _r in enumerate(rows[:SAME_STREET_SALES_SHOWN]):
+            _addr = " ".join(str(x).strip() for x in (_r.get("saon"), _r.get("paon"), _r.get("street")) if x)
+            _o.append({"date": str(_r.get("date_of_transfer") or "")[:10],
+                       "address": _addr or None,
+                       "price": safe_float(_r.get("price")),
+                       "adjusted_price": (round(adjusted[_i], 2) if adjusted and adjusted[_i] else None)})
+        return _o
     try:
         _lad_rows = supabase_data_query(
             "SELECT ladcd FROM public.postcode_to_lsoa WHERE pcds_nospace = %s LIMIT 1",
@@ -10911,23 +10929,27 @@ def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) ->
         if not lad:
             out["status"] = "no_lad"; return out
         _sales = data_query(
-            "SELECT date_of_transfer, price FROM price_paid_raw_2025 "
+            "SELECT date_of_transfer, price, paon, saon, street FROM price_paid_raw_2025 "
             "WHERE postcode_nospace = %s AND property_type = %s AND ppd_category_type = 'A' "
             "AND date_of_transfer <  (CURRENT_DATE - INTERVAL '18 months')::date "
             "AND date_of_transfer >= (CURRENT_DATE - INTERVAL '60 months')::date "
             "ORDER BY date_of_transfer DESC",
             (pcd_nospace, ptype_code)) or []
+        out["sales_total"] = len(_sales)
+        out["sales"] = _sale_rows(_sales)
         if len(_sales) < 2:
             out["n"] = len(_sales); return out
         _latest = supabase_data_query(
-            "SELECT average_price FROM public.uk_hpi_monthly_by_property_type "
+            "SELECT date, average_price FROM public.uk_hpi_monthly_by_property_type "
             "WHERE area_code = %s AND property_type = %s ORDER BY date DESC LIMIT 1",
             (lad, token))
         _latest_avg = safe_float(_latest[0].get("average_price")) if _latest else None
         if not _latest_avg:
             out["status"] = "no_hpi"; return out
+        out["hpi_month"] = str(_latest[0].get("date") or "")[:10] or None
         _upl = []
-        for _r in _sales:
+        _adj_by_row = [None] * len(_sales)
+        for _ri, _r in enumerate(_sales):
             _p = safe_float(_r.get("price"))
             _dt = str(_r.get("date_of_transfer") or "")[:7]
             if not (_p and _dt):
@@ -10941,6 +10963,8 @@ def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) ->
             _mavg = safe_float(_mrow[0].get("average_price")) if _mrow else None
             if _mavg and _mavg > 0:
                 _upl.append(_p * (_latest_avg / _mavg))
+                _adj_by_row[_ri] = _p * (_latest_avg / _mavg)
+        out["sales"] = _sale_rows(_sales, _adj_by_row)
         n = len(_upl)
         if n < 2:
             out["n"] = n; return out
@@ -10949,7 +10973,7 @@ def _compute_same_street_blend(pcd_nospace: str, token: str, ptype_code: str) ->
         _mean = sum(_upl) / n
         _cv = (sum((x - _mean) ** 2 for x in _upl) / n) ** 0.5 / _mean if _mean else 1.0
         out.update({"value": round(_median, 2), "n": n, "cv": round(_cv, 4)})
-        if _cv <= 0.20:
+        if _cv <= SAME_STREET_CV_LIMIT:
             _z = min(n / (n + SAME_STREET_BLEND_K), 0.85)
             out.update({"status": "admit", "credibility": round(_z, 4)})
         else:
