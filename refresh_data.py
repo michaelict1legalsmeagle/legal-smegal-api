@@ -346,6 +346,36 @@ def get_latest_pp_url() -> str:
     return ""
 
 
+PP_DELETE_SQL = """
+    DELETE FROM public.price_paid_raw_2025
+    WHERE transaction_unique_identifier = ANY(%s)
+"""
+
+
+def _flush_pp_upserts(conn, batch: list, label: str, count_before: int) -> int:
+    """Upsert one batch of A/C rows. Returns rows sent."""
+    with conn.cursor() as cur:
+        cur.executemany(PP_UPSERT_SQL, batch)
+    conn.commit()
+    log.info(f"price_paid_raw_2025 [{label}]: {count_before + len(batch)} rows upserted")
+    return len(batch)
+
+
+def _flush_pp_deletes(conn, ids: list) -> int:
+    """Delete withdrawn (D) transactions. Matches the bare ID and the braced
+    form, because rows loaded before 2 Oct 2026 may still carry braces
+    (3,129 braced rows remained after the duplicate clean-up). Returns rows deleted."""
+    keys = []
+    for i in ids:
+        keys.append(i)
+        keys.append("{" + i + "}")
+    with conn.cursor() as cur:
+        cur.execute(PP_DELETE_SQL, (keys,))
+        n = cur.rowcount or 0
+    conn.commit()
+    return n
+
+
 def _upsert_pp_rows_from_csv(lines_iter, label: str):
     """
     Stream PP CSV lines and upsert into price_paid_raw_2025 on Hetzner.
@@ -357,6 +387,8 @@ def _upsert_pp_rows_from_csv(lines_iter, label: str):
     batch   = []
     count   = 0
     skipped = 0
+    delete_ids: list = []
+    deleted = 0
 
     try:
         conn = _get_hetzner_conn()
@@ -390,32 +422,47 @@ def _upsert_pp_rows_from_csv(lines_iter, label: str):
                     "ppd_category_type": row[14].strip() if len(row) > 14 else None,
                     "record_status":     row[15].strip() if len(row) > 15 else None,
                 }
+                # PP-DELETE (2026-10-02): a record_status "D" row is Land Registry
+                # withdrawing a transaction. Remove it; never store it as a row
+                # (7,241 stored "D" rows were deleted by hand on 2 Oct 2026).
+                if record["record_status"] == "D":
+                    if not record["transaction_unique_identifier"]:
+                        skipped += 1
+                        continue
+                    if batch:   # keep file order: pending upserts land first
+                        count += _flush_pp_upserts(conn, batch, label, count)
+                        batch = []
+                    delete_ids.append(record["transaction_unique_identifier"])
+                    if len(delete_ids) >= BATCH_SIZE:
+                        deleted += _flush_pp_deletes(conn, delete_ids)
+                        delete_ids = []
+                    continue
                 if not record["transaction_unique_identifier"] or not record["price"]:
                     skipped += 1
                     continue
+                if delete_ids:   # keep file order: pending deletes land first
+                    deleted += _flush_pp_deletes(conn, delete_ids)
+                    delete_ids = []
                 batch.append(record)
                 if len(batch) >= BATCH_SIZE:
-                    with conn.cursor() as cur:
-                        cur.executemany(PP_UPSERT_SQL, batch)
-                    conn.commit()
-                    count += len(batch)
+                    count += _flush_pp_upserts(conn, batch, label, count)
                     batch = []
-                    log.info(f"price_paid_raw_2025 [{label}]: {count} rows upserted")
             except Exception as e:
                 log.warning(f"PP row error [{label}]: {e}")
                 skipped += 1
                 continue
 
-        # Flush remaining batch
+        # Flush remaining batches (upserts before deletes keeps file order:
+        # whichever kind is still pending is the most recent run of rows)
         if batch:
-            with conn.cursor() as cur:
-                cur.executemany(PP_UPSERT_SQL, batch)
-            conn.commit()
-            count += len(batch)
+            count += _flush_pp_upserts(conn, batch, label, count)
+        if delete_ids:
+            deleted += _flush_pp_deletes(conn, delete_ids)
 
     finally:
         conn.close()
 
+    log.info(f"price_paid_raw_2025 [{label}]: {deleted} withdrawn (record_status D) rows deleted")
     return count, skipped
 
 
@@ -444,7 +491,9 @@ def refresh_price_paid():
 def backfill_price_paid(years: list):
     """
     Download full annual PP files and upsert into price_paid_raw_2025 on Hetzner.
-    Safe to re-run — upserts on transaction_unique_identifier so no duplicates.
+    Re-runnable: IDs are stored without braces and upserted on
+    transaction_unique_identifier. (A braced load done another way bypassed this
+    and duplicated 591,189 rows in 2025 — removed 2 Oct 2026.)
     """
     log.info(f"Starting price paid backfill for years: {years}")
     for year in years:
