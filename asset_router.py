@@ -140,6 +140,8 @@ def resolve(section_props: List[Dict], quote_source: Callable[[str], set],
     evidence = [v["evidence"] for v in votes if v.get("evidence") and v.get("role") == "lot"] \
         + [v["evidence"] for v in votes if v.get("evidence") and v.get("role") != "lot"]
     ev_classes = sorted({v["class"] for v in votes if v["basis"] == "evidence_quote"})
+    lot_ev_classes = sorted({v["class"] for v in votes
+                             if v["basis"] == "evidence_quote" and v.get("role") == "lot"})
     if len(classes) == 1:
         cls, reason = classes[0], "sections_agree"
     elif len(ev_classes) == 1:
@@ -148,6 +150,16 @@ def resolve(section_props: List[Dict], quote_source: Callable[[str], set],
         # "Retail/Financial and Professional Services"); one section's bare
         # type said "Mixed Use" with no quote -> the user was asked needlessly.
         cls, reason = ev_classes[0], "pack_wording_agrees"
+    elif len(classes) > 1 and (
+            "mixed_use" in lot_ev_classes or {"commercial", "residential"} <= set(lot_ev_classes)):
+        # ROUTE-4 (4 Oct, Lot 72 deal 2d41f2d4, 18 Station Road, Burgess Hill):
+        # each document describes ONE part of the lot — the shop's lease is
+        # "commercial", a flat's tenancy is "residential", the schedule says
+        # "ground floor [commercial] ... 18A [residential]". Quoted wording from
+        # the lot's own documents showing both kinds of part IS mixed use.
+        # Lot 6 is unaffected: its only commercial wording is in title-history
+        # deeds, so it still asks.
+        cls, reason = "mixed_use", "lot_parts_mixed"
     elif len(classes) > 1:
         # Quoted wording itself conflicts (Lot 6: the lease to be granted says
         # "single private dwelling", the title deeds say "shop offices") — the

@@ -355,3 +355,27 @@ def test_special_conditions_naming_searches_do_not_clear_missing_search_flags():
     # a real search document still counts
     assert "local_search" in fe.doc_kinds({"file_name": "Lot_65A_Somerset Council Local Search (CON29R).pdf",
                                            "doc_type": "local_auth_search", "extracted_text": ""})
+
+
+def test_lot_documents_showing_both_parts_are_mixed_use():
+    # Lot 72 live (deal 2d41f2d4): votes as stored — 3 mixed_use, 1 commercial,
+    # 1 residential from lot documents, 1 residential from title history.
+    q = {"MU": {"special_conditions"}, "SHOP": {"lease"}, "FLAT": {"tenancy_ast"}, "DEED": {"deed"}}
+    sections = [
+        {"asset_class": "mixed_use", "asset_class_evidence": "MU"},
+        {"asset_class": "commercial", "asset_class_evidence": "SHOP"},
+        {"asset_class": "mixed_use", "asset_class_evidence": "MU"},
+        {"asset_class": "residential", "asset_class_evidence": "FLAT"},
+        {"asset_class": "residential", "asset_class_evidence": "DEED"},
+        {"asset_class": "mixed_use", "asset_class_evidence": "MU"},
+    ]
+    r = ar.resolve(sections, lambda x: q.get(x, set()), physical_type="Other")
+    assert r["asset_class"] == "mixed_use" and r["reason"] == "lot_parts_mixed"
+    # shop lease + flat tenancy alone (no explicit mixed_use vote) -> mixed use
+    r = ar.resolve(sections[1:2] + sections[3:4], lambda x: q.get(x, set()), physical_type="Other")
+    assert r["asset_class"] == "mixed_use"
+    # Lot 6 still asks: commercial wording only in title-history deeds
+    assert ar.resolve([
+        {"asset_class": "residential", "asset_class_evidence": "Permitted Use: as a single private dwelling."},
+        {"asset_class": "commercial", "asset_class_evidence": "ALL THAT shop offices and disused dwellinghouse"},
+    ], _lot6_source, physical_type="Flat")["asset_class"] == "unclassified"
