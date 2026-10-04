@@ -89,6 +89,11 @@ COMMERCIAL_DIVERSION_KEYWORDS = (
     # is also the formal-language phrasing a legal pack would actually use.
     "hotel", "public house", "care home", "nursing home",
     "petrol station", "guest house", "restaurant",
+    # ROUTE-1 (2026-10-04): a deal whose pack could not be classified
+    # (asset_router "unclassified") gets NO residential valuation until the
+    # user confirms its class. Deliberately NOT in legalsmegal-verdict.html's
+    # list: the Verdict page sends unclassified deals to the classify page.
+    "unclassified",
 )
 
 # =============================================================================

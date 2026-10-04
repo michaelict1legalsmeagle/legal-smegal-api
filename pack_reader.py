@@ -27,10 +27,11 @@ import concurrent.futures as _cf
 import re
 from typing import Callable, Dict, List, Optional, Tuple
 
-from flag_evidence import (FLAG_RULES, compute_deal_score, dedupe_flags,
-                           flag_counts, verify_flags)
+from flag_evidence import (FLAG_RULES, _words, compute_deal_score, dedupe_flags,
+                           flag_counts, locate_quote, verify_flags)
+import asset_router
 
-PIPELINE_VERSION = "fullread-1"
+PIPELINE_VERSION = "fullread-2"   # ROUTE-1 (2026-10-04): asset_class + strategy enum restored
 SECTION_CHARS = 100_000        # ~25k tokens of pack text per call
 SECTION_OVERLAP = 1_500        # overlap when one document spans sections
 # MEM-READ (2026-09-26): sections are analysed ONE at a time by default. Three at
@@ -65,7 +66,7 @@ Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (fl
       "flag_class": null
     }
   ],
-  "property": {"address": null, "postcode": null, "lot_number": null, "type": null, "physical_type": null, "tenure": null, "lease_years": null, "guide_price_pence": null},
+  "property": {"address": null, "postcode": null, "lot_number": null, "type": null, "asset_class": null, "asset_class_evidence": null, "physical_type": null, "tenure": null, "interest_sold": null, "lease_years": null, "guide_price_pence": null},
   "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": null, "buyers_premium_pct": null, "vacant_possession": null},
   "special_conditions": {
     "buyers_premium_pct": null, "buyers_premium_gbp": null, "admin_fee_gbp": null,
@@ -89,7 +90,13 @@ PACK-LEVEL CROSS-DOCUMENT & STATUTORY CHECKS — only where the triggering text 
 
 SPECIAL CONDITIONS FIELDS: buyers_premium_pct/gbp, admin_fee_gbp, vat_elected, seller_legal_costs_gbp, completion_days (as stated), non_refundable_deposit, addendum_present/date/notes, unusual_clauses (short verbatim clause references), true_cost_additions_notes (costs above hammer price, as stated), special_conditions_present (true only if this text contains the special conditions of sale).
 
-PROPERTY FIELDS: type = investment strategy only if the pack states it (else null); physical_type exactly one of Flat, Detached, Semi-Detached, Terraced, Other — from the register, particulars or EPC; tenure as registered.
+PROPERTY FIELDS — they describe THE LOT BEING SOLD (the interest the buyer acquires), never a neighbouring, adjoining or superior property:
+- type: the INVESTMENT STRATEGY (BTL/HMO/Flip/BRRR/SA/Commercial/Mixed Use/Other) — what the buyer intends to do. Use 'Mixed Use' if the title/lot contains BOTH a commercial element (retail/office/industrial/leisure unit) AND a residential element (flat(s) above a shop, etc) — do not force this into BTL/HMO/Commercial when both are genuinely present. Use 'Commercial' for a purely non-residential unit (retail, office, industrial, warehouse, leisure) with no residential element. Exactly one of those values, or null.
+- asset_class: exactly one of residential, commercial, mixed_use — or null unless THIS text shows what the lot being sold is. residential = dwelling(s) only; commercial = non-residential unit(s) only (shop, office, industrial, warehouse, leisure, pub, hotel, land let for business use); mixed_use = the lot itself contains both.
+- asset_class_evidence: a verbatim quote (max 30 words) from THIS text that shows the asset_class; null if asset_class is null.
+- physical_type: exactly one of Flat, Detached, Semi-Detached, Terraced, Other — from the register, particulars or EPC.
+- tenure: as registered.
+- interest_sold: the interest the buyer acquires, as the text states it (e.g. "new lease to be granted", "underlease", "freehold subject to tenancies"), max 15 words; null unless stated.
 
 """ + FLAG_RULES + """
 
@@ -145,7 +152,9 @@ def build_sections(documents: List[Dict], section_chars: int = SECTION_CHARS,
         txt = d.get("extracted_text") or ""
         name = d.get("file_name") or "(unnamed)"
         if not txt.strip():
-            per_doc.append({"file_name": name, "chars": 0, "covered": 0, "read": False})
+            per_doc.append({"file_name": name, "chars": 0, "covered": 0, "read": False,
+                            "not_read_reason": d.get("not_read_reason") or "no text could be extracted",
+                            "received": d.get("extraction_status") != "not_received"})
             continue
         spans = _split_long(txt, section_chars, overlap) if len(txt) > section_chars else [(0, len(txt))]
         cov_end = 0
@@ -177,6 +186,8 @@ def build_sections(documents: List[Dict], section_chars: int = SECTION_CHARS,
         "documents_total": len(per_doc),
         "documents_read_in_full": sum(1 for p in per_doc if p["chars"] and p["read"]),
         "documents_unreadable": unread,
+        "documents_not_received": [p["file_name"] for p in per_doc if p.get("received") is False],
+        "not_read_reasons": {p["file_name"]: p["not_read_reason"] for p in per_doc if p.get("not_read_reason")},
         "documents_truncated_at_storage": [p["file_name"] for p in per_doc if p.get("truncated_at_storage")],
         "chars_extracted": chars_extracted,
         "chars_sent": chars_covered,
@@ -192,8 +203,14 @@ def inventory_block(documents: List[Dict]) -> str:
     for d in sorted(documents or [], key=_prio):
         name = d.get("file_name") or "(unnamed)"
         has = bool((d.get("extracted_text") or "").strip())
-        lines.append(f"- {name} (type: {d.get('doc_type') or 'unknown'})"
-                     + ("" if has else " — PRESENT BUT UNREADABLE (scanned; text could not be extracted)"))
+        if has:
+            tail = ""
+        elif d.get("extraction_status") == "not_received":
+            tail = (" — IN THE PACK BUT NOT RECEIVED (" + (d.get("not_read_reason") or "not uploaded")
+                    + "); its content is unavailable — do not report it as missing")
+        else:
+            tail = " — PRESENT BUT UNREADABLE (scanned; text could not be extracted)"
+        lines.append(f"- {name} (type: {d.get('doc_type') or 'unknown'})" + tail)
     return "DOCUMENT INVENTORY (every document in the whole pack):\n" + "\n".join(lines) + "\n\n"
 
 
@@ -255,9 +272,11 @@ def disclosure_statement(counts: Dict[str, int], coverage: Dict) -> str:
     read = coverage.get("documents_read_in_full", 0)
     total = coverage.get("documents_total", 0)
     unread = coverage.get("documents_unreadable") or []
+    reasons = coverage.get("not_read_reasons") or {}
     tail = f" All text of {read} of {total} documents was read."
     if unread:
-        tail += f" {len(unread)} document{'s' if len(unread) != 1 else ''} could not be read: " + ", ".join(unread) + "."
+        tail += (f" {len(unread)} document{'s' if len(unread) != 1 else ''} could not be read: "
+                 + ", ".join(f"{u} ({reasons[u]})" if reasons.get(u) else u for u in unread) + ".")
     cut = coverage.get("documents_truncated_at_storage") or []
     if cut:
         tail += " Not read in full (text too large to store): " + ", ".join(cut) + "."
@@ -317,6 +336,15 @@ def analyse_pack(documents: List[Dict], call_llm: Callable[[str, str], Dict],
     counts = flag_counts(flags)
     facts = merge_facts(results)
 
+    # ROUTE-1: which pipeline this deal belongs to (fail closed — see asset_router).
+    _pack_words = " " + " ".join(_words("\n".join((d.get("extracted_text") or "") for d in documents))) + " "
+    routing = asset_router.resolve(
+        [r.get("property") or {} for r in results],
+        lambda q: bool(locate_quote(q, _pack_words)),
+        physical_type=(facts.get("property") or {}).get("physical_type"),
+    )
+    facts["property"] = asset_router.apply_to_property(facts.get("property") or {}, routing)
+
     result = {
         "flags": flags,
         "flags_removed_unevidenced": ver["removed"],
@@ -327,6 +355,7 @@ def analyse_pack(documents: List[Dict], call_llm: Callable[[str, str], Dict],
         "viability_statement": disclosure_statement(counts, coverage),
         **facts,
         "read_coverage": coverage,
+        "asset_routing": routing,
         "documents_processed": coverage["documents_total"],
         "pipeline_version": PIPELINE_VERSION,
     }
@@ -334,6 +363,12 @@ def analyse_pack(documents: List[Dict], call_llm: Callable[[str, str], Dict],
         try:
             pc = completeness_fn(documents)
             pc.pop("missing_critical", None)   # missing docs are flags only if verified above
+            # DOCS-1: a document type present only as not-received / unreadable
+            # entries is in the pack but was NOT read — say so on the item.
+            _read_types = {d.get("doc_type") for d in documents if (d.get("extracted_text") or "").strip()}
+            for _it in pc.get("items") or []:
+                if _it.get("present") and _it.get("doc_type") not in _read_types:
+                    _it["read"] = False
             result["pack_completeness"] = pc
         except Exception as e:
             log(f"[fullread] completeness failed: {e}")

@@ -8380,6 +8380,8 @@ def _reproducibility_gate(deal_id, deal_row):
             try:
                 supabase.table("deals").update({
                     "summary_json": reused,
+                    # ROUTE-1: the class signal every valuation path reads
+                    "deal_type":    (reused.get("property") or {}).get("type"),
                     "area_json":    src.get("area_json"),
                     "bid_ceiling":  src.get("bid_ceiling"),
                     "deal_score":   src.get("deal_score"),
@@ -8529,6 +8531,187 @@ def _recover_unread_documents(deal_id: str, user_id: str) -> List[str]:
     return requeued
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DOCS-1 (2026-10-04): every document in the pack is read, or named as not read.
+#   * _file_signature_error: per-type validation for the upload route.
+#   * pack manifest: the browser sends the name + size of EVERY file the user
+#     selected before uploading. Summarise compares it with what was stored and
+#     refuses (409 pack_incomplete) until the user has seen the list and chosen
+#     to continue; the analysis then names each file not received, with why.
+#     Evidence: Lot 6 (deal abbe9a0d) — 6 files selected, 3 stored, Render log
+#     shows no request ever reached the server for the other 3, and the old
+#     page continued with a green "3 of 6 documents uploaded".
+# ─────────────────────────────────────────────────────────────────────────────
+_UPLOAD_EXTS = (".pdf", ".docx", ".txt")
+_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _file_signature_error(filename: str, file_bytes: bytes) -> Optional[str]:
+    """None when the bytes match the file's type; otherwise the reason."""
+    low = (filename or "").lower()
+    if low.endswith(".pdf"):
+        return None if file_bytes.startswith(b"%PDF") else "File does not appear to be a valid PDF"
+    if low.endswith(".docx"):
+        bad = "File does not appear to be a valid Word (.docx) document"
+        if not file_bytes.startswith(b"PK"):
+            return bad
+        try:
+            import zipfile as _zf
+            with _zf.ZipFile(io.BytesIO(file_bytes)) as _z:
+                return None if "word/document.xml" in _z.namelist() else bad
+        except Exception:
+            return bad
+    if low.endswith(".txt"):
+        return None if b"\x00" not in file_bytes[:4096] else "File does not appear to be plain text"
+    return "Only PDF, Word (.docx) and text (.txt) files are accepted"
+
+
+def _manifest_entry(f: dict) -> Optional[dict]:
+    if not isinstance(f, dict):
+        return None
+    name = str(f.get("name") or "").strip()[:300]
+    if not name:
+        return None
+    try:
+        size = max(0, int(f.get("size") or 0))
+    except (TypeError, ValueError):
+        size = 0
+    parts = [str(p).strip()[:300] for p in (f.get("parts") or []) if str(p).strip()][:50]
+    return {
+        "name": name,
+        "stored_name": secure_filename(name) or "document.pdf",
+        "size": size,
+        "parts": [{"name": p, "stored_name": secure_filename(p) or "document.pdf"} for p in parts],
+    }
+
+
+def _manifest_not_received(manifest: Optional[dict], stored_names) -> List[dict]:
+    """Every manifest file (or part of a split file) with no stored document."""
+    stored = set(stored_names or [])
+    out = []
+    for f in (manifest or {}).get("files") or []:
+        expected = [p["stored_name"] for p in (f.get("parts") or [])] or [f.get("stored_name")]
+        missing = [n for n in expected if n not in stored]
+        if not missing:
+            continue
+        ext = os.path.splitext((f.get("name") or "").lower())[1]
+        if ext not in _UPLOAD_EXTS:
+            reason = "file type not supported (PDF, Word .docx or text only)"
+        elif (f.get("size") or 0) > _UPLOAD_MAX_BYTES and not f.get("parts"):
+            reason = "over the 20 MB upload limit"
+        elif f.get("parts"):
+            reason = f"{len(missing)} of {len(expected)} parts did not reach the server"
+        else:
+            reason = "upload did not reach the server"
+        out.append({"name": f.get("name"), "reason": reason})
+    return out
+
+
+def _load_manifest(deal_id: str, user_id: str) -> Optional[dict]:
+    """deals.pack_manifest, or None (no manifest, or the column is not deployed)."""
+    try:
+        r = supabase.table("deals").select("pack_manifest") \
+            .eq("id", deal_id).eq("user_id", user_id).single().execute()
+        m = (r.data or {}).get("pack_manifest")
+        return m if isinstance(m, dict) else None
+    except Exception as e:
+        app.logger.warning(f"[DOCS-1] manifest load failed for {deal_id}: {e}")
+        return None
+
+
+@app.route("/api/deals/<deal_id>/manifest", methods=["POST", "OPTIONS"])
+@require_auth
+def set_pack_manifest(deal_id: str):
+    """Body {files:[{name,size,parts?}]} — record what the user selected.
+       Body {accept_missing:true} — the user has seen the not-received list and
+       chose to analyse without those files (they are named in the analysis)."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    try:
+        own = supabase.table("deals").select("id").eq("id", deal_id) \
+            .eq("user_id", request.user_id).single().execute()
+        if not own.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+    if data.get("accept_missing"):
+        m = _load_manifest(deal_id, request.user_id)
+        if not m:
+            return jsonify({"error": "no_manifest"}), 400
+        m["accepted_missing_at"] = now_iso()
+    else:
+        files = data.get("files")
+        if not isinstance(files, list) or not files or len(files) > 200:
+            return jsonify({"error": "files must be a non-empty list (max 200)"}), 400
+        entries = [e for e in (_manifest_entry(f) for f in files) if e]
+        if not entries:
+            return jsonify({"error": "no valid file entries"}), 400
+        m = {"files": entries, "created_at": now_iso()}
+    try:
+        supabase.table("deals").update({"pack_manifest": m}).eq("id", deal_id) \
+            .eq("user_id", request.user_id).execute()
+    except Exception as e:
+        app.logger.warning(f"[DOCS-1] manifest save failed for {deal_id}: {e}")
+        return jsonify({"error": "manifest_unavailable"}), 503
+    return jsonify({"ok": True, "files": len(m.get("files") or []),
+                    "accepted_missing": bool(m.get("accepted_missing_at"))}), 200
+
+
+@app.route("/api/deals/<deal_id>/asset-class", methods=["POST", "OPTIONS"])
+@require_auth
+def set_deal_asset_class(deal_id: str):
+    """ROUTE-1 (2026-10-04): the user confirms or corrects the deal's class
+    (residential | commercial | mixed_use). Any change removes stored
+    valuation objects so the right pipeline recomputes them."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not supabase:
+        return jsonify({"error": "Database unavailable"}), 503
+    import asset_router as _ar
+    cls = _ar.normalise_asset_class((request.get_json(silent=True) or {}).get("asset_class"))
+    if not cls:
+        return jsonify({"error": "asset_class must be residential, commercial or mixed_use"}), 400
+    try:
+        row = supabase.table("deals").select("id, summary_json").eq("id", deal_id) \
+            .eq("user_id", request.user_id).single().execute()
+        if not row.data:
+            return jsonify({"error": "Deal not found"}), 404
+    except Exception:
+        return jsonify({"error": "Deal not found"}), 404
+    sj = dict(row.data.get("summary_json") or {})
+    if not sj:
+        return jsonify({"error": "Deal has not been analysed yet"}), 409
+    prop = dict(sj.get("property") or {})
+    prev = prop.get("asset_class")
+    keep_strategy = (_ar.normalise_strategy(prop.get("type"))
+                     if _ar.class_from_type(prop.get("type")) == "residential" else None)
+    prop = _ar.apply_to_property(prop, {
+        "asset_class": cls, "reason": "user_confirmed",
+        "evidence": prop.get("asset_class_evidence") or [],
+        "strategy": keep_strategy,
+    }, source="user")
+    prop["asset_class_previous"] = prev
+    sj["property"] = prop
+    update = {"deal_type": prop.get("type"), "updated_at": now_iso()}
+    if prev != cls:
+        for _k in ("verdict_ceiling", "workbench_ceiling", "verdict_risk", "ceiling"):
+            sj.pop(_k, None)
+        update["bid_ceiling"] = None
+    update["summary_json"] = sj
+    try:
+        supabase.table("deals").update(update).eq("id", deal_id) \
+            .eq("user_id", request.user_id).execute()
+    except Exception as e:
+        app.logger.error("asset-class update failed: %s", e, exc_info=True)
+        return jsonify({"error": "An internal error occurred"}), 500
+    app.logger.info(f"[ROUTE-1] deal={deal_id} asset_class {prev} -> {cls} (user)")
+    return jsonify({"ok": True, "asset_class": cls, "type": prop.get("type"),
+                    "previous": prev}), 200
+
+
 @app.route("/api/documents/upload", methods=["OPTIONS"])
 def upload_options():
     """Explicit OPTIONS handler so CORS preflight always gets a 200, not a 502."""
@@ -8610,8 +8793,12 @@ def upload_document():
         file_bytes = file.read()
         file_size = len(file_bytes)
         content_sha256 = hashlib.sha256(file_bytes).hexdigest()
-        if not file_bytes.startswith(b"%PDF"):
-            return jsonify({"error": "File does not appear to be a valid PDF"}), 400
+        # DOCS-1 (2026-10-04): validate by the file's OWN type. This check used
+        # to require b"%PDF" for every file, so every .docx (special conditions,
+        # draft leases) was rejected with 400 — 1,224 stored documents, 0 .docx.
+        _sig_err = _file_signature_error(filename, file_bytes)
+        if _sig_err:
+            return jsonify({"error": _sig_err}), 400
         _t_file_read = round(time.time() - _t0, 2)
     except Exception as e:
         app.logger.warning("File read failed: %s", e); return jsonify({"error": "File could not be read"}), 400
@@ -8933,8 +9120,36 @@ def summarise_deal(deal_id: str):
         return jsonify({"ok": True, "status": "complete", **existing}), 200
     # If we reach here: either no summary yet, OR summary exists but flags=[] (re-run needed)
 
+    # DOCS-1: every file the user selected must be stored, or the user must have
+    # chosen to continue without it (then it is named in the analysis).
+    _not_received = []
+    _manifest = _load_manifest(deal_id, request.user_id)
+    if _manifest:
+        try:
+            _stored = {r.get("file_name") for r in (supabase.table("documents")
+                        .select("file_name").eq("deal_id", deal_id)
+                        .eq("user_id", request.user_id).execute().data or [])}
+            _not_received = _manifest_not_received(_manifest, _stored)
+        except Exception as e:
+            app.logger.warning(f"[DOCS-1] stored-document check failed for {deal_id}: {e}")
+        if _not_received and not _manifest.get("accepted_missing_at"):
+            if (request.get_json(silent=True) or {}).get("accept_missing"):
+                _manifest["accepted_missing_at"] = now_iso()
+                try:
+                    supabase.table("deals").update({"pack_manifest": _manifest}) \
+                        .eq("id", deal_id).eq("user_id", request.user_id).execute()
+                except Exception as e:
+                    app.logger.warning(f"[DOCS-1] accept save failed for {deal_id}: {e}")
+            else:
+                return jsonify({
+                    "error": "pack_incomplete",
+                    "detail": "Some files you selected were not received, so they cannot be read.",
+                    "not_received": _not_received,
+                }), 409
+
     # Reproducibility gate: identical document set -> identical figures (global).
-    _reused = _reproducibility_gate(deal_id, deal.data)
+    # DOCS-1: never reuse when files are missing — this analysis must name them.
+    _reused = None if _not_received else _reproducibility_gate(deal_id, deal.data)
     if _reused is not None:
         return jsonify({"ok": True, "status": "complete", **_reused}), 200
 
@@ -8975,8 +9190,17 @@ def summarise_deal(deal_id: str):
         app.logger.error("Could not fetch documents: %s", e, exc_info=True); return jsonify({"error": "Could not fetch documents"}), 500
 
     print(f"DEBUG: Found {len(documents)} documents for deal {deal_id}", flush=True)
+    # DOCS-1: files in the pack that never arrived are listed to the reader by
+    # name and reason (never mistaken for "not in the pack"). They carry no text.
+    _received_count = len(documents)
+    for _m in _not_received:
+        documents.append({
+            "file_name": _m["name"], "doc_type": detect_document_type(_m["name"], ""),
+            "extracted_text": "", "page_count": 0,
+            "extraction_status": "not_received", "not_read_reason": _m["reason"],
+        })
 
-    if not documents:
+    if not documents or not _received_count:
         return jsonify({"error": "No documents found for this deal"}), 400
 
     # H4-ASYNC-OCR (2026-06-27): same guard as analyse_deal — documents
@@ -9011,7 +9235,8 @@ def summarise_deal(deal_id: str):
         # context, so their absence of text is never mistaken for their absence
         # from the pack (the "No EPC in Pack" class of false-missing flag).
         _unread_names = [d.get('file_name') for d in documents
-                         if not (d.get('extracted_text') or '').strip() and d.get('file_name')]
+                         if not (d.get('extracted_text') or '').strip() and d.get('file_name')
+                         and d.get('extraction_status') != 'not_received']
         if _unread_names:
             truncated += ("=== DOCUMENTS IN THE PACK THAT COULD NOT BE READ (scanned; OCR failed) ===\n"
                           + "\n".join(f"- {n}" for n in _unread_names)

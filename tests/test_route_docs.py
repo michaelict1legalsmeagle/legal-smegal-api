@@ -1,0 +1,238 @@
+"""
+ROUTE-1 + DOCS-1 guards (2026-10-04).
+
+DOCS-1  every document in the pack is read, or named as not read with the reason.
+        Live faults: the upload route required b"%PDF" for EVERY file (1,224 stored
+        documents, 0 .docx — 60B / Lot 8 / Lot 10 / Lot 6 special conditions lost);
+        a file that never reached the server was invisible (Lot 6: 6 selected,
+        3 stored, analysed as "3/3 docs").
+ROUTE-1 deals go to the right pipeline. Live fault: since 26 Sep the pack reader
+        prompt produced type null / "investment", never "Commercial", so 60B, 59A
+        and Lot 6 were valued on residential comps.
+
+Run: python3 -m pytest tests -q
+"""
+import ast
+import io
+import os
+import re
+import sys
+import zipfile
+
+import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+APP = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
+
+import asset_router as ar           # noqa: E402
+import pack_reader as pr            # noqa: E402
+
+
+# ── helpers extracted from app.py (no app import / no network) ───────────────
+def _app_fns(*names):
+    from werkzeug.utils import secure_filename
+    from typing import List, Optional
+    tree = ast.parse(APP)
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    ns = {"io": io, "os": os, "secure_filename": secure_filename,
+          "Optional": Optional, "List": List,
+          "_UPLOAD_EXTS": (".pdf", ".docx", ".txt"), "_UPLOAD_MAX_BYTES": 20 * 1024 * 1024}
+    for name in names:
+        assert name in fns, f"{name} missing from app.py"
+        exec(compile(ast.get_source_segment(APP, fns[name]), "app.py", "exec"), ns)
+    return ns
+
+
+def _docx_bytes(text="SPECIAL CONDITIONS OF SALE"):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml",
+                   f'<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>')
+    return buf.getvalue()
+
+
+# ── DOCS-1: upload validation ────────────────────────────────────────────────
+def test_upload_route_no_longer_requires_pdf_for_every_file():
+    body = APP[APP.index("def upload_document"):APP.index("def list_documents")]
+    assert 'if not file_bytes.startswith(b"%PDF"):' not in body
+    assert "_file_signature_error(filename, file_bytes)" in body
+
+
+def test_file_signature_by_type():
+    chk = _app_fns("_file_signature_error")["_file_signature_error"]
+    assert chk("Lot_6_Special_conditions.docx", _docx_bytes()) is None
+    assert chk("pack.pdf", b"%PDF-1.7 ...") is None
+    assert chk("notes.txt", b"plain text") is None
+    assert chk("fake.docx", b"%PDF-1.7") is not None          # not a zip
+    assert chk("zip.docx", _zip_without_document()) is not None
+    assert chk("fake.pdf", b"PK\x03\x04") is not None
+    assert chk("bin.txt", b"\x00\x01\x02") is not None
+    assert chk("photo.jpg", b"\xff\xd8\xff") is not None
+
+
+def _zip_without_document():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("other.xml", "<x/>")
+    return buf.getvalue()
+
+
+REAL_DOCX = [
+    "/home/claude/packs/lot60b/Lot_60B_Special conditions of sale.docx",
+    "/home/claude/packs/lot6/Lot_6_Special conditions.docx",
+]
+
+
+@pytest.mark.parametrize("path", REAL_DOCX)
+def test_real_pack_docx_passes_and_is_read(path):
+    if not os.path.exists(path):
+        pytest.skip("real pack not present on this machine")
+    chk = _app_fns("_file_signature_error")["_file_signature_error"]
+    data = open(path, "rb").read()
+    assert chk(os.path.basename(path), data) is None
+
+
+# ── DOCS-1: manifest gap ─────────────────────────────────────────────────────
+def test_manifest_names_every_file_not_received_with_reason():
+    ns = _app_fns("_manifest_entry", "_manifest_not_received")
+    files = [
+        {"name": "Lot_6_4 White Lion Yard - lease plan - plan 1.pdf", "size": 1322220},
+        {"name": "Lot_6_DRAFT Lease 4 white lion.pdf", "size": 514363},
+        {"name": "Lot_6_Special conditions.docx", "size": 30979},
+        {"name": "Licence.pdf", "size": 22881723},
+        {"name": "Big.pdf", "size": 22881723, "parts": ["Big (part 1 of 2).pdf", "Big (part 2 of 2).pdf"]},
+        {"name": "photo.jpg", "size": 1000},
+    ]
+    m = {"files": [ns["_manifest_entry"](f) for f in files]}
+    stored = {"Lot_6_4_White_Lion_Yard_-_lease_plan_-_plan_1.pdf", "Big_part_1_of_2.pdf"}
+    gaps = {g["name"]: g["reason"] for g in ns["_manifest_not_received"](m, stored)}
+    assert "Lot_6_4 White Lion Yard - lease plan - plan 1.pdf" not in gaps   # stored under its secure name
+    assert gaps["Lot_6_DRAFT Lease 4 white lion.pdf"] == "upload did not reach the server"
+    assert gaps["Lot_6_Special conditions.docx"] == "upload did not reach the server"
+    assert gaps["Licence.pdf"] == "over the 20 MB upload limit"
+    assert gaps["Big.pdf"] == "1 of 2 parts did not reach the server"
+    assert gaps["photo.jpg"].startswith("file type not supported")
+    # complete pack -> no gaps
+    stored_all = stored | {"Lot_6_DRAFT_Lease_4_white_lion.pdf", "Lot_6_Special_conditions.docx",
+                           "Licence.pdf", "Big_part_2_of_2.pdf", "photo.jpg"}
+    assert ns["_manifest_not_received"](m, stored_all) == []
+
+
+def test_summarise_refuses_incomplete_pack_until_user_accepts():
+    body = APP[APP.index("def summarise_deal"):APP.index("def _run_and_store")]
+    i_gap = body.index('"error": "pack_incomplete"')
+    i_reuse = body.index("_reproducibility_gate(deal_id, deal.data)")
+    assert i_gap < i_reuse, "manifest check must run before an earlier analysis is reused"
+    assert "None if _not_received else _reproducibility_gate" in body
+    assert '"extraction_status": "not_received"' in body
+
+
+# ── DOCS-1: the analysis names files not received ────────────────────────────
+def _llm_factory(props_by_section):
+    calls = {"i": 0}
+
+    def llm(system, prompt):
+        i = calls["i"]
+        calls["i"] += 1
+        return {"flags": [], "property": dict(props_by_section[min(i, len(props_by_section) - 1)]),
+                "completion_terms": {}, "special_conditions": {}}
+    return llm
+
+
+DOCS = [
+    {"file_name": "lease.pdf", "doc_type": "lease",
+     "extracted_text": "THIS LEASE of the retail unit known as Unit 3 is granted to SIM Motorsport Ltd. " * 20},
+    {"file_name": "Lot_6_Special conditions.docx", "doc_type": "special_conditions",
+     "extracted_text": "", "extraction_status": "not_received",
+     "not_read_reason": "upload did not reach the server"},
+]
+
+
+def test_not_received_file_is_named_not_counted_as_read():
+    r = pr.analyse_pack(DOCS, _llm_factory([{"type": "Commercial"}]), section_chars=50_000)
+    cov = r["read_coverage"]
+    assert cov["documents_total"] == 2 and cov["documents_read_in_full"] == 1
+    assert cov["documents_not_received"] == ["Lot_6_Special conditions.docx"]
+    assert "Lot_6_Special conditions.docx (upload did not reach the server)" in r["viability_statement"]
+    inv = pr.inventory_block(DOCS)
+    assert "IN THE PACK BUT NOT RECEIVED (upload did not reach the server)" in inv
+
+
+# ── ROUTE-1: prompt + version ────────────────────────────────────────────────
+def test_prompt_restores_strategy_list_and_asks_asset_class():
+    assert "type = investment strategy only if the pack states it (else null)" not in pr.PACK_SYSTEM
+    assert "BTL/HMO/Flip/BRRR/SA/Commercial/Mixed Use/Other" in pr.PACK_SYSTEM
+    assert '"asset_class": null, "asset_class_evidence": null' in pr.PACK_SYSTEM
+    assert "tenure: as registered." in pr.PACK_SYSTEM          # residential tenure unchanged
+    assert pr.PIPELINE_VERSION != "fullread-1"                  # old results never reused
+
+
+# ── ROUTE-1: routing decisions on the live cases ─────────────────────────────
+PACK = ("Unit 3 The Boathouse retail unit let to SIM Motorsport Ltd under a lease "
+        "within Part II of the Landlord and Tenant Act 1954 the dwellinghouse known as Flat 2")
+_words = " " + " ".join(re.findall(r"[a-z0-9]+", PACK.lower())) + " "
+
+
+def _found(q):
+    return " " + " ".join(re.findall(r"[a-z0-9]+", q.lower())) + " " in _words
+
+
+@pytest.mark.parametrize("sections,phys,expected", [
+    # 60B / 59A as stored today: type "investment", physical "Other" -> never residential
+    ([{"type": "investment"}], "Other", "unclassified"),
+    # Lot 6 as stored today: type null, physical "Other"
+    ([{"type": None}], "Other", "unclassified"),
+    # restored list: Commercial
+    ([{"type": "Commercial"}, {"type": None}], "Other", "commercial"),
+    # explicit class with a quote found in the pack
+    ([{"asset_class": "commercial", "asset_class_evidence": "retail unit let to SIM Motorsport Ltd"}], "Other", "commercial"),
+    # invented quote is ignored
+    ([{"asset_class": "commercial", "asset_class_evidence": "a quote that is not in the pack"}], "Terraced", "residential"),
+    # Lot 10 / 2C Talbot Road: house/flat with type null or "investment" stays residential
+    ([{"type": None}], "Flat", "residential"),
+    ([{"type": "investment"}], "Terraced", "residential"),
+    ([{"type": "BTL"}], "Terraced", "residential"),
+    # Mixed Use
+    ([{"type": "Mixed Use"}], "Other", "mixed_use"),
+    # sections disagree -> ask
+    ([{"type": "BTL"}, {"type": "Commercial"}], "Terraced", "unclassified"),
+])
+def test_routing(sections, phys, expected):
+    assert ar.resolve(sections, _found, physical_type=phys)["asset_class"] == expected
+
+
+def test_property_type_carries_the_class_every_gate_reads():
+    p = ar.apply_to_property({"type": "investment"}, {"asset_class": "commercial"})
+    assert p["type"] == "Commercial" and p["asset_class"] == "commercial"
+    p = ar.apply_to_property({"type": "investment"}, {"asset_class": "residential"})
+    assert p["type"] is None                                   # -> BTL fallback, as a null type today
+    p = ar.apply_to_property({"type": "HMO"}, {"asset_class": "residential", "strategy": "HMO"})
+    assert p["type"] == "HMO"
+    p = ar.apply_to_property({}, {"asset_class": "unclassified"})
+    assert p["type"] == "Unclassified"
+
+
+def test_unclassified_is_gated_by_the_engine_and_not_by_the_verdict_keywords():
+    from services.ceiling_engine import COMMERCIAL_DIVERSION_KEYWORDS
+    assert "unclassified" in COMMERCIAL_DIVERSION_KEYWORDS
+    verdict = open(os.path.join(ROOT, "..", "fe", "legalsmegal-verdict.html"), encoding="utf-8").read() \
+        if os.path.exists(os.path.join(ROOT, "..", "fe", "legalsmegal-verdict.html")) else None
+    if verdict is None:
+        pytest.skip("frontend repo not alongside")
+    kw = verdict[verdict.index("var _COMM_DIVERSION_KEYWORDS"):]
+    kw = kw[:kw.index("];")]
+    assert "unclassified" not in kw
+    assert "legalsmegal-classify.html" in verdict
+
+
+def test_pack_reader_routes_end_to_end():
+    r = pr.analyse_pack(DOCS[:1], _llm_factory([{"type": "investment", "physical_type": "Other"}]),
+                        section_chars=50_000)
+    assert r["property"]["asset_class"] == "unclassified"
+    assert r["property"]["type"] == "Unclassified"
+    r = pr.analyse_pack(DOCS[:1], _llm_factory([{"type": "Commercial", "physical_type": "Other"}]),
+                        section_chars=50_000)
+    assert r["property"]["asset_class"] == "commercial" and r["property"]["type"] == "Commercial"
+    assert r["asset_routing"]["reason"] == "sections_agree"
