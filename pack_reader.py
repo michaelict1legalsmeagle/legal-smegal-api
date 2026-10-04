@@ -337,11 +337,18 @@ def analyse_pack(documents: List[Dict], call_llm: Callable[[str, str], Dict],
     facts = merge_facts(results)
 
     # ROUTE-1: which pipeline this deal belongs to (fail closed — see asset_router).
-    _pack_words = " " + " ".join(_words("\n".join((d.get("extracted_text") or "") for d in documents))) + " "
+    # Each quote is traced to the document(s) it comes from, so evidence about
+    # the lot (special conditions, the lease being granted) can outrank title
+    # history (old conveyances) — see asset_router.resolve.
+    _doc_words = [(d.get("doc_type") or "unknown",
+                   " " + " ".join(_words(d.get("extracted_text") or "")) + " ")
+                  for d in documents if (d.get("extracted_text") or "").strip()]
+    _type_by_name = {d.get("file_name") or "(unnamed)": d.get("doc_type") or "unknown" for d in documents}
     routing = asset_router.resolve(
         [r.get("property") or {} for r in results],
-        lambda q: bool(locate_quote(q, _pack_words)),
+        lambda q: {dt for dt, w in _doc_words if locate_quote(q, w)},
         physical_type=(facts.get("property") or {}).get("physical_type"),
+        section_doc_types=[{_type_by_name.get(pt[0], "unknown") for pt in sec["parts"]} for sec in sections],
     )
     facts["property"] = asset_router.apply_to_property(facts.get("property") or {}, routing)
 

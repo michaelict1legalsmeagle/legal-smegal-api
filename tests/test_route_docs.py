@@ -176,13 +176,14 @@ _words = " " + " ".join(re.findall(r"[a-z0-9]+", PACK.lower())) + " "
 
 
 def _found(q):
-    return " " + " ".join(re.findall(r"[a-z0-9]+", q.lower())) + " " in _words
+    hit = " " + " ".join(re.findall(r"[a-z0-9]+", q.lower())) + " " in _words
+    return {"lease"} if hit else set()
 
 
 @pytest.mark.parametrize("sections,phys,expected", [
     # 60B / 59A as stored today: type "investment", physical "Other" -> never residential
     ([{"type": "investment"}], "Other", "unclassified"),
-    # Lot 6 as stored today: type null, physical "Other"
+    # no class stated anywhere and not a house/flat -> ask
     ([{"type": None}], "Other", "unclassified"),
     # restored list: Commercial
     ([{"type": "Commercial"}, {"type": None}], "Other", "commercial"),
@@ -201,6 +202,38 @@ def _found(q):
 ])
 def test_routing(sections, phys, expected):
     assert ar.resolve(sections, _found, physical_type=phys)["asset_class"] == expected
+
+
+# Lot 6 live (deal 37d2c006, 4 Oct): the lot's own draft lease vs a 1954 conveyance
+LOT6_DOCS = {
+    "lease": " ".join(re.findall(r"[a-z0-9]+", "Permitted Use: as a single private dwelling.".lower())),
+    "deed":  " ".join(re.findall(r"[a-z0-9]+", ("ALL THAT shop offices and disused dwellinghouse with the yard "
+                                               "and outbuildings thereto adjoining").lower())),
+}
+
+
+def _lot6_source(q):
+    qw = " " + " ".join(re.findall(r"[a-z0-9]+", q.lower())) + " "
+    return {dt for dt, w in LOT6_DOCS.items() if qw in " " + w + " "}
+
+
+def test_quoted_wording_outranks_bare_type_label():
+    # Lot 65A live (deal a857c247): 3 sections quoted commercial wording, 1 bare "Mixed Use"
+    q = {"Property type Retail/Financial and Professional Services": {"epc"}}
+    sections = [{"asset_class": "commercial", "asset_class_evidence": "Property type Retail/Financial and Professional Services"},
+                {"type": "Mixed Use"}, {"type": "Commercial"}]
+    r = ar.resolve(sections, lambda x: q.get(x, set()), physical_type="Other")
+    assert r["asset_class"] == "commercial" and r["reason"] == "pack_wording_agrees"
+
+
+def test_conflicting_quoted_wording_still_asks():
+    # Lot 6 live (deal 37d2c006): lease "single private dwelling" vs deeds "shop offices";
+    # marketed as Commercial Property — the pack does not settle it.
+    sections = [
+        {"asset_class": "residential", "asset_class_evidence": "Permitted Use: as a single private dwelling."},
+        {"asset_class": "commercial", "asset_class_evidence": "ALL THAT shop offices and disused dwellinghouse"},
+    ]
+    assert ar.resolve(sections, _lot6_source, physical_type="Flat")["asset_class"] == "unclassified"
 
 
 def test_property_type_carries_the_class_every_gate_reads():

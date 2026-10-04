@@ -23,7 +23,15 @@ RULE (fail closed):
     2. the class implied by its `type` if `type` is one of the allowed
        strategy values (the pre-26-Sep classifier, restored).
   * every vote agrees            -> that class
-  * votes disagree               -> "unclassified" (user is asked)
+  * votes disagree               -> votes that rest only on TITLE-HISTORY documents
+    (old conveyances, assents, epitomes, registers, plans, searches) are set
+    aside; if the remaining LOT votes (special conditions, the lease/transfer
+    being granted, tenancies, EPC, survey) agree -> that class.
+    Live case (Lot 6, deal 37d2c006, 4 Oct): the draft lease of the lot says
+    "Permitted Use: as a single private dwelling"; the 1954 conveyance of the
+    whole of 41-43 Lord Street says "shop offices and disused dwellinghouse".
+    The lot is the dwelling — the conveyance describes the superior title.
+  * still disagree               -> "unclassified" (user is asked)
   * no votes, physical_type is a house/flat type -> "residential"
     (preserves today's behaviour for residential packs whose type is null)
   * no votes otherwise           -> "unclassified" (user is asked)
@@ -48,6 +56,12 @@ _COMMERCIAL_TYPE = {"commercial": "Commercial"}
 _MIXED_TYPE = {"mixed use": "Mixed Use", "mixed-use": "Mixed Use"}
 
 RESIDENTIAL_PHYSICAL_TYPES = {"flat", "detached", "semi-detached", "terraced"}
+
+# Documents that record the history / context of the title rather than the lot
+# being sold. Their description of "the property" is often the superior or
+# whole building (Lot 6: a 1954 conveyance of shops and a dwellinghouse).
+TITLE_HISTORY_DOC_TYPES = {"deed", "title_register", "freehold", "title_plan",
+                           "local_auth_search"}
 
 # property.type written for each final class (the signal every existing gate reads)
 TYPE_FOR_CLASS = {"commercial": "Commercial", "mixed_use": "Mixed Use",
@@ -88,29 +102,56 @@ def class_from_type(value) -> Optional[str]:
     return "residential"
 
 
-def section_vote(prop: Dict, quote_found: Callable[[str], bool]) -> Optional[Dict]:
-    """One section's vote: {'class', 'basis', 'evidence'} or None."""
+def _role(doc_types) -> str:
+    dts = {d for d in (doc_types or []) if d}
+    return "title_history" if dts and dts <= TITLE_HISTORY_DOC_TYPES else "lot"
+
+
+def section_vote(prop: Dict, quote_source: Callable[[str], set],
+                 section_doc_types=None) -> Optional[Dict]:
+    """One section's vote: {'class', 'basis', 'evidence', 'role'} or None.
+    quote_source(q) -> set of doc_types whose text contains q (empty = not found)."""
     prop = prop or {}
     ac = normalise_asset_class(prop.get("asset_class"))
     ev = (prop.get("asset_class_evidence") or "").strip()
-    if ac and ev and quote_found(ev):
-        return {"class": ac, "basis": "evidence_quote", "evidence": ev}
+    if ac and ev:
+        found_in = quote_source(ev) or set()
+        if found_in:
+            return {"class": ac, "basis": "evidence_quote", "evidence": ev,
+                    "role": _role(found_in)}
     tc = class_from_type(prop.get("type"))
     if tc:
         return {"class": tc, "basis": "type", "evidence": None,
-                "type": normalise_strategy(prop.get("type"))}
+                "type": normalise_strategy(prop.get("type")),
+                "role": _role(section_doc_types)}
     return None
 
 
-def resolve(section_props: List[Dict], quote_found: Callable[[str], bool],
-            physical_type: Optional[str] = None) -> Dict:
-    """Decide the deal's class from every section's property block."""
-    votes = [v for v in (section_vote(p, quote_found) for p in (section_props or [])) if v]
+def resolve(section_props: List[Dict], quote_source: Callable[[str], set],
+            physical_type: Optional[str] = None,
+            section_doc_types: Optional[List] = None) -> Dict:
+    """Decide the deal's class from every section's property block.
+    section_doc_types[i] = doc_types in section i (for votes without a quote)."""
+    sdt = list(section_doc_types or [])
+    votes = [v for v in (section_vote(p, quote_source, sdt[i] if i < len(sdt) else None)
+                         for i, p in enumerate(section_props or [])) if v]
     classes = sorted({v["class"] for v in votes})
-    evidence = [v["evidence"] for v in votes if v.get("evidence")]
+    lot_classes = sorted({v["class"] for v in votes if v.get("role") == "lot"})
+    evidence = [v["evidence"] for v in votes if v.get("evidence") and v.get("role") == "lot"] \
+        + [v["evidence"] for v in votes if v.get("evidence") and v.get("role") != "lot"]
+    ev_classes = sorted({v["class"] for v in votes if v["basis"] == "evidence_quote"})
     if len(classes) == 1:
         cls, reason = classes[0], "sections_agree"
+    elif len(ev_classes) == 1:
+        # ROUTE-3 (4 Oct, Lot 65A deal a857c247): quoted pack wording outranks an
+        # unquoted type label. Three sections quoted commercial wording (EPC
+        # "Retail/Financial and Professional Services"); one section's bare
+        # type said "Mixed Use" with no quote -> the user was asked needlessly.
+        cls, reason = ev_classes[0], "pack_wording_agrees"
     elif len(classes) > 1:
+        # Quoted wording itself conflicts (Lot 6: the lease to be granted says
+        # "single private dwelling", the title deeds say "shop offices") — the
+        # pack does not settle it, so the user is asked.
         cls, reason = UNCLASSIFIED, "sections_disagree"
     elif str(physical_type or "").strip().lower() in RESIDENTIAL_PHYSICAL_TYPES:
         cls, reason = "residential", "no_vote_residential_physical_type"
@@ -125,7 +166,7 @@ def resolve(section_props: List[Dict], quote_found: Callable[[str], bool],
     return {
         "asset_class": cls,
         "reason": reason,
-        "votes": [{"class": v["class"], "basis": v["basis"]} for v in votes],
+        "votes": [{"class": v["class"], "basis": v["basis"], "role": v.get("role")} for v in votes],
         "classes_voted": classes,
         "evidence": evidence[:3],
         "strategy": strategy,
