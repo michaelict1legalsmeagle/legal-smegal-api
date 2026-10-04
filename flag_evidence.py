@@ -119,6 +119,11 @@ DOC_KINDS: Dict[str, Tuple[set, str]] = {
     "ta7":                (set(), r"\bta\s*7\b|leasehold\s*information\s*form"),
     "ta10":               (set(), r"\bta\s*10\b|fittings\s*(and|&)\s*contents"),
     "mining":             (set(), r"coal\s*(mining|authority)|mining\s*(search|report)"),
+    # DOCS-3 (2026-10-04, Lot 65A deal 5822f380): "CPSE replies not readable" and
+    # "No flood risk search" were kept while CPSE.7 (23,442 chars) and a 55-page
+    # Groundsure screening (79 flood mentions, coal-mining section) were read.
+    "enquiries":          ({"enquiries"}, r"\bcpse\b|commercial\s*property\s*standard\s*enquiries|replies\s*to\s*(pre[-\s]*contract\s*)?enquiries"),
+    "flood":              (set(), r"\bflood"),
 }
 
 # how a missing flag's title/evidence names a kind (checked in this order —
@@ -139,16 +144,36 @@ MISSING_NAME_PATTERNS: List[Tuple[str, str]] = [
     ("ta7", r"\bta\s*7\b|leasehold\s*information"),
     ("ta10", r"\bta\s*10\b|fittings"),
     ("mining", r"mining"),
+    ("flood", r"\bflood"),
+    ("enquiries", r"\bcpse\b|enquir"),
 ]
+
+
+# Kinds that are SEARCHES, and the document types that are search documents.
+SEARCH_KINDS = {"local_search", "environmental", "drainage", "mining", "flood"}
+SEARCH_DOC_TYPES = {"local_auth_search", "environmental", "unknown", ""}
 
 
 def doc_kinds(doc: Dict) -> set:
     """Kinds a single document satisfies, from doc_type + filename + first 3000 chars."""
     dt = (doc.get("doc_type") or "").lower()
-    probe = ((doc.get("file_name") or "") + "\n" + (doc.get("extracted_text") or "")[:3000]).lower()
+    # DOCS-3: environmental reports put their flood / coal-mining sections far
+    # past the first 3,000 characters — read their whole text for kinds.
+    _limit = None if dt == "environmental" else 3000
+    name = (doc.get("file_name") or "").lower()
+    probe = (name + "\n" + (doc.get("extracted_text") or "")[:_limit]).lower()
     kinds = set()
     for kind, (types, pat) in DOC_KINDS.items():
-        if dt in types or re.search(pat, probe, re.IGNORECASE):
+        if dt in types:
+            kinds.add(kind)
+        elif kind in SEARCH_KINDS and dt not in SEARCH_DOC_TYPES:
+            # A search is only "in the pack" if a search document is: a clause in
+            # the special conditions that merely NAMES searches ("the Buyer shall
+            # pay the cost of any local search, drainage search, coal mining
+            # search" — Lot 59A) must not clear a missing-search flag.
+            if re.search(pat, name, re.IGNORECASE):
+                kinds.add(kind)
+        elif re.search(pat, probe, re.IGNORECASE):
             kinds.add(kind)
     return kinds
 

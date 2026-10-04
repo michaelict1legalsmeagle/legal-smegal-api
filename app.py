@@ -7564,6 +7564,55 @@ def detect_document_type(filename: str, text: str) -> str:
     return _classify_document(filename, text)
 
 
+def _extract_doc_text(file_bytes: bytes):
+    """DOCS-2 (2026-10-04): text of a legacy Word 97-2003 .doc (OLE2), as
+    (text, page_estimate). Lot 71 "Replies to CPSE 2" is a .doc and was not
+    read before this. Reads the piece table (Clx) so pieces come out in document
+    order. Checked against LibreOffice on the real file: every word matched
+    except Word auto-numbering labels (1.1, (a)) — list formatting, not text."""
+    import struct
+    import olefile
+    ole = olefile.OleFileIO(io.BytesIO(file_bytes))
+    try:
+        wd = ole.openstream("WordDocument").read()
+        if len(wd) < 0x1AA or struct.unpack_from("<H", wd, 0)[0] != 0xA5EC:
+            raise ValueError("not a Word 97-2003 document")
+        flags = struct.unpack_from("<H", wd, 0x0A)[0]
+        if flags & 0x0100:
+            raise ValueError("encrypted .doc")
+        table_name = "1Table" if flags & 0x0200 else "0Table"
+        table = ole.openstream(table_name).read()
+        fc_clx, lcb_clx = struct.unpack_from("<II", wd, 0x01A2)
+        clx = table[fc_clx:fc_clx + lcb_clx]
+        i = 0
+        while i < len(clx) and clx[i] == 0x01:            # Prc entries
+            i += 3 + struct.unpack_from("<H", clx, i + 1)[0]
+        if i >= len(clx) or clx[i] != 0x02:
+            raise ValueError("no piece table")
+        lcb = struct.unpack_from("<I", clx, i + 1)[0]
+        plc = clx[i + 5:i + 5 + lcb]
+        n = (lcb - 4) // 12
+        cps = struct.unpack_from("<%dI" % (n + 1), plc, 0)
+        out = []
+        for k in range(n):
+            pcd = plc[4 * (n + 1) + 8 * k: 4 * (n + 1) + 8 * k + 8]
+            fc = struct.unpack_from("<I", pcd, 2)[0]
+            count = cps[k + 1] - cps[k]
+            if fc & 0x40000000:
+                start = (fc & 0x3FFFFFFF) // 2
+                out.append(wd[start:start + count].decode("cp1252", errors="replace"))
+            else:
+                out.append(wd[fc:fc + 2 * count].decode("utf-16-le", errors="replace"))
+        text = "".join(out)
+    finally:
+        ole.close()
+    text = text.replace("\r", "\n").replace("\x07", "\t").replace("\x0b", "\n").replace("\x0c", "\n")
+    text = re.sub(r"\x13[^\x14\x15]*\x14?", "", text).replace("\x15", "")   # field codes: keep results only
+    text = re.sub(r"[\x00-\x08\x0e-\x1f]", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text, max(1, len(text) // 3000)
+
+
 def _extract_docx_text(file_bytes: bytes) -> Tuple[str, int]:
     """Extract text from a .docx (Office Open XML) with NO third-party dependency.
     A .docx is a zip; the body text lives in word/document.xml. Paragraph/break tags
@@ -8542,7 +8591,7 @@ def _recover_unread_documents(deal_id: str, user_id: str) -> List[str]:
 #     shows no request ever reached the server for the other 3, and the old
 #     page continued with a green "3 of 6 documents uploaded".
 # ─────────────────────────────────────────────────────────────────────────────
-_UPLOAD_EXTS = (".pdf", ".docx", ".txt")
+_UPLOAD_EXTS = (".pdf", ".docx", ".doc", ".txt")
 _UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 
 
@@ -8561,9 +8610,12 @@ def _file_signature_error(filename: str, file_bytes: bytes) -> Optional[str]:
                 return None if "word/document.xml" in _z.namelist() else bad
         except Exception:
             return bad
+    if low.endswith(".doc"):
+        return (None if file_bytes.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+                else "File does not appear to be a valid Word (.doc) document")
     if low.endswith(".txt"):
         return None if b"\x00" not in file_bytes[:4096] else "File does not appear to be plain text"
-    return "Only PDF, Word (.docx) and text (.txt) files are accepted"
+    return "Only PDF, Word (.docx / .doc) and text (.txt) files are accepted"
 
 
 def _manifest_entry(f: dict) -> Optional[dict]:
@@ -8596,7 +8648,7 @@ def _manifest_not_received(manifest: Optional[dict], stored_names) -> List[dict]
             continue
         ext = os.path.splitext((f.get("name") or "").lower())[1]
         if ext not in _UPLOAD_EXTS:
-            reason = "file type not supported (PDF, Word .docx or text only)"
+            reason = "file type not supported (PDF, Word .docx/.doc, text, or PNG/JPG images)"
         elif (f.get("size") or 0) > _UPLOAD_MAX_BYTES and not f.get("parts"):
             reason = "over the 20 MB upload limit"
         elif f.get("parts"):
@@ -8761,12 +8813,14 @@ def upload_document():
     filename = secure_filename(file.filename or "document.pdf")
     if not filename:
         filename = "document.pdf"
-    if not filename.lower().endswith((".pdf", ".docx", ".txt")):
-        return jsonify({"error": "Only PDF, Word (.docx) and text (.txt) files are accepted"}), 400
+    if not filename.lower().endswith((".pdf", ".docx", ".doc", ".txt")):
+        return jsonify({"error": "Only PDF, Word (.docx / .doc) and text (.txt) files are accepted"}), 400
     _is_docx = filename.lower().endswith(".docx")
+    _is_doc  = filename.lower().endswith(".doc")
     _is_txt  = filename.lower().endswith(".txt")
     _content_type = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                     if _is_docx else "text/plain" if _is_txt else "application/pdf")
+                     if _is_docx else "application/msword" if _is_doc
+                     else "text/plain" if _is_txt else "application/pdf")
 
     # Verify deal belongs to this user
     try:
@@ -8837,6 +8891,9 @@ def upload_document():
         if _is_docx:
             extracted_text, page_count = _extract_docx_text(file_bytes)
             needs_ocr = False
+        elif _is_doc:
+            extracted_text, page_count = _extract_doc_text(file_bytes)
+            needs_ocr = False
         elif _is_txt:
             try:
                 extracted_text = file_bytes.decode("utf-8")
@@ -8855,7 +8912,7 @@ def upload_document():
     except Exception as e:
         app.logger.warning(f"Extraction failed: {e} — routing to OCR")
         extracted_text, page_count = "", 0
-        needs_ocr = (docai_ocr is not None) and (not _is_docx) and (not _is_txt)
+        needs_ocr = (docai_ocr is not None) and (not _is_docx) and (not _is_doc) and (not _is_txt)
     _t_extract = round(time.time() - _t0, 2)
     _t_classify_ocr_need = 0.0  # no longer a separate step
 

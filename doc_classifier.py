@@ -50,6 +50,11 @@ FILENAME_RULES: List[Tuple[str, List[str]]] = [
     ("death_certificate",  ["death cert", "death certificate"]),
     ("rent_statement",     ["rent statement", "rent statements", "rental statement", "rent schedule"]),  # V-PACK
     ("title_plan",         ["title plan", "filed plan"]),            # before register: "OC1 Title Plan"
+    # DOCS-3 (2026-10-04): replies to pre-contract enquiries. Lot 71 "Replies to
+    # CPSE 2 ... .doc" typed 'lease' (its definitions mention the 1954 Act lease).
+    ("enquiries",          ["cpse", "replies to enquiries", "pre contract enquiries",
+                            "preliminary enquiries", "standard enquiries",
+                            "requisitions on title", "replies to requisitions"]),
     ("lease",              ["lease", "underlease"]),                 # before register: "Official copy of lease"
     # bare "register" deliberately absent: live packs carry "REGISTER_TO_BID" and "EPC_Register"
     ("title_register",     ["title register", "register of title", "oc1", "official copy", "official copies"]),
@@ -81,6 +86,10 @@ TEXT_RULES: List[Tuple[str, List[str]]] = [
     # V-PACK (2026-09-24): managing-agent statements carry the rent actually paid.
     ("rent_statement",     ["rents received for the period", "rent received for the period",
                             "commission on collection"]),
+    # DOCS-3: before lease — CPSE forms define "lease" and the 1954 Act up front.
+    ("enquiries",          ["commercial property standard enquiries", "replies to enquiries",
+                            "pre contract enquiries", "preliminary enquiries",
+                            "requisitions on title"]),
     # Water-company names ("thames water", "severn trent", "anglian water") deliberately
     # NOT used: now that environmental precedes title_register, an easement to a water
     # company in a register would be mistyped. Water searches are caught by their own
