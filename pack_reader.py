@@ -30,8 +30,12 @@ from typing import Callable, Dict, List, Optional, Tuple
 from flag_evidence import (FLAG_RULES, _words, compute_deal_score, dedupe_flags,
                            flag_counts, locate_quote, verify_flags)
 import asset_router
+import pack_integrity
 
-PIPELINE_VERSION = "fullread-2"   # ROUTE-1 (2026-10-04): asset_class + strategy enum restored
+# fullread-3 (PACK-INTEG-1, 2026-10-04): documents about another property are
+# excluded before analysis. Bumped so no fullread-2 result (which may include
+# another lot's flags) is reused for an identical upload.
+PIPELINE_VERSION = "fullread-3"
 SECTION_CHARS = 100_000        # ~25k tokens of pack text per call
 SECTION_OVERLAP = 1_500        # overlap when one document spans sections
 # MEM-READ (2026-09-26): sections are analysed ONE at a time by default. Three at
@@ -294,7 +298,17 @@ def analyse_pack(documents: List[Dict], call_llm: Callable[[str, str], Dict],
                  section_chars: int = SECTION_CHARS) -> Dict:
     """call_llm(system, prompt) -> parsed dict (must raise on failure)."""
     log = log or (lambda m: None)
+    # PACK-INTEG-1: a document whose own text names a different property is not
+    # part of this lot — it is excluded from reading, flags, routing and
+    # completeness, and named in the result (see pack_integrity.py).
+    documents, integrity = pack_integrity.split(documents)
+    integrity.pop("excluded", None)
+    if integrity["excluded_files"]:
+        log("[integrity] lot=%s excluded=%s" % (
+            integrity["lot_postcode"],
+            ["%s (%s)" % (x["file_name"], x["postcode"]) for x in integrity["excluded_files"]]))
     sections, coverage = build_sections(documents, section_chars=section_chars)
+    coverage["documents_excluded_other_property"] = [x["file_name"] for x in integrity["excluded_files"]]
     if not sections:
         raise AnalysisIncomplete("no_text_extracted")
     if not coverage["all_text_sent"]:
@@ -363,6 +377,7 @@ def analyse_pack(documents: List[Dict], call_llm: Callable[[str, str], Dict],
         **facts,
         "read_coverage": coverage,
         "asset_routing": routing,
+        "pack_integrity": integrity,
         "documents_processed": coverage["documents_total"],
         "pipeline_version": PIPELINE_VERSION,
     }

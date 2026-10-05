@@ -9412,7 +9412,11 @@ def summarise_deal(deal_id: str):
                         _scot_lsoa, _ = resolve_lsoa_gss_from_postcode(_scot_pc)
                         if _is_scotland_lsoa(_scot_lsoa):
                             _hr_text = None
-                            for _sd in (documents or []):
+                            # PACK-INTEG-1: never read a Home Report from a document
+                            # about another property.
+                            _integ_x = {x.get("file_name") for x in
+                                        ((result.get("pack_integrity") or {}).get("excluded_files") or [])}
+                            for _sd in [d for d in (documents or []) if d.get("file_name") not in _integ_x]:
                                 _sdt = (_sd.get("extracted_text") or "")
                                 if _scot_hr_signal(_sdt):
                                     _hr_text = _sdt
@@ -11742,11 +11746,17 @@ def save_area(deal_id: str):
     # label-adjacent on 23 Sep and labels-then-values on 24 Sep; the old readers
     # lost type AND area on the second, and 2C Talbot Road was valued off semis.
     _vpack_type_code = None
+    # PACK-INTEG-1: documents about another property give no subject facts
+    # (pack facts, EPC floor area, EPC type below). Defined outside the try so
+    # the later readers always have it.
+    _vp_x = {x.get("file_name") for x in ((_summary.get("pack_integrity") or {}).get("excluded_files") or [])
+             if isinstance(x, dict)}
     try:
         from pack_facts import resolve_pack_facts as _resolve_pack_facts
         _vp_docs = supabase.table("documents") \
             .select("file_name, doc_type, extracted_text, extraction_status") \
             .eq("deal_id", deal_id).eq("user_id", request.user_id).execute().data or []
+        _vp_docs = [d for d in _vp_docs if d.get("file_name") not in _vp_x]
         _vp = _resolve_pack_facts(_vp_docs, _prop.get("address"),
                                   _prop.get("postcode") or deal.data.get("postcode"),
                                   subject_is_flat=str(_prop.get("physical_type") or "").strip().lower() == "flat")
@@ -11813,9 +11823,11 @@ def save_area(deal_id: str):
     if not _prop.get("internal_area"):
         try:
             _docs = supabase.table("documents") \
-                .select("extracted_text") \
+                .select("file_name, extracted_text") \
                 .eq("deal_id", deal_id).eq("user_id", request.user_id).execute()
-            _pack_text = "\n".join((d.get("extracted_text") or "") for d in (_docs.data or []))
+            # PACK-INTEG-1: another property's EPC never sets this lot's floor area.
+            _pack_text = "\n".join((d.get("extracted_text") or "") for d in (_docs.data or [])
+                                   if d.get("file_name") not in _vp_x)
             _epc_text_area = _extract_epc_floor_area_from_text(_pack_text)
             if _epc_text_area:
                 _subject_gia_listing = _epc_text_area
@@ -12055,10 +12067,12 @@ def save_area(deal_id: str):
     _epc_pack_type_code = None
     try:
         _epc_docs = supabase.table("documents") \
-            .select("extracted_text") \
+            .select("file_name, extracted_text") \
             .eq("deal_id", deal_id).eq("user_id", request.user_id) \
             .eq("doc_type", "epc").execute()
-        _epc_pack_text = "\n".join((d.get("extracted_text") or "") for d in (_epc_docs.data or []))
+        # PACK-INTEG-1: another property's EPC never sets this lot's type.
+        _epc_pack_text = "\n".join((d.get("extracted_text") or "") for d in (_epc_docs.data or [])
+                                    if d.get("file_name") not in _vp_x)
         # V-PACK: the address-matched, order-robust reading wins.
         _epc_pack_type_code = _vpack_type_code or _extract_epc_property_type_from_text(_epc_pack_text)
     except Exception as _eptc:
