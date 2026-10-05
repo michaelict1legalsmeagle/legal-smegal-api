@@ -8396,6 +8396,31 @@ def _recompute_pack_hash(deal_id: str):
         return None
 
 
+def _strip_residential_seed(deal_id, asset_class):
+    """COMM-2 (2026-10-05): dual pipeline. create_deal seeds the residential
+    Financial Model with target_yield 6 and ltv_pct 75 before the class is
+    known. Once the pack routes the deal to commercial, mixed use or
+    unclassified, that seed is removed — only while it is still the untouched
+    seed (no saved model, no purchase price). Residential deals unchanged.
+    Same rule as commercial_routes._heal_residential_seed. Never raises."""
+    if asset_class not in ("commercial", "mixed_use", "unclassified"):
+        return False
+    try:
+        row = supabase.table("deals").select("financials_json").eq("id", deal_id).single().execute()
+        fins = (row.data or {}).get("financials_json") or {}
+        inp = fins.get("inputs") or {}
+        if not (fins.get("_seeded") and inp.get("target_yield") == 6.0 and inp.get("ltv_pct") == 75.0
+                and not fins.get("ok") and not inp.get("purchase_price")):
+            return False
+        cleaned = dict(fins)
+        cleaned["inputs"] = {k: v for k, v in inp.items() if k not in ("target_yield", "ltv_pct")}
+        supabase.table("deals").update({"financials_json": cleaned}).eq("id", deal_id).execute()
+        return True
+    except Exception as e:
+        app.logger.warning("[COMM-2] seed strip failed for %s: %s", deal_id, e)
+        return False
+
+
 def _reproducibility_gate(deal_id, deal_row):
     """If a prior COMPLETED analysis exists for the same pack_hash (any user —
     the pack is a public document), copy its figures into this deal and return
@@ -8439,6 +8464,7 @@ def _reproducibility_gate(deal_id, deal_row):
             except Exception as e:
                 app.logger.warning("reproducibility gate apply failed: %s", e)
                 return None
+            _strip_residential_seed(deal_id, (reused.get("property") or {}).get("asset_class"))
             return reused
     return None
 
@@ -8759,6 +8785,7 @@ def set_deal_asset_class(deal_id: str):
     except Exception as e:
         app.logger.error("asset-class update failed: %s", e, exc_info=True)
         return jsonify({"error": "An internal error occurred"}), 500
+    _strip_residential_seed(deal_id, cls)
     app.logger.info(f"[ROUTE-1] deal={deal_id} asset_class {prev} -> {cls} (user)")
     return jsonify({"ok": True, "asset_class": cls, "type": prop.get("type"),
                     "previous": prev}), 200
@@ -9648,6 +9675,7 @@ def summarise_deal(deal_id: str):
                         break
 
                 supabase.table("deals").update(update_payload).eq("id", _deal_id).execute()
+                _strip_residential_seed(_deal_id, prop.get("asset_class"))   # COMM-2
 
                 # G1 (2026-09-26): the pack's stated completion period feeds the deal's
                 # completion_period — only when the user has not set one. No default.
@@ -10266,6 +10294,11 @@ def get_financials(deal_id: str):
                     # FIN-CORE: no invented model defaults seeded (rate, management, maintenance, legal, voids, hold)
                 }
             }
+            # COMM-2: the residential seed is not offered for a commercial,
+            # mixed-use or unclassified deal (dual pipeline).
+            if prop.get("asset_class") in ("commercial", "mixed_use", "unclassified"):
+                for _k in ("target_yield", "ltv_pct"):
+                    financials["inputs"].pop(_k, None)
         return jsonify({"ok": True, "financials": financials}), 200
     except Exception as e:
         app.logger.exception("get_financials failed")

@@ -298,6 +298,8 @@ Edition, Addleshaw Goddard template):
 import re
 from datetime import date, datetime, timezone
 
+from pack_terms import possession_statement
+
 # Kept in sync manually with commercial_routes.py's _ALLOWED_COMMERCIAL_FIELDS.
 # Only the subset a legal pack can actually contain — never yield/market
 # figures, which require judgement a document can't supply.
@@ -597,14 +599,30 @@ def extract_deterministic(documents: list) -> tuple:
                         (True, _citation(fname, page))
                     )
 
-        for vm in _VACANT_PATTERN.finditer(text):
-            lookahead = text[vm.end(): vm.end() + _VACANT_NEGATION_WINDOW_CHARS]
-            if _VACANT_NEGATION_RE.search(lookahead):
-                continue  # this occurrence describes the term being deleted/excluded, not asserted
-            matches.setdefault("_vacant_possession", []).append(
-                (True, _citation(fname, _find_page(text, vm.start())))
-            )
-            break  # boolean field -- one confirmed (non-negated) hit is enough
+        # COMM-1 (2026-10-05): "vacant possession" counts only when the pack
+        # states it ABOUT THE SALE. Root cause (4 Oct, L2 on the real packs):
+        # the bare pattern matched 60B's underlease cl.14.1 ("return the
+        # Property ... with vacant possession") and 59A's rent-review
+        # assumption, marking both let lots vacant -- and a vacant flag
+        # WITHHOLDS the rent below. Lease documents never say whether this
+        # sale is vacant, so they are not read for it at all.
+        if (doc.get("doc_type") or "").lower() not in ("lease", "tenancy_ast"):
+            for vm in _VACANT_PATTERN.finditer(text):
+                lookahead = text[vm.end(): vm.end() + _VACANT_NEGATION_WINDOW_CHARS]
+                if _VACANT_NEGATION_RE.search(lookahead):
+                    continue  # this occurrence describes the term being deleted/excluded, not asserted
+                state = possession_statement(text, vm.start(), vm.end())
+                if not state:
+                    continue  # lease covenant / review assumption / not about the sale
+                if state == "vacant possession":
+                    matches.setdefault("_vacant_possession", []).append(
+                        (True, _citation(fname, _find_page(text, vm.start())))
+                    )
+                elif state:
+                    matches.setdefault("_vacant_subject_to_lease", []).append(
+                        (True, _citation(fname, _find_page(text, vm.start())))
+                    )
+                break  # one decision per document
 
     fields: dict = {}
     citations: dict = {}
@@ -802,6 +820,13 @@ def extract_commercial_fields(documents: list, today: date = None,
     det_fields, det_citations, det_conflicts = extract_deterministic(documents)
     vacant = det_fields.pop("_vacant_possession", False)
     vacant_citation = det_citations.pop("_vacant_possession", None)
+    vacant_subject = det_fields.pop("_vacant_subject_to_lease", False)
+    vacant_subject_citation = det_citations.pop("_vacant_subject_to_lease", None)
+    if vacant_subject:
+        evidence_gaps.append(
+            f"Pack states vacant possession but subject to a lease or tenancy "
+            f"({vacant_subject_citation}) — part of the lot is let; any rent found is kept."
+        )
     licence_not_lease = det_fields.pop("_licence_not_lease_gap", False)
     licence_citation = det_citations.pop("_licence_not_lease_gap", None)
     evidence_gaps.extend(det_conflicts)

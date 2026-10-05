@@ -73,7 +73,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERSION = "commercial_multi_method_v2_4_provenance_contract"
+VERSION = "commercial_multi_method_v2_5_no_assumed_inputs"  # COMM-2 (2026-10-05)
 
 # Yield basis — v2.3. The nominal (annually in arrears) convention is the
 # Argus/market default; the TRUE equivalent yield basis (rent received
@@ -131,7 +131,17 @@ YIELD_CONVENTION_NOTE = (
 # right for large lots. Wales (LTT) and Scotland (LBTT) have different
 # non-residential bands NOT implemented here — those nations gate the
 # net-of-costs figure rather than computing it on the wrong nation's tax.
-DEFAULT_PURCHASER_FEES_PCT = 1.8  # agent ~1% + legal ~0.5% + VAT on fees — assumption, editable per deal
+# COMM-2 (2026-10-05): NO default purchaser's-fee percentage. The former
+# 1.8% ("agent ~1% + legal ~0.5% + VAT") was an invented market convention.
+# Purchaser's costs are now only:
+#   * SDLT, computed on the statutory bands below;
+#   * the costs the lot's own special conditions make the buyer pay
+#     (pack_terms.py — each with its quote), VAT added where the clause says
+#     "plus VAT", at the standard rate below;
+#   * the buyer's own fees (agent / solicitor / survey) as a % the user
+#     enters. Not entered -> not deducted, and said so.
+# Source: GOV.UK "VAT rates" — standard rate 20% since 4 January 2011.
+UK_VAT_STANDARD_RATE = 0.20
 
 # SDLT non-residential freehold consideration bands, England & Northern
 # Ireland: 0% to £150,000; 2% on £150,001–£250,000; 5% above £250,000.
@@ -244,7 +254,26 @@ def _sdlt_non_residential_england_ni(price: float) -> float:
     return tax
 
 
-def _net_of_purchasers_costs(gross_value: float, fees_pct: Optional[float], nation: str) -> dict:
+def _pack_cost_at(price: float, pack_costs: Optional[list]) -> float:
+    """Total of the special-conditions costs at a given price: fixed sums and
+    percentages of the price (with any stated minimum), VAT added where the
+    clause says plus VAT. Items with no stated amount, per-unit charges and
+    conditional costs are never in this list (see _pack_costs_from_terms)."""
+    total = 0.0
+    for it in pack_costs or []:
+        vat = 1.0 + (UK_VAT_STANDARD_RATE if it.get("plus_vat") else 0.0)
+        if it.get("basis") == "fixed" and it.get("amount_gbp") is not None:
+            total += float(it["amount_gbp"]) * vat
+        elif it.get("basis") == "percent_of_price" and it.get("percent") is not None:
+            amt = float(it["percent"]) / 100.0 * price
+            if it.get("minimum_gbp") is not None:
+                amt = max(amt, float(it["minimum_gbp"]))
+            total += amt * vat
+    return total
+
+
+def _net_of_purchasers_costs(gross_value: float, fees_pct: Optional[float], nation: Optional[str],
+                             pack_costs: Optional[list] = None) -> dict:
     """Solve the net price P such that P + SDLT(P) + fees%×P = gross capital
     value, by bisection (SDLT is stepped on the net consideration, so the
     relationship is circular and has no closed form). Convention: yields are
@@ -252,7 +281,20 @@ def _net_of_purchasers_costs(gross_value: float, fees_pct: Optional[float], nati
     is the GROSS value and the buyer-pays price is the NET value.
 
     Wales/Scotland gate: LTT/LBTT non-residential bands are not implemented —
-    the net figure is withheld rather than computed on the wrong nation's tax."""
+    the net figure is withheld rather than computed on the wrong nation's tax.
+    COMM-2: nation unknown -> withheld (never assumed); own fees not entered
+    -> 0 and reported as not entered; special-conditions costs deducted."""
+    if nation is None:
+        return {
+            "status": "unavailable",
+            "nation": None,
+            "reason": (
+                "Nation not known — the deal's postcode did not resolve and none "
+                "was selected, so SDLT (England & NI), LTT (Wales) or LBTT "
+                "(Scotland) cannot be chosen. The capital value shown is gross "
+                "of purchaser's costs."
+            ),
+        }
     if nation in ("wales", "scotland"):
         tax_name = "LTT (Wales)" if nation == "wales" else "LBTT (Scotland)"
         return {
@@ -265,12 +307,14 @@ def _net_of_purchasers_costs(gross_value: float, fees_pct: Optional[float], nati
                 "is gross of purchaser's costs."
             ),
         }
-    fees_rate = (fees_pct if fees_pct is not None and fees_pct >= 0 else DEFAULT_PURCHASER_FEES_PCT) / 100.0
+    own_entered = fees_pct is not None and fees_pct >= 0
+    fees_rate = (fees_pct / 100.0) if own_entered else 0.0
     lo, hi = 0.0, float(gross_value)
     mid = gross_value
     for _ in range(200):
         mid = (lo + hi) / 2
-        f = mid + _sdlt_non_residential_england_ni(mid) + fees_rate * mid - gross_value
+        f = (mid + _sdlt_non_residential_england_ni(mid) + fees_rate * mid
+             + _pack_cost_at(mid, pack_costs) - gross_value)
         if abs(f) < 0.5:
             break
         if f > 0:
@@ -280,19 +324,25 @@ def _net_of_purchasers_costs(gross_value: float, fees_pct: Optional[float], nati
     net = round(mid, 2)
     sdlt = round(_sdlt_non_residential_england_ni(net), 2)
     fees = round(fees_rate * net, 2)
+    pack = round(_pack_cost_at(net, pack_costs), 2)
     return {
         "status": "ok",
         "nation": "england_ni",
         "net_value_gbp": net,
         "sdlt_gbp": sdlt,
-        "fees_pct": round(fees_rate * 100, 2),
-        "fees_gbp": fees,
-        "total_costs_gbp": round(sdlt + fees, 2),
+        "fees_pct": round(fees_rate * 100, 2) if own_entered else None,
+        "fees_gbp": fees if own_entered else None,
+        "own_fees_entered": own_entered,
+        "pack_costs_gbp": pack,
+        "pack_costs_items": len(pack_costs or []),
+        "total_costs_gbp": round(sdlt + fees + pack, 2),
         "basis": (
             "SDLT England & NI non-residential freehold bands (0% to £150,000; "
-            "2% on £150,001–£250,000; 5% above £250,000) computed on the net "
-            "price by bisection, plus purchaser's fees at the stated percentage "
-            "of net price. Net price + SDLT + fees = capital value gross of costs."
+            "2% on £150,001–£250,000; 5% above £250,000 — GOV.UK) computed on "
+            "the net price by bisection, plus the costs the special conditions "
+            "make the buyer pay (VAT at 20% where the clause says plus VAT), "
+            "plus your own fees if entered. Net price + all of these = capital "
+            "value gross of costs."
         ),
     }
 
@@ -356,6 +406,13 @@ def _evidence_tier(inputs_used: dict, provenance: Optional[dict] = None) -> dict
         if src == "extracted":
             input_sources[k] = "extracted"
             verified_fields.append(k)
+            cit = entry.get("citation") if isinstance(entry, dict) else None
+            if cit:
+                citations[k] = str(cit)
+        elif src == "postcode":
+            # COMM-2: nation read from the deal postcode (postcodes.io) —
+            # source data, but not a fact verified against the legal pack.
+            input_sources[k] = "postcode"
             cit = entry.get("citation") if isinstance(entry, dict) else None
             if cit:
                 citations[k] = str(cit)
@@ -578,9 +635,9 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
 
     Expected keys in fi (all optional except where noted):
         passing_rent_pa      : float — current annual rent passing (£/yr). REQUIRED.
-        market_rent_pa       : float — current open-market rent (£/yr). If
-                                absent, assumed equal to passing_rent_pa
-                                (rack-rented) with an explicit assumption logged.
+        market_rent_pa       : float — current open-market rent (£/yr).
+                                REQUIRED (COMM-2: never assumed equal to the
+                                passing rent — it decides the reversion).
         yield_pct            : float — single equivalent yield, e.g. 6.5 or
                                 0.065. REQUIRED unless term_yield_pct AND
                                 reversion_yield_pct (or top_slice_yield_pct)
@@ -601,14 +658,19 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         rent_review_basis     : str  — optional: upward_only | open_market |
                                 fixed_stepped | index_linked. upward_only
                                 triggers the UORR legislative-risk warning.
-        nation                : str  — optional: england_ni (default, with
-                                assumption logged if absent) | wales |
-                                scotland. Governs the SDLT leg of purchaser's
-                                costs; wales/scotland gate the net figure.
-        purchaser_fees_pct    : float — optional, % of net price for agent/
-                                legal/VAT. Defaults to
-                                DEFAULT_PURCHASER_FEES_PCT with the default
-                                stated as an assumption.
+        nation                : str  — england_ni | wales | scotland. COMM-2:
+                                never assumed; the route supplies it from the
+                                deal postcode (_sources). Unknown -> the
+                                net-of-costs figure is withheld.
+        purchaser_fees_pct    : float — optional, the buyer's OWN fees as % of
+                                net price. COMM-2: no default; not entered ->
+                                not deducted, and reported.
+        pack_costs            : list — COMM-2: costs the special conditions
+                                make the buyer pay (pack_terms items), supplied
+                                by the route, never by the form.
+        tenure                : str  — freehold | leasehold. COMM-2: never
+                                assumed; the route supplies it from the pack
+                                when the user hasn't. Unknown -> no valuation.
         void_months           : float — optional. Void period at reversion
                                 before market rent commences (term &
                                 reversion branch only).
@@ -642,14 +704,16 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             fi, evidence_gaps, warnings, assumptions, formula_trace,
             status="manual_review_required",
         )
-    if tenure is None:
-        assumptions.append(
-            "tenure not stated — FREEHOLD assumed (perpetuity capitalisation). "
-            "If the interest is leasehold this valuation basis is wrong, not "
-            "approximate: state the tenure."
+    if tenure != "freehold":
+        # COMM-2: never assumed. Perpetuity capitalisation is only right for a
+        # freehold, so an unknown tenure gets no figure rather than a guess.
+        evidence_gaps.append(
+            ("Tenure not known — " if tenure is None else f"Tenure '{tenure}' not recognised — ")
+            + "the pack's special conditions and title registers did not state it "
+              "and none was entered. Perpetuity capitalisation values a freehold "
+              "only, so no figure is produced until the tenure is known."
         )
-    elif tenure != "freehold":
-        warnings.append(f"Unrecognised tenure '{tenure}' — freehold assumed.")
+        return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
 
     # ── v2.3: yield basis — which convention the entered yield is on ────
     yield_basis = str(fi.get("yield_basis") or "").strip().lower() or YIELD_BASIS_NOMINAL
@@ -682,12 +746,15 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
 
     if market_rent is None or market_rent <= 0:
-        market_rent = passing_rent
-        assumptions.append(
-            "market_rent_pa not supplied — assumed equal to passing rent "
-            "(rack-rented assumption). Provide a market rent for a more accurate result."
+        # COMM-2: never assumed equal to the passing rent. Market rent decides
+        # whether the lot is rack-rented, under-rented (reversion) or
+        # over-rented (top slice); assuming it equal hides exactly that.
+        evidence_gaps.append(
+            "Market rent not entered — it decides whether the rent passing is "
+            "at, below or above market, and so how the income is valued. Enter "
+            "your view of the open-market rent (e.g. from comparable lettings)."
         )
-        formula_trace.append("market_rent_pa defaulted to passing_rent_pa (assumption)")
+        return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
 
     yield_pct     = _pct_to_decimal(fi.get("yield_pct"))
     term_yield    = _pct_to_decimal(fi.get("term_yield_pct")) or yield_pct
@@ -743,29 +810,15 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         warnings.append(UORR_LEGISLATIVE_RISK_WARNING)
 
     nation = str(fi.get("nation") or "").strip().lower() or None
-    if nation not in ("england_ni", "wales", "scotland"):
-        if nation is not None:
-            warnings.append(
-                f"Unrecognised nation '{nation}' — England & NI SDLT bands assumed."
-            )
-        nation = "england_ni"
-        if fi.get("nation") is None:
-            assumptions.append(
-                "nation not supplied — England & Northern Ireland SDLT "
-                "non-residential bands assumed for purchaser's costs. Select "
-                "Wales or Scotland if applicable (different tax: LTT/LBTT)."
-            )
+    if nation is not None and nation not in ("england_ni", "wales", "scotland"):
+        warnings.append(f"Unrecognised nation '{nation}' — ignored; net-of-costs withheld.")
+        nation = None
 
     purchaser_fees_pct = _opt_num("purchaser_fees_pct")
-    if purchaser_fees_pct is None:
-        assumptions.append(
-            f"purchaser's fees defaulted to {DEFAULT_PURCHASER_FEES_PCT}% of net "
-            "price (agent ~1% + legal ~0.5% + VAT — London-market convention "
-            "component). A stated assumption, editable per deal."
-        )
-    elif purchaser_fees_pct < 0:
-        warnings.append("Negative purchaser_fees_pct ignored — default applied.")
+    if purchaser_fees_pct is not None and purchaser_fees_pct < 0:
+        warnings.append("Negative purchaser_fees_pct ignored — treated as not entered.")
         purchaser_fees_pct = None
+    pack_costs = [it for it in (fi.get("pack_costs") or []) if isinstance(it, dict)]
 
     void_months = _opt_num("void_months")
     rent_free_months = _opt_num("rent_free_months")
@@ -969,34 +1022,46 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         "emphasis": True,
     })
 
-    purchasers_costs = _net_of_purchasers_costs(capital_value, purchaser_fees_pct, nation)
+    purchasers_costs = _net_of_purchasers_costs(capital_value, purchaser_fees_pct, nation, pack_costs)
     net_value = None
     if purchasers_costs.get("status") == "ok":
         net_value = purchasers_costs["net_value_gbp"]
         formula_trace.append(
             f"purchasers_costs: net({net_value}) + sdlt({purchasers_costs['sdlt_gbp']}) "
-            f"+ fees({purchasers_costs['fees_gbp']} @ {purchasers_costs['fees_pct']}%) "
+            f"+ special_conditions({purchasers_costs['pack_costs_gbp']}, "
+            f"{purchasers_costs['pack_costs_items']} items) "
+            f"+ own_fees({purchasers_costs['fees_gbp']}) "
             f"= gross({capital_value:.2f}) — bisection on England & NI "
             f"non-residential SDLT bands"
         )
-        waterfall += [
-            {
-                "label": "SDLT (England & NI non-residential bands, on net price)",
-                "amount": -purchasers_costs["sdlt_gbp"],
-            },
-            {
+        waterfall.append({
+            "label": "SDLT (England & NI non-residential bands, on net price)",
+            "amount": -purchasers_costs["sdlt_gbp"],
+        })
+        if purchasers_costs["pack_costs_items"]:
+            waterfall.append({
                 "label": (
-                    f"Purchaser's fees ({purchasers_costs['fees_pct']:g}% of net "
-                    f"price — stated assumption)"
+                    f"Costs in the special conditions ({purchasers_costs['pack_costs_items']} "
+                    f"item{'s' if purchasers_costs['pack_costs_items'] != 1 else ''}, "
+                    f"VAT added where stated)"
                 ),
+                "amount": -purchasers_costs["pack_costs_gbp"],
+            })
+        if purchasers_costs["own_fees_entered"]:
+            waterfall.append({
+                "label": f"Your own fees ({purchasers_costs['fees_pct']:g}% of net price, as entered)",
                 "amount": -purchasers_costs["fees_gbp"],
-            },
-            {
-                "label": "Indicative value (net of purchaser's costs)",
-                "amount": net_value,
-                "emphasis": True,
-            },
-        ]
+            })
+        else:
+            assumptions.append(
+                "Your own purchase fees (agent, solicitor, survey) are not "
+                "entered — not deducted. The net value is before those fees."
+            )
+        waterfall.append({
+            "label": "Indicative value (net of purchaser's costs)",
+            "amount": net_value,
+            "emphasis": True,
+        })
 
     # ── Yields: NIY (rent ÷ gross-of-costs value), GIY (rent ÷ net price),
     #    equivalent yield (single yield reproducing the capital value) ────
@@ -1061,7 +1126,7 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             continue
         row = {"yield_shift_bps": bps, "gross_value_gbp": round(cv_s, 2), "net_value_gbp": None}
         if purchasers_costs.get("status") == "ok":
-            pc_s = _net_of_purchasers_costs(cv_s, purchaser_fees_pct, nation)
+            pc_s = _net_of_purchasers_costs(cv_s, purchaser_fees_pct, nation, pack_costs)
             if pc_s.get("status") == "ok":
                 row["net_value_gbp"] = pc_s["net_value_gbp"]
         sensitivity.append(row)
@@ -1080,10 +1145,8 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
         "integration exists in this phase, and the yield is the single input "
         "the output is most sensitive to (see sensitivity table).",
     ]
-    if any("market_rent_pa not supplied" in a for a in assumptions):
-        unc_parts.append("Market rent was assumed equal to passing rent, not evidenced.")
-    if any("purchaser's fees defaulted" in a for a in assumptions):
-        unc_parts.append("Purchaser's fees are a stated default assumption, not a quoted figure.")
+    if any("own purchase fees" in a for a in assumptions):
+        unc_parts.append("Your own purchase fees are not entered, so the net value is before them.")
     if any("No void or rent-free" in a for a in assumptions):
         unc_parts.append(
             "No void or rent-free period is modelled on the reversion, which "
@@ -1140,7 +1203,8 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "purchaser_fees_pct":   purchaser_fees_pct,
             "void_months":          void_months,
             "rent_free_months":     rent_free_months,
-            "tenure":               tenure or "freehold",
+            "tenure":               tenure,
+            "pack_costs_items":     len(pack_costs),
             "yield_basis":          yield_basis,
             "asset_class":          asset_class,
         },
