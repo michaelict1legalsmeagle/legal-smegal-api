@@ -8407,13 +8407,10 @@ def _strip_residential_seed(deal_id, asset_class):
         return False
     try:
         row = supabase.table("deals").select("financials_json").eq("id", deal_id).single().execute()
-        fins = (row.data or {}).get("financials_json") or {}
-        inp = fins.get("inputs") or {}
-        if not (fins.get("_seeded") and inp.get("target_yield") == 6.0 and inp.get("ltv_pct") == 75.0
-                and not fins.get("ok") and not inp.get("purchase_price")):
+        import residential_seed as _rs   # COMM-3: shared rule, all seed values
+        cleaned = _rs.stripped((row.data or {}).get("financials_json"), asset_class)
+        if cleaned is None:
             return False
-        cleaned = dict(fins)
-        cleaned["inputs"] = {k: v for k, v in inp.items() if k not in ("target_yield", "ltv_pct")}
         supabase.table("deals").update({"financials_json": cleaned}).eq("id", deal_id).execute()
         return True
     except Exception as e:

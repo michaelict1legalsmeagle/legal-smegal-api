@@ -157,7 +157,12 @@ def test_seed_removed_only_while_untouched():
     sb = _SB([]); deal = {"summary_json": com, "financials_json": {**SEED, "inputs": dict(SEED["inputs"])}}
     assert cr._heal_residential_seed(sb, "d", deal) is True
     assert sb.updates[0]["financials_json"]["inputs"] == {"guide_price": None}
-    for touched in ({**SEED, "inputs": {**SEED["inputs"], "target_yield": 7}},           # user changed it
+    # COMM-3: a changed value is the user's and stays; untouched seed values go
+    sb = _SB([])
+    assert cr._heal_residential_seed(sb, "d", {"summary_json": com, "financials_json":
+                                               {**SEED, "inputs": {**SEED["inputs"], "target_yield": 7}}}) is True
+    assert sb.updates[0]["financials_json"]["inputs"] == {"guide_price": None, "target_yield": 7}
+    for touched in ({**SEED, "inputs": {**SEED["inputs"], "_user_fields": ["target_yield"]}},  # user entered it
                     {**SEED, "inputs": {**SEED["inputs"], "purchase_price": 200000}},    # model in use
                     {**SEED, "ok": True}):                                               # saved model
         sb = _SB([])

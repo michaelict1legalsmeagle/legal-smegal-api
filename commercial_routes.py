@@ -43,6 +43,7 @@ from flask import Blueprint, request, jsonify
 from services.commercial_valuation_engine import calculate_commercial_ceiling
 from commercial_extraction import extract_commercial_fields, EXTRACTABLE_FIELDS
 import pack_terms
+import residential_seed
 
 commercial_bp = Blueprint("commercial", __name__)
 logger = logging.getLogger(__name__)
@@ -219,19 +220,11 @@ def _heal_residential_seed(supabase, deal_id, deal):
     Model's creation seed (target_yield 6, ltv_pct 75 — app.create_deal).
     Removed only while the model is still the untouched seed; any saved
     residential model is left alone. Returns True if healed."""
-    cls = (((deal.get("summary_json") or {}).get("property") or {}).get("asset_class") or "").lower()
-    if not cls:   # deals analysed before ROUTE-1 carry the class in deal_type only
-        dt = (deal.get("deal_type") or "").strip().lower()
-        cls = {"commercial": "commercial", "mixed use": "mixed_use", "mixed-use": "mixed_use"}.get(dt, "")
-    if cls not in ("commercial", "mixed_use", "unclassified"):
-        return False          # residential (or not yet analysed): its seed is its own
-    fins = deal.get("financials_json") or {}
-    inp = fins.get("inputs") or {}
-    if not (fins.get("_seeded") and inp.get("target_yield") == 6.0 and inp.get("ltv_pct") == 75.0
-            and not fins.get("ok") and not inp.get("purchase_price")):
+    # COMM-3: one rule, shared with app._strip_residential_seed (residential_seed.py),
+    # covering every value the seed has ever written, not just two.
+    cleaned = residential_seed.stripped(deal.get("financials_json"), residential_seed.deal_class(deal))
+    if cleaned is None:
         return False
-    cleaned = dict(fins)
-    cleaned["inputs"] = {k: v for k, v in inp.items() if k not in ("target_yield", "ltv_pct")}
     try:
         supabase.table("deals").update({"financials_json": cleaned}).eq("id", deal_id).execute()
         deal["financials_json"] = cleaned

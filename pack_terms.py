@@ -301,7 +301,7 @@ def extract_buying(documents: List[Dict]) -> Dict:
             if m:
                 vals = {x.group(1).lower() for x in _TENURE_REG.finditer(flat)}
                 if len(vals) == 1:
-                    out["facts"]["tenure"] = {"value": m.group(1).capitalize(), "quote": _around(flat, m),
+                    out["facts"]["tenure"] = {"value": m.group(1).capitalize(), "quote": _around(flat, m, 200, 0),
                                               "file_name": d.get("file_name")}
                 break
     for k in ("property", "title_number", "tenure", "title_guarantee", "possession", "completion"):
