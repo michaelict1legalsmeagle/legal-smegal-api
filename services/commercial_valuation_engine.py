@@ -73,7 +73,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERSION = "commercial_multi_method_v2_6_mixed_use_parts"  # COMM-5 (2026-10-06)
+VERSION = "commercial_multi_method_v2_7_mixed_use_tier"  # COMM-6/7 (2026-10-06): fee check, one-part message, mixed-use tier
 
 # Yield basis — v2.3. The nominal (annually in arrears) convention is the
 # Argus/market default; the TRUE equivalent yield basis (rent received
@@ -737,8 +737,13 @@ def _gate_mixed_use(fi: dict, asset_class: str) -> dict:
         if val is not None:
             trace.append(f"{label}: {r.get('method')} -> {val}")
 
-    inputs_used = {"asset_class": asset_class, "parts": parts, "tenure": tenure,
+    inputs_used = {"asset_class": asset_class, "parts": parts,
                    "nation": fi.get("nation"), "purchaser_fees_pct": fi.get("purchaser_fees_pct")}
+    # COMM-7: tenure is an input only when a let part is capitalised (live
+    # 254367be, 6 Oct: no let part, yet the tier read "yield unverified; 1
+    # input verified: tenure" — neither a yield nor tenure was used).
+    if any(str(p.get("method") or "").strip().lower() == PART_METHOD_LET for p in parts):
+        inputs_used["tenure"] = tenure
     if gaps or not part_results or any(pr["status"] != "ok" for pr in part_results):
         status = ("manual_review_required"
                   if any(pr["status"] == "manual_review_required" for pr in part_results) else "insufficient_evidence")

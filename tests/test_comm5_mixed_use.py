@@ -100,3 +100,23 @@ def test_fee_percentage_of_100_or_more_rejected_with_reason():
            "passing_rent_pa": 9000, "market_rent_pa": 9000, "yield_pct": 7}
     assert eng.calculate_commercial_ceiling({**inv, "purchaser_fees_pct": 6200})["status"] == "insufficient_evidence"
     assert eng.calculate_commercial_ceiling({**inv, "purchaser_fees_pct": 1.5})["status"] == "ok"
+
+
+def test_evidence_tier_names_only_inputs_actually_used():
+    # live 254367be (6 Oct, 18:37): trading part + your figure, tenure from the pack
+    live = {"asset_class": "mixed_use", "purchaser_fees_pct": 4.5, "tenure": "freehold", "nation": "england_ni",
+            "parts": [{"label": "12000", "method": "trade_related", "fmop_pa": 1200, "profit_multiplier": 3},
+                      {"label": "grant", "method": "entered_value", "value_gbp": 35000, "value_basis": "comparables"}],
+            "pack_costs": [{"basis": "fixed", "amount_gbp": 1500, "plus_vat": True},      # Lot 73 cl.11
+                           {"basis": "fixed", "amount_gbp": 100, "plus_vat": False},      # cl.12
+                           {"basis": "fixed", "amount_gbp": 150, "plus_vat": True},       # cl.13
+                           {"basis": "percent_of_price", "percent": 1, "plus_vat": False}]}  # cl.15
+    prov = {"tenure": {"source": "extracted", "citation": "Register: The Freehold land"}}
+    r = eng.calculate_commercial_ceiling(live, provenance=prov)
+    assert r["status"] == "ok" and r["comparable_valuation"] == 38600.0
+    assert r["purchasers_costs"]["net_value_gbp"] == 34616.08          # the figure on your screen, 18:37
+    assert "yield" not in r["evidence_tier"]["tier_label"] and "tenure" not in (r["evidence_tier"].get("verified_fields") or [])
+    with_let = {**live, "parts": live["parts"] + [SHOP]}
+    t = eng.calculate_commercial_ceiling(with_let, provenance=prov)["evidence_tier"]
+    assert "tenure" in t["verified_fields"]                 # a let part does use the tenure
+    assert eng.VERSION == "commercial_multi_method_v2_7_mixed_use_tier"
