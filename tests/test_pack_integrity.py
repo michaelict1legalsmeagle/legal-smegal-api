@@ -122,7 +122,7 @@ def test_analyse_pack_never_sends_or_cites_the_excluded_document():
     assert "excluded" not in r["pack_integrity"]       # indexes are internal
     assert r["read_coverage"]["documents_excluded_other_property"] == ["Lot_6_Special_conditions.docx"]
     assert r["read_coverage"]["documents_total"] == len(LOT73_UPLOAD) - 1
-    assert r["pipeline_version"] == "fullread-3"
+    assert r["pipeline_version"] == "fullread-4"
 
 
 def test_upload_without_foreign_documents_is_unchanged():

@@ -66,6 +66,13 @@ TITLE_HISTORY_DOC_TYPES = {"deed", "title_register", "freehold", "title_plan",
 # property.type written for each final class (the signal every existing gate reads)
 TYPE_FOR_CLASS = {"commercial": "Commercial", "mixed_use": "Mixed Use",
                   UNCLASSIFIED: "Unclassified"}
+# TYPE-EVID-1 (2026-10-06): property.type for a residential lot when the pack
+# does not state a strategy. The strategy label was the model's guess at what a
+# buyer intends (live: Park Vale 564488a4 stored "Flip" with no quote) and was
+# shown on the dashboard and Deal Report as if read from the pack. "Residential"
+# matches none of COMMERCIAL_DIVERSION_KEYWORDS and is matched by the dashboard
+# BTL filter ("residential"), so no gate or filter changes behaviour.
+RESIDENTIAL_TYPE = "Residential"
 
 LABEL = {"residential": "Residential", "commercial": "Commercial",
          "mixed_use": "Mixed use", UNCLASSIFIED: "Not yet classified"}
@@ -169,11 +176,16 @@ def resolve(section_props: List[Dict], quote_source: Callable[[str], set],
         cls, reason = "residential", "no_vote_residential_physical_type"
     else:
         cls, reason = UNCLASSIFIED, "no_vote"
-    strategy = None
+    # TYPE-EVID-1: a residential strategy is kept only when a section quotes the
+    # pack stating it (type_evidence) AND that quote is found in the pack text.
+    # Routing votes above are unchanged.
+    strategy, strategy_evidence = None, None
     if cls == "residential":
-        for v in votes:
-            if v["class"] == "residential" and v.get("type"):
-                strategy = v["type"]
+        for p in (section_props or []):
+            p = p or {}
+            q = (p.get("type_evidence") or "").strip()
+            if q and class_from_type(p.get("type")) == "residential" and quote_source(q):
+                strategy, strategy_evidence = normalise_strategy(p.get("type")), q
                 break
     return {
         "asset_class": cls,
@@ -182,14 +194,15 @@ def resolve(section_props: List[Dict], quote_source: Callable[[str], set],
         "classes_voted": classes,
         "evidence": evidence[:3],
         "strategy": strategy,
+        "strategy_evidence": strategy_evidence,
     }
 
 
 def apply_to_property(prop: Dict, resolution: Dict, source: str = "pack") -> Dict:
     """Write the decision onto the property block. property.type becomes the
     signal every existing gate reads: Commercial / Mixed Use / Unclassified for
-    those classes; for residential a canonical strategy or None (None falls back
-    to BTL in the valuation paths, exactly as a null type does today)."""
+    those classes; for residential the strategy the pack states (with its quote
+    in type_evidence) or "Residential" (TYPE-EVID-1)."""
     prop = dict(prop or {})
     cls = resolution.get("asset_class") or UNCLASSIFIED
     prop["asset_class"] = cls
@@ -198,7 +211,12 @@ def apply_to_property(prop: Dict, resolution: Dict, source: str = "pack") -> Dic
     prop["asset_class_evidence"] = list(resolution.get("evidence") or [])
     if cls in TYPE_FOR_CLASS:
         prop["type"] = TYPE_FOR_CLASS[cls]
+        prop["type_evidence"] = None
     else:
-        prop["type"] = resolution.get("strategy") or (
-            normalise_strategy(prop.get("type")) if class_from_type(prop.get("type")) == "residential" else None)
+        strategy = resolution.get("strategy")
+        evidence = (resolution.get("strategy_evidence") or "").strip() or None
+        if strategy and evidence:
+            prop["type"], prop["type_evidence"] = strategy, evidence
+        else:
+            prop["type"], prop["type_evidence"] = RESIDENTIAL_TYPE, None
     return prop

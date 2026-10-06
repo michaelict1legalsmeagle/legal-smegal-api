@@ -35,7 +35,11 @@ import pack_integrity
 # fullread-3 (PACK-INTEG-1, 2026-10-04): documents about another property are
 # excluded before analysis. Bumped so no fullread-2 result (which may include
 # another lot's flags) is reused for an identical upload.
-PIPELINE_VERSION = "fullread-3"
+# fullread-4 (TYPE-EVID-1, 2026-10-06): a residential strategy (BTL/HMO/Flip/
+# BRRR/SA) is kept only when the pack states it, quoted in type_evidence and
+# found in the pack text; otherwise property.type = "Residential". Bumped so no
+# fullread-3 result (which carries the model's guessed strategy) is reused.
+PIPELINE_VERSION = "fullread-4"
 SECTION_CHARS = 100_000        # ~25k tokens of pack text per call
 SECTION_OVERLAP = 1_500        # overlap when one document spans sections
 # MEM-READ (2026-09-26): sections are analysed ONE at a time by default. Three at
@@ -70,7 +74,7 @@ Return ONLY valid JSON. No prose, no markdown fences. Exactly this structure (fl
       "flag_class": null
     }
   ],
-  "property": {"address": null, "postcode": null, "lot_number": null, "type": null, "asset_class": null, "asset_class_evidence": null, "physical_type": null, "tenure": null, "interest_sold": null, "lease_years": null, "guide_price_pence": null},
+  "property": {"address": null, "postcode": null, "lot_number": null, "type": null, "type_evidence": null, "asset_class": null, "asset_class_evidence": null, "physical_type": null, "tenure": null, "interest_sold": null, "lease_years": null, "guide_price_pence": null},
   "completion_terms": {"deposit_pct": null, "deposit_refundable": null, "completion_days": null, "completion_type": null, "buyers_premium_pct": null, "vacant_possession": null},
   "special_conditions": {
     "buyers_premium_pct": null, "buyers_premium_gbp": null, "admin_fee_gbp": null,
@@ -95,7 +99,8 @@ PACK-LEVEL CROSS-DOCUMENT & STATUTORY CHECKS — only where the triggering text 
 SPECIAL CONDITIONS FIELDS: buyers_premium_pct/gbp, admin_fee_gbp, vat_elected, seller_legal_costs_gbp, completion_days (as stated), non_refundable_deposit, addendum_present/date/notes, unusual_clauses (short verbatim clause references), true_cost_additions_notes (costs above hammer price, as stated), special_conditions_present (true only if this text contains the special conditions of sale).
 
 PROPERTY FIELDS — they describe THE LOT BEING SOLD (the interest the buyer acquires), never a neighbouring, adjoining or superior property:
-- type: the INVESTMENT STRATEGY (BTL/HMO/Flip/BRRR/SA/Commercial/Mixed Use/Other) — what the buyer intends to do. Use 'Mixed Use' if the title/lot contains BOTH a commercial element (retail/office/industrial/leisure unit) AND a residential element (flat(s) above a shop, etc) — do not force this into BTL/HMO/Commercial when both are genuinely present. Use 'Commercial' for a purely non-residential unit (retail, office, industrial, warehouse, leisure) with no residential element. Exactly one of those values, or null.
+- type: one of BTL/HMO/Flip/BRRR/SA/Commercial/Mixed Use/Other. Use 'Mixed Use' if the title/lot contains BOTH a commercial element (retail/office/industrial/leisure unit) AND a residential element (flat(s) above a shop, etc) — do not force this into BTL/HMO/Commercial when both are genuinely present. Use 'Commercial' for a purely non-residential unit (retail, office, industrial, warehouse, leisure) with no residential element. For a residential lot give BTL/HMO/Flip/BRRR/SA ONLY if THIS text states that use of the lot (e.g. an HMO licence, "let as serviced accommodation") and quote it in type_evidence; otherwise null. A legal pack does not record what a buyer intends, so never infer a strategy. Exactly one of those values, or null.
+- type_evidence: a verbatim quote (max 30 words) from THIS text that states the residential use given in type; null unless type is BTL/HMO/Flip/BRRR/SA.
 - asset_class: exactly one of residential, commercial, mixed_use — or null unless THIS text shows what the lot being sold is. residential = dwelling(s) only; commercial = non-residential unit(s) only (shop, office, industrial, warehouse, leisure, pub, hotel, land let for business use); mixed_use = the lot itself contains both.
 - asset_class_evidence: a verbatim quote (max 30 words) from THIS text that shows the asset_class; null if asset_class is null.
 - physical_type: exactly one of Flat, Detached, Semi-Detached, Terraced, Other — from the register, particulars or EPC.

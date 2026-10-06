@@ -8757,12 +8757,16 @@ def set_deal_asset_class(deal_id: str):
         return jsonify({"error": "Deal has not been analysed yet"}), 409
     prop = dict(sj.get("property") or {})
     prev = prop.get("asset_class")
+    # TYPE-EVID-1: keep a residential strategy only if the pack stated it (quote
+    # stored in type_evidence); a guessed label from an older analysis is dropped.
     keep_strategy = (_ar.normalise_strategy(prop.get("type"))
-                     if _ar.class_from_type(prop.get("type")) == "residential" else None)
+                     if _ar.class_from_type(prop.get("type")) == "residential"
+                     and (prop.get("type_evidence") or "").strip() else None)
     prop = _ar.apply_to_property(prop, {
         "asset_class": cls, "reason": "user_confirmed",
         "evidence": prop.get("asset_class_evidence") or [],
         "strategy": keep_strategy,
+        "strategy_evidence": prop.get("type_evidence") if keep_strategy else None,
     }, source="user")
     prop["asset_class_previous"] = prev
     sj["property"] = prop

@@ -240,9 +240,10 @@ def test_property_type_carries_the_class_every_gate_reads():
     p = ar.apply_to_property({"type": "investment"}, {"asset_class": "commercial"})
     assert p["type"] == "Commercial" and p["asset_class"] == "commercial"
     p = ar.apply_to_property({"type": "investment"}, {"asset_class": "residential"})
-    assert p["type"] is None                                   # -> BTL fallback, as a null type today
-    p = ar.apply_to_property({"type": "HMO"}, {"asset_class": "residential", "strategy": "HMO"})
-    assert p["type"] == "HMO"
+    assert p["type"] == "Residential"                          # TYPE-EVID-1: no stated strategy
+    p = ar.apply_to_property({"type": "HMO"}, {"asset_class": "residential", "strategy": "HMO",
+                                               "strategy_evidence": "HMO licence granted 2024"})
+    assert p["type"] == "HMO" and p["type_evidence"] == "HMO licence granted 2024"
     p = ar.apply_to_property({}, {"asset_class": "unclassified"})
     assert p["type"] == "Unclassified"
 
