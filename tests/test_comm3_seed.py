@@ -40,3 +40,26 @@ def test_deal_class_from_deal_type_for_old_deals():
     assert rs.deal_class({"deal_type": "Commercial", "summary_json": None}) == "commercial" # live 4d83c8e0
     assert rs.deal_class({"deal_type": "Commercial", "summary_json": {"property": {"asset_class": "residential"}}}) == "residential"
     assert rs.deal_class({"deal_type": "Residential", "summary_json": {}}) == ""
+
+
+# ── valuation method never assumed; every missing input listed at once ──────
+import services.commercial_valuation_engine as eng
+
+
+def test_no_asset_class_runs_no_method():
+    for fi in ({}, {"asset_class": ""}, {"asset_class": "shop"},
+               {"passing_rent_pa": 45000, "market_rent_pa": 45000, "yield_pct": 7, "tenure": "freehold"}):
+        r = eng.calculate_commercial_ceiling(fi)
+        assert r["status"] != "ok" and r.get("comparable_valuation") is None
+        assert "valuation method depends on it" in r["audit"]["evidence_gaps"][0]
+
+
+def test_all_missing_inputs_listed_together():
+    gaps = eng.calculate_commercial_ceiling({"asset_class": "income_producing_let"})["audit"]["evidence_gaps"]
+    assert [g.split(" ")[0:2] for g in gaps] == [["Tenure", "not"], ["No", "passing"], ["Market", "rent"], ["No", "yield"]]
+    assert len(eng.calculate_commercial_ceiling({"asset_class": "trade_related"})["audit"]["evidence_gaps"]) == 2
+    assert len(eng.calculate_commercial_ceiling({"asset_class": "development_site"})["audit"]["evidence_gaps"]) == 2
+    assert len(eng.calculate_commercial_ceiling({"asset_class": "specialised_owner_occupied"})["audit"]["evidence_gaps"]) == 3
+    # a leasehold is still refused outright (not a missing input)
+    r = eng.calculate_commercial_ceiling({"asset_class": "income_producing_let", "tenure": "leasehold"})
+    assert r["status"] == "manual_review_required"

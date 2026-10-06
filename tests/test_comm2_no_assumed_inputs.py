@@ -110,7 +110,7 @@ def _deal(stored=None, postcode="BT1 1AA"):
 
 
 def test_blanks_filled_from_pack_and_postcode_labelled_not_stored():
-    deal = _deal({"passing_rent_pa": 45000, "market_rent_pa": 45000, "yield_pct": 7})
+    deal = _deal({"asset_class": "income_producing_let", "passing_rent_pa": 45000, "market_rent_pa": 45000, "yield_pct": 7})
     fi, pv, ctx = cr._effective_inputs(_SB([SC, REG]), "d", "u", deal)
     assert fi["tenure"] == "freehold" and pv["tenure"]["source"] == "extracted"
     assert "The Freehold land" in pv["tenure"]["citation"]

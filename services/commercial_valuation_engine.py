@@ -522,13 +522,13 @@ def calculate_commercial_ceiling(financial_inputs: dict, provenance: Optional[di
     router — not a guess from pack text — decides which function runs.
 
     financial_inputs["asset_class"] one of:
-        income_producing_let        (default) -> Investment Method
+        income_producing_let                   -> Investment Method
         trade_related                          -> Profits Method
         development_site                       -> Residual Method
         specialised_owner_occupied             -> Depreciated Replacement Cost
         mixed_use                              -> gates (see _gate_mixed_use)
-    Any other/unrecognised value falls through to Investment Method (the
-    default), rather than silently gating a deal on a typo.
+    COMM-3: missing or unrecognised -> no method is run and the result asks
+    for the choice (never defaulted to the Investment Method).
     """
     fi = financial_inputs if isinstance(financial_inputs, dict) else {}
     # v2.4: provenance is server-supplied ONLY (routes stamp user_entered on
@@ -537,7 +537,22 @@ def calculate_commercial_ceiling(financial_inputs: dict, provenance: Optional[di
     # stored inputs can never masquerade as verified provenance.
     fi = dict(fi)
     fi["_provenance"] = provenance if isinstance(provenance, dict) else {}
-    asset_class = str(fi.get("asset_class") or ASSET_CLASS_INCOME_PRODUCING_LET).strip().lower()
+    asset_class = str(fi.get("asset_class") or "").strip().lower()
+    _KNOWN = (ASSET_CLASS_INCOME_PRODUCING_LET, ASSET_CLASS_TRADE_RELATED, ASSET_CLASS_DEVELOPMENT_SITE,
+              ASSET_CLASS_SPECIALISED_OWNER_OCCUPIED, ASSET_CLASS_MIXED_USE)
+    if asset_class not in _KNOWN:
+        # COMM-3 (2026-10-06): the valuation METHOD is never assumed. It used
+        # to default to the Investment Method, so a care home (a Profits
+        # Method asset by this engine's own list) was valued as a let unit.
+        return _insufficient(
+            fi,
+            [("How this lot earns its income is not chosen — " if not asset_class
+              else f"Asset class '{asset_class}' not recognised — ")
+             + "the valuation method depends on it (let to a tenant: Investment; "
+               "trading business such as a care home, pub or hotel: Profits; site: "
+               "Residual; specialised owner-occupied: DRC). Choose it above."],
+            [], [], [f"asset_class: {asset_class or 'not chosen'} -> no method run"],
+        )
 
     if asset_class == ASSET_CLASS_TRADE_RELATED:
         return _attach_cross_check(_calculate_profits_method(fi, asset_class), fi, asset_class)
@@ -704,16 +719,17 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             fi, evidence_gaps, warnings, assumptions, formula_trace,
             status="manual_review_required",
         )
+    _missing = False   # COMM-3: every missing required input is reported together
     if tenure != "freehold":
         # COMM-2: never assumed. Perpetuity capitalisation is only right for a
         # freehold, so an unknown tenure gets no figure rather than a guess.
+        _missing = True
         evidence_gaps.append(
             ("Tenure not known — " if tenure is None else f"Tenure '{tenure}' not recognised — ")
             + "the pack's special conditions and title registers did not state it "
               "and none was entered. Perpetuity capitalisation values a freehold "
               "only, so no figure is produced until the tenure is known."
         )
-        return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
 
     # ── v2.3: yield basis — which convention the entered yield is on ────
     yield_basis = str(fi.get("yield_basis") or "").strip().lower() or YIELD_BASIS_NOMINAL
@@ -743,7 +759,7 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "No passing rent supplied — commercial valuation requires the "
             "current annual rent, which residential comparable data cannot provide."
         )
-        return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
+        _missing = True
 
     if market_rent is None or market_rent <= 0:
         # COMM-2: never assumed equal to the passing rent. Market rent decides
@@ -754,12 +770,23 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "at, below or above market, and so how the income is valued. Enter "
             "your view of the open-market rent (e.g. from comparable lettings)."
         )
-        return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
+        _missing = True
 
     yield_pct     = _pct_to_decimal(fi.get("yield_pct"))
     term_yield    = _pct_to_decimal(fi.get("term_yield_pct")) or yield_pct
     reversion_yld = _pct_to_decimal(fi.get("reversion_yield_pct")) or yield_pct
     top_yield     = _pct_to_decimal(fi.get("top_slice_yield_pct")) or yield_pct
+
+    if yield_pct is None and (term_yield is None or reversion_yld is None):
+        evidence_gaps.append(
+            "No yield supplied. This engine does not fabricate or source a "
+            "yield automatically — provide a market-derived yield (Phase 2 "
+            "will support licensed benchmark data; for now this must be a "
+            "user input)."
+        )
+        _missing = True
+    if _missing:
+        return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
 
     n_years = fi.get("unexpired_term_years")
     try:
@@ -779,15 +806,6 @@ def _calculate_investment_method(fi: dict, asset_class: str) -> dict:
             "Passing rent differs from market rent but no unexpired_term_years "
             "was supplied — cannot split term/reversion or core/top-slice "
             "without knowing when the rent changes."
-        )
-        return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
-
-    if yield_pct is None and (term_yield is None or reversion_yld is None):
-        evidence_gaps.append(
-            "No yield supplied. This engine does not fabricate or source a "
-            "yield automatically — provide a market-derived yield (Phase 2 "
-            "will support licensed benchmark data; for now this must be a "
-            "user input)."
         )
         return _insufficient(fi, evidence_gaps, warnings, assumptions, formula_trace)
 
@@ -1264,17 +1282,14 @@ def _calculate_profits_method(fi: dict, asset_class: str) -> dict:
     except (TypeError, ValueError):
         multiplier = None
 
+    _missing = False
     if fmop is None or fmop <= 0:
         evidence_gaps.append(
             "No Fair Maintainable Operating Profit (fmop_pa) supplied — the "
             "Profits Method requires the reasonably-efficient-operator adjusted "
             "net profit, which cannot be derived from rent or sold-price data."
         )
-        return _insufficient(
-            fi, evidence_gaps, warnings, assumptions, formula_trace,
-            valuation_type="commercial_profits_method",
-            inputs_used={"fmop_pa": fmop, "profit_multiplier": multiplier, "fmt_pa": fi.get("fmt_pa"), "tenant_name": fi.get("tenant_name"), "asset_class": asset_class},
-        )
+        _missing = True
 
     if multiplier is None or multiplier <= 0:
         evidence_gaps.append(
@@ -1282,12 +1297,14 @@ def _calculate_profits_method(fi: dict, asset_class: str) -> dict:
             "sector rule-of-thumb multiplier — provide one derived from "
             "comparable trading transactions for this trade sector."
         )
+        _missing = True
+
+    if _missing:   # COMM-3: every missing required input reported together
         return _insufficient(
             fi, evidence_gaps, warnings, assumptions, formula_trace,
             valuation_type="commercial_profits_method",
             inputs_used={"fmop_pa": fmop, "profit_multiplier": multiplier, "fmt_pa": fi.get("fmt_pa"), "tenant_name": fi.get("tenant_name"), "asset_class": asset_class},
         )
-
     capital_value = fmop * multiplier
     formula_trace.append(
         f"profits_method: capital_value = FMOP({fmop}) × multiplier({multiplier})"
@@ -1384,17 +1401,14 @@ def _calculate_residual_method(fi: dict, asset_class: str) -> dict:
     gdv         = _num("gdv")
     build_costs = _num("build_costs_gbp")
 
+    _missing = False
     if gdv is None or gdv <= 0:
         evidence_gaps.append(
             "No gdv (Gross Development Value) supplied — the Residual Method "
             "requires the completed scheme's value, which is not derivable "
             "from residential sold-price comparables for a development site."
         )
-        return _insufficient(
-            fi, evidence_gaps, warnings, assumptions, formula_trace,
-            valuation_type="commercial_residual_method",
-            inputs_used={"gdv": gdv, "build_costs_gbp": build_costs, "asset_class": asset_class},
-        )
+        _missing = True
 
     if build_costs is None or build_costs <= 0:
         evidence_gaps.append(
@@ -1402,12 +1416,14 @@ def _calculate_residual_method(fi: dict, asset_class: str) -> dict:
             "total construction cost; this engine does not fabricate a "
             "cost from a licensed cost database (e.g. BCIS)."
         )
+        _missing = True
+
+    if _missing:   # COMM-3: every missing required input reported together
         return _insufficient(
             fi, evidence_gaps, warnings, assumptions, formula_trace,
             valuation_type="commercial_residual_method",
             inputs_used={"gdv": gdv, "build_costs_gbp": build_costs, "asset_class": asset_class},
         )
-
     # Professional fees
     prof_fees = _num("professional_fees_gbp")
     if prof_fees is None:
@@ -1569,28 +1585,21 @@ def _calculate_drc_method(fi: dict, asset_class: str) -> dict:
     except (TypeError, ValueError):
         dep_pct = None
 
+    _missing = False
     if land_value is None or land_value < 0:
         evidence_gaps.append(
             "No land_value_gbp supplied — DRC requires a land value, which "
             "is not derivable from residential sold-price comparables for a "
             "specialised, rarely-transacted asset."
         )
-        return _insufficient(
-            fi, evidence_gaps, warnings, assumptions, formula_trace,
-            valuation_type="commercial_drc_method",
-            inputs_used={"land_value_gbp": land_value, "gross_replacement_cost_gbp": grc, "depreciation_pct": dep_pct, "asset_class": asset_class},
-        )
+        _missing = True
 
     if grc is None or grc <= 0:
         evidence_gaps.append(
             "No gross_replacement_cost_gbp supplied — this engine does not "
             "fabricate a rebuild cost from a licensed cost database (e.g. BCIS)."
         )
-        return _insufficient(
-            fi, evidence_gaps, warnings, assumptions, formula_trace,
-            valuation_type="commercial_drc_method",
-            inputs_used={"land_value_gbp": land_value, "gross_replacement_cost_gbp": grc, "depreciation_pct": dep_pct, "asset_class": asset_class},
-        )
+        _missing = True
 
     if dep_pct is None:
         evidence_gaps.append(
@@ -1599,12 +1608,14 @@ def _calculate_drc_method(fi: dict, asset_class: str) -> dict:
             "obsolescence deduction; state the figure explicitly (0 is a "
             "valid value if genuinely justified, but must be supplied)."
         )
+        _missing = True
+
+    if _missing:   # COMM-3: every missing required input reported together
         return _insufficient(
             fi, evidence_gaps, warnings, assumptions, formula_trace,
             valuation_type="commercial_drc_method",
             inputs_used={"land_value_gbp": land_value, "gross_replacement_cost_gbp": grc, "depreciation_pct": dep_pct, "asset_class": asset_class},
         )
-
     depreciated_grc = grc * (1 - dep_pct / 100)
     capital_value = land_value + depreciated_grc
     formula_trace.append(
