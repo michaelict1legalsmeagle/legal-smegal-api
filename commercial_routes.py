@@ -54,6 +54,8 @@ logger = logging.getLogger(__name__)
 _ALLOWED_COMMERCIAL_FIELDS = {
     # Shared
     "asset_class",
+    # COMM-5: mixed use — the parts, each sanitised by _clean_parts
+    "parts",
     # Investment Method (income_producing_let)
     "passing_rent_pa",
     "market_rent_pa",
@@ -130,6 +132,42 @@ def _lot_documents(supabase, deal_id, user_id, summary_json):
         docs.append({"file_name": d.get("file_name") or "unknown", "doc_type": d.get("doc_type"),
                      "text": txt, "extracted_text": txt})
     return docs, sorted(n for n in excluded if n)
+
+
+_PART_NUM = ("passing_rent_pa", "market_rent_pa", "yield_pct", "term_yield_pct", "reversion_yield_pct",
+             "top_slice_yield_pct", "unexpired_term_years", "void_months", "rent_free_months",
+             "fmop_pa", "profit_multiplier", "fmt_pa", "value_gbp")
+_PART_STR = {"label": 80, "method": 40, "yield_basis": 40, "rent_review_basis": 40, "tenant_name": 120,
+             "value_basis": 300}
+
+
+def _clean_parts(parts):
+    """COMM-5: mixed-use parts from the form — a list of at most 12 dicts,
+    only known keys, numbers as numbers, strings length-capped. Anything else
+    is dropped, never stored."""
+    out = []
+    if not isinstance(parts, list):
+        return out
+    for p in parts[:12]:
+        if not isinstance(p, dict):
+            continue
+        c = {}
+        for k in _PART_NUM:
+            v = p.get(k)
+            if v is None or v == "":
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f == f and abs(f) != float("inf"):
+                c[k] = f
+        for k, n in _PART_STR.items():
+            v = p.get(k)
+            if isinstance(v, str) and v.strip():
+                c[k] = v.strip()[:n]
+        out.append(c)
+    return out
 
 
 def _nation_from_postcode(postcode):
@@ -294,6 +332,8 @@ def save_commercial_inputs(deal_id):
 
     body = request.get_json(silent=True) or {}
     incoming = {k: v for k, v in body.items() if k in _ALLOWED_COMMERCIAL_FIELDS}
+    if "parts" in incoming:
+        incoming["parts"] = _clean_parts(incoming["parts"])
 
     try:
         row = (

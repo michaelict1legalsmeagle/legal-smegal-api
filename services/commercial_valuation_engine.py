@@ -73,7 +73,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERSION = "commercial_multi_method_v2_5_no_assumed_inputs"  # COMM-2 (2026-10-05)
+VERSION = "commercial_multi_method_v2_6_mixed_use_parts"  # COMM-5 (2026-10-06)
 
 # Yield basis — v2.3. The nominal (annually in arrears) convention is the
 # Argus/market default; the TRUE equivalent yield basis (rent received
@@ -177,21 +177,16 @@ UORR_LEGISLATIVE_RISK_WARNING = (
 # the caller states it explicitly via financial_inputs["asset_class"].
 # Four classes route to a genuinely built RICS method — see the router
 # calculate_commercial_ceiling() below and its four _calculate_* functions.
-# A fifth, mixed_use, does NOT route to any single method — see its comment below.
+# A fifth, mixed_use, is valued part by part — see _gate_mixed_use (COMM-5).
 ASSET_CLASS_INCOME_PRODUCING_LET      = "income_producing_let"       # -> Investment Method
 ASSET_CLASS_TRADE_RELATED             = "trade_related"              # -> RICS Profits Method (pubs, hotels, care homes, petrol stations)
 ASSET_CLASS_DEVELOPMENT_SITE          = "development_site"           # -> RICS Residual Method
 ASSET_CLASS_SPECIALISED_OWNER_OCCUPIED = "specialised_owner_occupied" # -> RICS Depreciated Replacement Cost / Contractor's Method
-# Mixed use (e.g. ground-floor retail let to a tenant + residential flats
-# above, in one title) is NOT a single-method case: RICS practice apportions
-# value between the commercial element (Investment Method, on its own rent/
-# yield) and the residential element (comparable sold prices), typically
-# needing a floor-area-by-use split this engine does not collect in Phase 1.
-# Running any ONE of the four methods on the whole asset would misvalue it —
-# so like trade_related/development_site/specialised_owner_occupied used to
-# gate, mixed_use gates too, but for a different reason: not "wrong method",
-# but "needs apportionment this engine doesn't do yet."
-ASSET_CLASS_MIXED_USE                 = "mixed_use"                  # -> gates: apportioned valuation not yet supported
+# Mixed use (e.g. a ground-floor shop let to a tenant + flats above): no
+# single method is run on the whole asset. COMM-5: each part you define is
+# valued on its own inputs and the parts are added — an indicative sum of
+# parts, labelled as not Market Value of the whole and not Red Book.
+ASSET_CLASS_MIXED_USE                 = "mixed_use"                  # -> COMM-5: indicative sum of parts (_gate_mixed_use)
 
 
 def _yp_years(n: float, i: float, quarterly: bool = False) -> Optional[float]:
@@ -616,30 +611,165 @@ def _attach_cross_check(primary: dict, fi: dict, asset_class: str) -> dict:
     return primary
 
 
+PART_METHOD_LET = "income_producing_let"      # a let part: Investment Method on that part's own rent & yield
+PART_METHOD_TRADING = "trade_related"         # a trading part: Profits Method on that part's FMOP & multiplier
+PART_METHOD_ENTERED = "entered_value"         # your own figure for the part, with its basis stated
+PART_METHODS = (PART_METHOD_LET, PART_METHOD_TRADING, PART_METHOD_ENTERED)
+MAX_PARTS = 12
+MIXED_USE_LABEL = (
+    "Indicative sum of parts — each part valued separately and added. It is "
+    "not the Market Value of the lot as a whole (a buyer of the whole lot may "
+    "pay more or less than the parts add up to) and it is not a RICS Red Book "
+    "valuation."
+)
+
+
 def _gate_mixed_use(fi: dict, asset_class: str) -> dict:
-    """
-    Mixed use gates rather than computes — see ASSET_CLASS_MIXED_USE comment
-    above for why. Unlike the manual_review_required path this engine used
-    for ALL commercial deals before the four methods were built, this is not
-    "we haven't built the method yet" — it is "no single method applies to
-    a mixed asset without apportioning value by use first," which is a
-    genuinely different, harder problem RICS practice solves case-by-case.
-    """
-    evidence_gaps = [
-        "Asset class 'mixed_use' has both a commercial and a residential "
-        "element — RICS practice apportions value between the commercial "
-        "part (Investment Method, its own rent/yield) and the residential "
-        "part (comparable sold prices), typically using a floor-area-by-use "
-        "split. This engine does not collect that split in Phase 1 and will "
-        "not force the whole asset through one method — manual RICS "
-        "valuation, or a per-element split entered as two separate deals, "
-        "is required."
-    ]
-    return _insufficient(
-        fi, evidence_gaps, [], [], [],
-        status="manual_review_required",
-        valuation_type="commercial_mixed_use",
-        inputs_used={"asset_class": asset_class},
+    """COMM-5 (2026-10-06): mixed use as an INDICATIVE SUM OF PARTS.
+
+    The Red Book does not prescribe a method: the valuer selects the
+    approach(es) and method(s) (RICS Property Journal, 'Valuation approaches,
+    methods and models'). No RICS source found sets out a mixed-use method,
+    so this engine claims none. It values each part you define on the part's
+    own inputs — a let part by the Investment Method, a trading part by the
+    Profits Method, or your own stated figure — and adds them. The result is
+    labelled as a sum of parts, not Market Value of the whole, not Red Book.
+
+    Lot-level: tenure (a let part capitalised in perpetuity needs freehold),
+    nation and purchaser's costs. SDLT is charged once, on the total, at the
+    non-residential and MIXED rates — GOV.UK: a "mixed" property has both
+    residential and non-residential elements and those rates apply.
+    Nothing is assumed: every missing input of every part is listed at once,
+    and no figure is produced until every part is complete."""
+    raw_parts = fi.get("parts")
+    parts = [p for p in raw_parts if isinstance(p, dict)] if isinstance(raw_parts, list) else []
+    gaps: list[str] = []
+    trace: list[str] = []
+    if len(parts) < 2:
+        gaps.append(
+            "Define the parts of this lot (at least two — e.g. the ground-floor "
+            "shop and the flats above). Each part is valued on its own inputs "
+            "and the parts are added; nothing is apportioned for you."
+        )
+    if len(parts) > MAX_PARTS:
+        gaps.append(f"At most {MAX_PARTS} parts can be valued; {len(parts)} were entered.")
+        parts = parts[:MAX_PARTS]
+
+    tenure = str(fi.get("tenure") or "").strip().lower() or None
+    part_results = []
+    tenure_gap_added = False
+    for i, p in enumerate(parts):
+        label = str(p.get("label") or "").strip() or f"Part {i + 1}"
+        method = str(p.get("method") or "").strip().lower()
+        if method not in PART_METHODS:
+            gaps.append(f"{label}: choose how this part is valued (let to a tenant, a trading business, or your own figure).")
+            part_results.append({"label": label, "method": method or None, "status": "insufficient_evidence", "value_gbp": None})
+            continue
+        if method == PART_METHOD_ENTERED:
+            v = p.get("value_gbp")
+            try:
+                v = float(v) if v is not None and v != "" else None
+            except (TypeError, ValueError):
+                v = None
+            basis = str(p.get("value_basis") or "").strip()
+            ok = True
+            if v is None or v <= 0:
+                gaps.append(f"{label}: enter your figure for this part.")
+                ok = False
+            if not basis:
+                gaps.append(f"{label}: state where your figure comes from (e.g. comparable sales you have checked, or a valuer's report).")
+                ok = False
+            part_results.append({"label": label, "method": method, "status": "ok" if ok else "insufficient_evidence",
+                                 "value_gbp": round(v, 2) if ok else None, "basis": basis or None,
+                                 "source": "user_entered"})
+            if ok:
+                trace.append(f"{label}: your figure {v:.2f} ({basis})")
+            continue
+        sub = {k: v for k, v in p.items() if k not in ("label", "method")}
+        sub["asset_class"] = method
+        sub["_provenance"] = {}
+        if method == PART_METHOD_LET:
+            sub["tenure"] = tenure          # lot-level fact; no nation/fees: costs are charged once on the total
+        r = (_calculate_investment_method(sub, method) if method == PART_METHOD_LET
+             else _calculate_profits_method(sub, method))
+        for g in (r.get("audit") or {}).get("evidence_gaps") or []:
+            if g.startswith("Tenure"):
+                if not tenure_gap_added:
+                    gaps.append(g)
+                    tenure_gap_added = True
+            else:
+                gaps.append(f"{label}: {g}")
+        val = r.get("comparable_valuation") if r.get("status") == "ok" else None
+        part_results.append({"label": label, "method": method, "status": r.get("status"),
+                             "value_gbp": val, "method_detail": r.get("method"),
+                             "valuation_components": r.get("valuation_components") or {},
+                             "warnings": (r.get("audit") or {}).get("warnings") or [],
+                             "assumptions": (r.get("audit") or {}).get("assumptions") or []})
+        if val is not None:
+            trace.append(f"{label}: {r.get('method')} -> {val}")
+
+    inputs_used = {"asset_class": asset_class, "parts": parts, "tenure": tenure,
+                   "nation": fi.get("nation"), "purchaser_fees_pct": fi.get("purchaser_fees_pct")}
+    if gaps or not part_results or any(pr["status"] != "ok" for pr in part_results):
+        status = ("manual_review_required"
+                  if any(pr["status"] == "manual_review_required" for pr in part_results) else "insufficient_evidence")
+        out = _insufficient(fi, gaps, [], [], trace, status=status,
+                            valuation_type="commercial_mixed_use_sum_of_parts", inputs_used=inputs_used)
+        out["parts"] = part_results
+        return out
+
+    total = round(sum(pr["value_gbp"] for pr in part_results), 2)
+    trace.append(f"sum_of_parts: {' + '.join(str(pr['value_gbp']) for pr in part_results)} = {total}")
+    warnings = [f"{pr['label']}: {w}" for pr in part_results for w in pr.get("warnings") or []]
+    assumptions = [f"{pr['label']}: {a}" for pr in part_results for a in pr.get("assumptions") or []]
+    waterfall = [{"label": f"{pr['label']} ({ {PART_METHOD_LET: 'let — Investment Method', PART_METHOD_TRADING: 'trading — Profits Method', PART_METHOD_ENTERED: 'your figure: ' + (pr.get('basis') or '')}[pr['method']] })",
+                  "amount": pr["value_gbp"]} for pr in part_results]
+    waterfall.append({"label": "Indicative sum of parts (gross of purchaser's costs)", "amount": total, "emphasis": True})
+
+    nation = str(fi.get("nation") or "").strip().lower() or None
+    if nation is not None and nation not in ("england_ni", "wales", "scotland"):
+        nation = None
+    fees = fi.get("purchaser_fees_pct")
+    try:
+        fees = float(fees) if fees is not None else None
+    except (TypeError, ValueError):
+        fees = None
+    if fees is not None and fees < 0:
+        fees = None
+    pack_costs = [it for it in (fi.get("pack_costs") or []) if isinstance(it, dict)]
+    pc = _net_of_purchasers_costs(total, fees, nation, pack_costs)
+    if pc.get("status") == "ok":
+        waterfall.append({"label": "SDLT (non-residential and mixed bands, on net price)", "amount": -pc["sdlt_gbp"]})
+        if pc["pack_costs_items"]:
+            waterfall.append({"label": f"Costs in the special conditions ({pc['pack_costs_items']} item{'s' if pc['pack_costs_items'] != 1 else ''}, VAT added where stated)",
+                              "amount": -pc["pack_costs_gbp"]})
+        if pc["own_fees_entered"]:
+            waterfall.append({"label": f"Your own fees ({pc['fees_pct']:g}% of net price, as entered)", "amount": -pc["fees_gbp"]})
+        else:
+            assumptions.append("Your own purchase fees (agent, solicitor, survey) are not entered — not deducted. The net value is before those fees.")
+        waterfall.append({"label": "Indicative value (net of purchaser's costs)", "amount": pc["net_value_gbp"], "emphasis": True})
+
+    comps = {f"{pr['label']} (£)": pr["value_gbp"] for pr in part_results}
+    return _ok_result(
+        valuation_type="commercial_mixed_use_sum_of_parts",
+        provenance=fi.get("_provenance"),
+        method="mixed_use_sum_of_parts",
+        inputs_used=inputs_used,
+        valuation_components=comps,
+        capital_value=total,
+        assumptions=assumptions, evidence_gaps=[], warnings=warnings, formula_trace=trace,
+        extra={
+            "parts": part_results,
+            "waterfall": waterfall,
+            "purchasers_costs": pc,
+            "method_reasoning": MIXED_USE_LABEL,
+            "uncertainty_statement": (
+                "Every part's inputs are yours (Evidence tier C unless read from "
+                "the pack). The parts are added, not apportioned from a whole: "
+                "the split of the lot into parts is your choice and decides the "
+                "result. " + MIXED_USE_LABEL
+            ),
+        },
     )
 
 
