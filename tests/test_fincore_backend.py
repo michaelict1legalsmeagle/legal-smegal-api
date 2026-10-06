@@ -131,7 +131,9 @@ def test_calculate_financials_no_hidden_defaults_and_full_total():
     assert r["acquisition"]["total_acquisition"] == 221050
     assert r["inputs"]["nation"] == "england" and r["inputs"]["_user_fields"] == ["purchase_price"]
     r2 = calc({"purchase_price": 200000})
-    assert r2["inputs"]["legal_fees"] == 0 and r2["inputs"]["maintenance_pct"] == 0  # no £1,500 / 1%
+    # FIN-CORE-2: not entered stays missing (None) — neither £1,500 / 1% nor a stored 0
+    assert r2["inputs"]["legal_fees"] is None and r2["inputs"]["maintenance_pct"] is None
+    assert "legal_fees" in r2["missing_inputs"]
 
 
 def test_whole_pound_amounts_over_10k_are_not_divided_by_100():

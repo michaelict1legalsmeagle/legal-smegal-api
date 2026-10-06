@@ -7750,20 +7750,16 @@ def create_deal():
             "auction_date": data.get("auction_date") or None,
             "status":       "active",
             # Fix 13 — Seed empty financials_json on deal creation.
-            # The Financials page reads deal.financials_json and falls back to
-            # the GET /financials endpoint which returns a seeded defaults object.
             # Without this seed, DB has null and any ceiling recompute that reads
             # financials_json.inputs for comps_avg_value gets an empty dict.
-            # Seeding a known-empty _seeded object makes the null→empty transition
-            # explicit and allows the financials GET to return defaults immediately.
+            # FIN-CORE-2 (2026-10-06): the seed holds the deal's guide price only.
+            # target_yield 6 and ltv_pct 75 were written here for every deal —
+            # values nobody entered. LTV is the user's; target yield was unused.
             "financials_json": {
                 "_seeded": True,
                 "_seeded_at": now_iso(),
                 "inputs": {
                     "guide_price":        data.get("guide_price"),
-                    "target_yield":       6.0,
-                    "ltv_pct":            75.0,
-                    # FIN-CORE: no invented model defaults seeded (rate, management, maintenance, legal, voids, hold)
                 }
             },
         }).execute()
@@ -10113,7 +10109,15 @@ _FIN_PAGE_KEYS = (
 
 
 def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """Calculate property investment yields from raw inputs. All GBP in £ (float)."""
+    """Calculate property investment returns from the inputs sent. All GBP in £.
+
+    FIN-CORE-2 (2026-10-06), the no-assumed-inputs rule: a value that was not
+    sent stays None in the stored inputs — never 0, never a default (the old
+    6% target yield and 10-year hold are gone). A cost not entered adds
+    nothing to a total and is named in `missing_inputs`; a figure that needs
+    a missing input (debt needs LTV, cashflow needs rent and the rate) is None,
+    never a number built on a guess.
+    """
     def _gbp(v: Any) -> Optional[float]:
         f = safe_float(v)
         if f is None:
@@ -10128,79 +10132,113 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
             return None
         return max(0.0, min(100.0, f))
 
-    purchase_price      = safe_float(inputs.get("purchase_price"))  # was _gbp — _gbp divides ints>10000 by 100 (151000→1510). purchase_price is always user-entered pounds, never pence.
+    def _z(v: Optional[float]) -> float:
+        # A cost not entered adds nothing to a sum; it is listed in missing_inputs.
+        return v if v is not None else 0.0
+
+    purchase_price      = safe_float(inputs.get("purchase_price"))  # always user-entered pounds, never pence
     guide_price         = _gbp(inputs.get("guide_price"))
-    renovation_cost     = safe_float(inputs.get("renovation_cost")) or 0.0
+    renovation_cost     = safe_float(inputs.get("renovation_cost"))
     monthly_rent        = safe_float(inputs.get("monthly_rent"))
     annual_rent         = safe_float(inputs.get("annual_rent"))
-    void_weeks          = safe_float(inputs.get("void_weeks")) or 0.0
-    management_pct      = _pct(inputs.get("management_pct")) or 0.0
-    service_charge_pa   = safe_float(inputs.get("service_charge_pa")) or 0.0
-    ground_rent_pa      = safe_float(inputs.get("ground_rent_pa")) or 0.0
-    insurance_pa        = safe_float(inputs.get("insurance_pa")) or 0.0
-    maintenance_pct     = _pct(inputs.get("maintenance_pct")) or 0.0   # FIN-CORE: no hidden 1% default
-    buyers_premium_pct  = _pct(inputs.get("buyers_premium_pct")) or 0.0
-    # FIN-CORE: every money field the page sends is pounds. _gbp() divides whole
-    # numbers over 10,000 by 100 (a pence heuristic) — £11,500 SDLT became £115.
-    stamp_duty          = safe_float(inputs.get("stamp_duty")) or 0.0
-    legal_fees          = safe_float(inputs.get("legal_fees")) or 0.0   # FIN-CORE: no hidden £1,500 default
-    admin_fee           = safe_float(inputs.get("admin_fee")) or 0.0    # FIN-CORE: was missing from the total
-    acquisition_insurance = safe_float(inputs.get("acquisition_insurance")) or 0.0
-    lender_fee          = safe_float(inputs.get("lender_fee")) or 0.0      # FIN-CORE rev 5
-    pack_costs          = safe_float(inputs.get("pack_costs")) or 0.0
-    bridging_cost       = safe_float(inputs.get("bridging_cost")) or 0.0
-    survey_cost         = safe_float(inputs.get("survey_cost")) or 0.0
-    finance_rate_pct    = _pct(inputs.get("finance_rate_pct")) or 0.0
-    ltv_pct             = _pct(inputs.get("ltv_pct")) or 0.0
-    target_yield        = _pct(inputs.get("target_yield")) or 6.0
+    void_weeks          = safe_float(inputs.get("void_weeks"))
+    management_pct      = _pct(inputs.get("management_pct"))
+    service_charge_pa   = safe_float(inputs.get("service_charge_pa"))
+    ground_rent_pa      = safe_float(inputs.get("ground_rent_pa"))
+    insurance_pa        = safe_float(inputs.get("insurance_pa"))
+    maintenance_pct     = _pct(inputs.get("maintenance_pct"))
+    buyers_premium_pct  = _pct(inputs.get("buyers_premium_pct"))
+    # FIN-CORE: every money field the page sends is pounds (no pence heuristic).
+    stamp_duty          = safe_float(inputs.get("stamp_duty"))
+    legal_fees          = safe_float(inputs.get("legal_fees"))
+    admin_fee           = safe_float(inputs.get("admin_fee"))
+    acquisition_insurance = safe_float(inputs.get("acquisition_insurance"))
+    lender_fee          = safe_float(inputs.get("lender_fee"))
+    pack_costs          = safe_float(inputs.get("pack_costs"))
+    bridging_cost       = safe_float(inputs.get("bridging_cost"))
+    survey_cost         = safe_float(inputs.get("survey_cost"))
+    finance_rate_pct    = _pct(inputs.get("finance_rate_pct"))
+    ltv_pct             = _pct(inputs.get("ltv_pct"))
     exit_price          = _gbp(inputs.get("exit_price"))
-    hold_years          = safe_float(inputs.get("hold_years")) or 10.0  # matches the page horizon
+    hold_years          = safe_float(inputs.get("hold_years"))
+    if hold_years is not None and hold_years <= 0:
+        hold_years = None
 
     if purchase_price is None:
         return {"ok": False, "error": "purchase_price is required"}
 
-    buyers_premium      = purchase_price * (buyers_premium_pct / 100.0)
-    total_acquisition   = (purchase_price + buyers_premium + stamp_duty + legal_fees + survey_cost
-                           + admin_fee + acquisition_insurance + lender_fee + pack_costs + bridging_cost)   # FIN-CORE: same total as the page
-    total_invested      = total_acquisition + renovation_cost
+    # What is needed and not entered — named, never filled.
+    missing = []
+    if monthly_rent is None and annual_rent is None:
+        missing.append("monthly_rent")
+    for _k, _v in (("buyers_premium_pct", buyers_premium_pct), ("legal_fees", legal_fees),
+                   ("survey_cost", survey_cost), ("admin_fee", admin_fee),
+                   ("acquisition_insurance", acquisition_insurance), ("renovation_cost", renovation_cost)):
+        if _v is None:
+            missing.append(_k)
+    if void_weeks is None and inputs.get("occupancy_pct") is None:
+        missing.append("void_weeks")
+    for _k, _v in (("management_pct", management_pct), ("maintenance_pct", maintenance_pct),
+                   ("insurance_pa", insurance_pa)):
+        if _v is None:
+            missing.append(_k)
+    if ltv_pct is None:
+        missing.append("ltv_pct")
+    elif ltv_pct > 0:
+        if finance_rate_pct is None:
+            missing.append("finance_rate_pct")
+        if lender_fee is None:
+            missing.append("lender_fee")
+
+    buyers_premium      = purchase_price * (_z(buyers_premium_pct) / 100.0)
+    total_acquisition   = (purchase_price + buyers_premium + _z(stamp_duty) + _z(legal_fees) + _z(survey_cost)
+                           + _z(admin_fee) + _z(acquisition_insurance) + _z(lender_fee) + _z(pack_costs)
+                           + _z(bridging_cost))   # FIN-CORE: same total as the page
+    total_invested      = total_acquisition + _z(renovation_cost)
 
     if annual_rent is None and monthly_rent is not None:
         annual_rent = monthly_rent * 12.0
-    if annual_rent is None:
-        annual_rent = 0.0
 
-    void_weeks_pa       = min(float(void_weeks), 52.0)
+    void_weeks_pa       = min(float(_z(void_weeks)), 52.0)
     occupied_weeks      = 52.0 - void_weeks_pa
-    void_adj_rent_pa    = annual_rent * (occupied_weeks / 52.0)
+    void_adj_rent_pa    = annual_rent * (occupied_weeks / 52.0) if annual_rent is not None else None
 
-    management_cost_pa  = void_adj_rent_pa * (management_pct / 100.0)
-    maintenance_cost_pa = purchase_price * (maintenance_pct / 100.0)
-    total_expenses_pa   = (management_cost_pa + maintenance_cost_pa +
-                           service_charge_pa + ground_rent_pa + insurance_pa)
+    management_cost_pa  = void_adj_rent_pa * (_z(management_pct) / 100.0) if void_adj_rent_pa is not None else None
+    maintenance_cost_pa = purchase_price * (_z(maintenance_pct) / 100.0)
+    total_expenses_pa   = (_z(management_cost_pa) + maintenance_cost_pa +
+                           _z(service_charge_pa) + _z(ground_rent_pa) + _z(insurance_pa))
 
-    loan_amount         = purchase_price * (ltv_pct / 100.0) if ltv_pct > 0 else 0.0
-    annual_interest     = loan_amount * (finance_rate_pct / 100.0)
-    equity              = total_invested - loan_amount
+    # Finance: no LTV entered → no debt figure. LTV 0 is a cash purchase.
+    loan_amount         = purchase_price * (ltv_pct / 100.0) if ltv_pct is not None else None
+    if loan_amount is None:
+        annual_interest = None
+    elif loan_amount == 0:
+        annual_interest = 0.0
+    else:
+        annual_interest = loan_amount * (finance_rate_pct / 100.0) if finance_rate_pct is not None else None
+    equity              = (total_invested - loan_amount) if loan_amount is not None else None
 
-    noi                 = void_adj_rent_pa - total_expenses_pa
-    net_cashflow_pa     = noi - annual_interest
+    noi                 = (void_adj_rent_pa - total_expenses_pa) if void_adj_rent_pa is not None else None
+    net_cashflow_pa     = (noi - annual_interest) if (noi is not None and annual_interest is not None) else None
 
-    gross_yield_pct     = (annual_rent / purchase_price * 100.0)  if purchase_price > 0 else None
-    net_yield_pct       = (noi / total_invested * 100.0)          if total_invested > 0 else None
-    cash_on_cash_pct    = (net_cashflow_pa / equity * 100.0)      if (equity and equity > 0) else None
+    gross_yield_pct     = (annual_rent / purchase_price * 100.0)  if (annual_rent is not None and purchase_price > 0) else None
+    net_yield_pct       = (noi / total_invested * 100.0)          if (noi is not None and total_invested > 0) else None
+    cash_on_cash_pct    = (net_cashflow_pa / equity * 100.0)      if (net_cashflow_pa is not None and equity and equity > 0) else None
 
     # V-NOBID (2026-09-26): no max-bid / target-yield bid solver. The user enters
     # their own proposed price; the model reports what that price returns.
 
-    total_rent_received = net_cashflow_pa * hold_years
+    total_rent_received = (net_cashflow_pa * hold_years) if (net_cashflow_pa is not None and hold_years) else None
     capital_gain        = (exit_price - purchase_price) if exit_price else None
-    total_return        = (total_rent_received + capital_gain) if capital_gain is not None else total_rent_received
-    simple_roi_pct      = (total_return / total_invested * 100.0)       if total_invested > 0 else None
-    annualised_roi_pct  = (simple_roi_pct / hold_years)                 if (simple_roi_pct is not None and hold_years > 0) else None
-    payback_years       = (total_invested / noi)                        if noi > 0 else None
+    if total_rent_received is None:
+        total_return = None
+    else:
+        total_return = (total_rent_received + capital_gain) if capital_gain is not None else total_rent_received
+    simple_roi_pct      = (total_return / total_invested * 100.0)       if (total_return is not None and total_invested > 0) else None
+    annualised_roi_pct  = (simple_roi_pct / hold_years)                 if (simple_roi_pct is not None and hold_years) else None
+    payback_years       = (total_invested / noi)                        if (noi is not None and noi > 0) else None
 
-    # V-NOBID: hand-set judgement thresholds (5% / 8% yield, 15% over guide,
-    # target-yield max bid) removed. Only arithmetic facts are reported.
+    # V-NOBID: only arithmetic facts are reported.
     flags = []
     if net_cashflow_pa is not None and net_cashflow_pa < 0:
         flags.append({"type": "critical", "msg": "Net cashflow is negative after finance costs"})
@@ -10210,6 +10248,8 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "ok": True,
+        "model_version": "fin-core-2",
+        "missing_inputs": missing,
         "inputs": {
             "purchase_price": _r2(purchase_price), "guide_price": _r2(guide_price),
             "renovation_cost": _r2(renovation_cost), "annual_rent": _r2(annual_rent),
@@ -10220,7 +10260,7 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
             "buyers_premium_pct": _r2(buyers_premium_pct), "stamp_duty": _r2(stamp_duty),
             "legal_fees": _r2(legal_fees), "survey_cost": _r2(survey_cost),
             "finance_rate_pct": _r2(finance_rate_pct), "ltv_pct": _r2(ltv_pct),
-            "target_yield": _r2(target_yield), "exit_price": _r2(exit_price), "hold_years": _r2(hold_years),
+            "exit_price": _r2(exit_price), "hold_years": _r2(hold_years),
             "admin_fee": _r2(admin_fee), "acquisition_insurance": _r2(acquisition_insurance),
             # FIN-CORE: page-only settings echoed so a reload restores exactly what was saved
             **{k: inputs.get(k) for k in _FIN_PAGE_KEYS if inputs.get(k) is not None},
@@ -10233,8 +10273,9 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
             "total_invested": _r2(total_invested),
         },
         "income": {
-            "gross_annual_rent": _r2(annual_rent), "void_weeks_pa": _r2(void_weeks_pa),
-            "void_adj_rent_pa": _r2(void_adj_rent_pa), "monthly_net_rent": _r2(void_adj_rent_pa / 12.0),
+            "gross_annual_rent": _r2(annual_rent), "void_weeks_pa": _r2(void_weeks),
+            "void_adj_rent_pa": _r2(void_adj_rent_pa),
+            "monthly_net_rent": _r2(void_adj_rent_pa / 12.0) if void_adj_rent_pa is not None else None,
         },
         "expenses": {
             "management_cost_pa": _r2(management_cost_pa), "maintenance_cost_pa": _r2(maintenance_cost_pa),
@@ -10247,7 +10288,7 @@ def _calculate_financials(inputs: Dict[str, Any]) -> Dict[str, Any]:
         },
         "returns": {
             "noi": _r2(noi), "net_cashflow_pa": _r2(net_cashflow_pa),
-            "net_cashflow_pm": _r2(net_cashflow_pa / 12.0),
+            "net_cashflow_pm": _r2(net_cashflow_pa / 12.0) if net_cashflow_pa is not None else None,
             "gross_yield_pct": _r2(gross_yield_pct), "net_yield_pct": _r2(net_yield_pct),
             "cash_on_cash_pct": _r2(cash_on_cash_pct), "payback_years": _r2(payback_years),
             "simple_roi_pct": _r2(simple_roi_pct), "annualised_roi_pct": _r2(annualised_roi_pct),
@@ -10286,16 +10327,9 @@ def get_financials(deal_id: str):
                     "guide_price":       gpp / 100.0 if gpp else (float(guide) if guide else None),
                     "buyers_premium_pct": terms.get("buyers_premium_pct"),
                     "renovation_cost":   None,
-                    "target_yield":      6.0,
-                    "ltv_pct":           75.0,
-                    # FIN-CORE: no invented model defaults seeded (rate, management, maintenance, legal, voids, hold)
+                    # FIN-CORE-2: no target yield, no LTV — nothing nobody entered.
                 }
             }
-            # COMM-2: the residential seed is not offered for a commercial,
-            # mixed-use or unclassified deal (dual pipeline).
-            if prop.get("asset_class") in ("commercial", "mixed_use", "unclassified"):
-                for _k in ("target_yield", "ltv_pct"):
-                    financials["inputs"].pop(_k, None)
         return jsonify({"ok": True, "financials": financials}), 200
     except Exception as e:
         app.logger.exception("get_financials failed")
