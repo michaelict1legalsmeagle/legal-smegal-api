@@ -556,8 +556,34 @@ def calculate_commercial_ceiling(financial_inputs: dict, provenance: Optional[di
     if asset_class == ASSET_CLASS_SPECIALISED_OWNER_OCCUPIED:
         return _calculate_drc_method(fi, asset_class)
     if asset_class == ASSET_CLASS_MIXED_USE:
-        return _gate_mixed_use(fi, asset_class)
-    return _attach_cross_check(_calculate_investment_method(fi, asset_class), fi, asset_class)
+        return _check_own_fees(_gate_mixed_use(fi, asset_class), fi)
+    return _check_own_fees(_attach_cross_check(_calculate_investment_method(fi, asset_class), fi, asset_class), fi)
+
+
+def _check_own_fees(result: dict, fi: dict) -> dict:
+    """COMM-6 (2026-10-06): 'your own purchase fees' is a PERCENTAGE of the
+    price. A value of 100 or more cannot be a fee percentage (live deal
+    254367be stored 6200 — an amount in pounds typed into the % box); it is
+    rejected with the reason, never silently used or capped."""
+    v = fi.get("purchaser_fees_pct")
+    try:
+        v = float(v) if v is not None else None
+    except (TypeError, ValueError):
+        v = None
+    if v is None or v < 100:
+        return result
+    gap = (f"Your own purchase fees are entered as {v:g}% of the price — that cannot be a "
+           "percentage of the price (it looks like an amount in pounds). Enter the fees as "
+           "a percentage, e.g. 1.5, or leave the box blank.")
+    gaps = [gap] + [g for g in ((result.get("audit") or {}).get("evidence_gaps") or [])]
+    out = _insufficient(fi, gaps, (result.get("audit") or {}).get("warnings") or [],
+                        (result.get("audit") or {}).get("assumptions") or [],
+                        (result.get("audit") or {}).get("formula_trace") or [],
+                        valuation_type=result.get("valuation_type") or "commercial_investment_method",
+                        inputs_used=result.get("inputs_used"))
+    if "parts" in result:
+        out["parts"] = result["parts"]
+    return out
 
 
 def _attach_cross_check(primary: dict, fi: dict, asset_class: str) -> dict:
@@ -645,7 +671,10 @@ def _gate_mixed_use(fi: dict, asset_class: str) -> dict:
     parts = [p for p in raw_parts if isinstance(p, dict)] if isinstance(raw_parts, list) else []
     gaps: list[str] = []
     trace: list[str] = []
-    if len(parts) < 2:
+    if len(parts) == 1:
+        gaps.append("Only 1 part is entered — add at least one more with “+ Add a part”. "
+                    "A mixed-use lot is valued as the sum of its parts.")
+    elif len(parts) < 2:
         gaps.append(
             "Define the parts of this lot (at least two — e.g. the ground-floor "
             "shop and the flats above). Each part is valued on its own inputs "

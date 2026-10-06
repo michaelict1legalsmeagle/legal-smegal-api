@@ -56,9 +56,11 @@ def test_every_missing_input_listed_and_no_figure():
 
 
 def test_needs_two_parts_and_never_apportions():
-    for parts in (None, [], [SHOP]):
+    for parts in (None, []):
         r = eng.calculate_commercial_ceiling({**LOT, "parts": parts})
         assert r["status"] != "ok" and "at least two" in r["audit"]["evidence_gaps"][0]
+    r = eng.calculate_commercial_ceiling({**LOT, "parts": [SHOP]})
+    assert r["status"] != "ok" and r["audit"]["evidence_gaps"][0].startswith("Only 1 part is entered")
 
 
 def test_leasehold_let_part_refused_not_guessed():
@@ -83,3 +85,18 @@ def test_parts_sanitised_on_save():
     assert len(out) == 11                                             # 12 kept, the non-dict dropped
     assert out[0] == {"label": ("Shop" * 50)[:80], "method": "income_producing_let", "passing_rent_pa": 9000.0}
     assert cr._clean_parts("not a list") == []
+
+
+def test_fee_percentage_of_100_or_more_rejected_with_reason():
+    # live 254367be stored purchaser_fees_pct 6200 (pounds typed into the % box)
+    live = {"asset_class": "mixed_use", "purchaser_fees_pct": 6200,
+            "parts": [{"label": "12000", "method": "trade_related", "fmop_pa": 1200, "profit_multiplier": 3}]}
+    g = eng.calculate_commercial_ceiling(live)["audit"]["evidence_gaps"]
+    assert g[0].startswith("Your own purchase fees are entered as 6200%") and g[1].startswith("Only 1 part")
+    full = {**LOT, "parts": [SHOP, FLATS]}
+    assert eng.calculate_commercial_ceiling({**full, "purchaser_fees_pct": 100})["status"] == "insufficient_evidence"
+    assert eng.calculate_commercial_ceiling({**full, "purchaser_fees_pct": 99.9})["status"] == "ok"
+    inv = {"asset_class": "income_producing_let", "tenure": "freehold", "nation": "england_ni",
+           "passing_rent_pa": 9000, "market_rent_pa": 9000, "yield_pct": 7}
+    assert eng.calculate_commercial_ceiling({**inv, "purchaser_fees_pct": 6200})["status"] == "insufficient_evidence"
+    assert eng.calculate_commercial_ceiling({**inv, "purchaser_fees_pct": 1.5})["status"] == "ok"
