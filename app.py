@@ -33,6 +33,10 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from supabase import create_client, Client
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
+# STALE-TS-1: imported at module level so a missing module fails the deploy loudly
+# instead of silently disabling get_deal's stale-processing check.
+from processing_staleness import seconds_since as _ps_seconds_since, \
+    STALE_PROCESSING_SECONDS as _STALE_PROCESSING_SECONDS
 from pathlib import Path
 import jwt as pyjwt
 import io
@@ -7983,14 +7987,17 @@ def get_deal(deal_id: str):
         # natural place to detect that: if 'processing' has been sitting
         # unchanged for longer than any real analysis should take, treat it
         # as failed rather than leaving the user stuck on an infinite poll.
-        _STALE_PROCESSING_SECONDS = 300  # generous — real analysis is ~60-120s
+        # STALE-TS-1 (7 Oct 2026): age is read by processing_staleness.seconds_since,
+        # which accepts Supabase's "+00:00" timestamps. The old strptime parse raised
+        # on every whole-second updated_at, so this check never fired.
         if deal.get("status") == "processing":
             try:
                 _updated = deal.get("updated_at")
                 if _updated:
-                    _updated_dt = datetime.strptime(_updated.split(".")[0].replace("Z", ""), "%Y-%m-%dT%H:%M:%S")
-                    _age = (datetime.utcnow() - _updated_dt).total_seconds()
-                    if _age > _STALE_PROCESSING_SECONDS:
+                    _age = _ps_seconds_since(_updated)
+                    if _age is None:
+                        app.logger.warning(f"[get_deal] stale-check: unreadable updated_at for {deal_id}: {_updated!r}")
+                    elif _age > _STALE_PROCESSING_SECONDS:
                         _stale_update = {
                             "status": "error",
                             "summary_json": {
