@@ -318,39 +318,39 @@ NOMIS_DEFAULT_GEOGRAPHY = os.getenv("NOMIS_DEFAULT_GEOGRAPHY", "").strip()
 NOMIS_TIMEOUT = int(os.getenv("NOMIS_TIMEOUT", "20"))
 NOMIS_FREQ = os.getenv("NOMIS_FREQ", "A").strip()
 
+# CENSUS-FIX-1 (8 Oct 2026, verified against the live Nomis API): TS003 codes
+# 1001-1007 are GROUP codes that contain leaf codes (E01005307: 1001 = 199 = code 1 (71) + code 2 (128)).
+# The old list mixed groups and leaves, so values were counted 2-3 times
+# (E01005307: rows summed to 1690 vs 716 households) and every stored pct was
+# wrong. 1001,1002,1007 partition all households exactly (sum == Nomis total
+# at code 0 for E01005307, E01018962, W01001958), and are the three top-level
+# groups the Area page already shows.
 NOMIS_TS003_DIM = os.getenv("NOMIS_TS003_DIM", "c2021_hhcomp_15").strip()
-NOMIS_TS003_CATS = os.getenv(
-    "NOMIS_TS003_CATS",
-    "1001,1,2,1002,1003,4,5,6,1004,7,8,9,1005,10,11,1006,12,1007,13,14"
-).strip()
+NOMIS_TS003_CATS = os.getenv("NOMIS_TS003_CATS", "1001,1002,1007").strip()
 NOMIS_TS003_DATASET = os.getenv("NOMIS_TS003_DATASET", "NM_2023_1").strip()
 
 # Census 2021 — Ethnic group (TS021). Dataset NM_2041_1.
-# The Nomis dataset page (https://www.nomisweb.co.uk/datasets/c2021ts021)
-# documents the default variable as "Ethnic group (25 categories)" — 1 Total
-# at code 0 plus 24 ethnic sub-categories at codes 1..24. The dim name is
-# c2021_eth_25, mirroring the convention TS030 religion uses successfully
-# (c2021_religion_10 / cats 1..9 — dim suffix = total cat count incl. Total,
-# cats query skips Total at 0). Previous default c2021_eth_8 / 1..8 returned
-# zero rows because that classification is not exposed on NM_2041_1.
+# CENSUS-FIX-1 (8 Oct 2026, verified against the live Nomis API
+# /api/v01/dataset/NM_2041_1.def.sdmx.json): the only category dimension is
+# C2021_ETH_20 (codes 1..19 detailed, 1001..1005 broad groups, 0 Total).
+# c2021_eth_8 and c2021_eth_25 both return Nomis error "Cannot create query" —
+# ethnic was empty on every deal. The 5 broad groups partition all usual
+# residents exactly (sum == Nomis total at code 0) and fit the strip labels.
 NOMIS_TS021_DATASET = os.getenv("NOMIS_TS021_DATASET", "NM_2041_1").strip()
-NOMIS_TS021_DIM     = os.getenv("NOMIS_TS021_DIM", "c2021_eth_25").strip()
-NOMIS_TS021_CATS    = os.getenv(
-    "NOMIS_TS021_CATS",
-    "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24"
-).strip()
+NOMIS_TS021_DIM     = os.getenv("NOMIS_TS021_DIM", "c2021_eth_20").strip()
+NOMIS_TS021_CATS    = os.getenv("NOMIS_TS021_CATS", "1001,1002,1003,1004,1005").strip()
 
 # Census 2021 — Religion (TS030). Default to 9 categories incl. 'no religion' and 'not stated'.
 NOMIS_TS030_DATASET = os.getenv("NOMIS_TS030_DATASET", "NM_2049_1").strip()
 NOMIS_TS030_DIM     = os.getenv("NOMIS_TS030_DIM", "c2021_religion_10").strip()
 NOMIS_TS030_CATS    = os.getenv("NOMIS_TS030_CATS", "1,2,3,4,5,6,7,8,9").strip()
 
-# Census 2021 — Age by five-year bands (TS007A, dataset NM_2020_1). The Nomis
-# dataset page (https://www.nomisweb.co.uk/datasets/c2021ts007a) documents the
-# variable as "Age (19 categories)" — 1 Total at code 0 plus 18 five-year age
-# bands at codes 1..18. Use simple leaf codes 1..18, mirroring the TS030
-# religion pattern. Previous default cats 1001..1018 were 4-digit type-codes
-# that don't exist on this dim and returned zero rows.
+# Census 2021 — Age by five-year bands (TS007A, dataset NM_2020_1).
+# CENSUS-FIX-1 (8 Oct 2026, verified against the live Nomis API): dim
+# C2021_AGE_19 has codes 0 (Total) and 1..18 (five-year bands) only. Codes
+# 1001..1018 return Nomis error "Query is incomplete" — a Render env override
+# (NOMIS_TS007_CATS=1001..1018) kept age empty on every deal. 1..18 sum to the
+# Nomis total exactly.
 NOMIS_TS007_DATASET = os.getenv("NOMIS_TS007_DATASET", "NM_2020_1").strip()
 NOMIS_TS007_DIM     = os.getenv("NOMIS_TS007_DIM", "c2021_age_19").strip()
 NOMIS_TS007_CATS    = os.getenv(
