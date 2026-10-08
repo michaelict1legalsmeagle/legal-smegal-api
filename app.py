@@ -37,6 +37,9 @@ from datetime import datetime, timedelta
 # instead of silently disabling get_deal's stale-processing check.
 from processing_staleness import seconds_since as _ps_seconds_since, \
     STALE_PROCESSING_SECONDS as _STALE_PROCESSING_SECONDS
+# CRIME-EVID-1: two-source England & Wales crime (police.uk street + Home Office district).
+# Module-level so a missing module/lookup fails the deploy loudly, never silently.
+import ew_crime as _ew_crime
 from pathlib import Path
 import jwt as pyjwt
 import io
@@ -2787,67 +2790,156 @@ def summarise_counts(title: str, counts: Dict[str, int], top_names: Optional[lis
     return headline
 
 
-def get_crime_data(lat: Optional[float], lng: Optional[float]) -> Dict[str, Any]:
-    retrieved = now_iso()
-    docs_url = "https://data.police.uk/docs/"
-    base_sources = [{"label": "UK Police Data API docs", "url": docs_url}]
+# ── CRIME-EVID-1 (8 Oct 2026): England & Wales crime from two official sources ──
+# STREET: police.uk, latest published month, force-recorded crimes only. An empty
+# police.uk answer is reported as "no records returned" — never as 0 (police.uk holds
+# NO Greater Manchester Police data and forces miss months: data.police.uk/changelog).
+# DISTRICT: Home Office police recorded crime by Community Safety Partnership, latest
+# financial year, from ew.crime_by_csp on Hetzner; council -> CSP via the official ONS
+# lookup (ew_lad_csp_lookup.json). Pure logic lives in ew_crime.py (unit-tested).
+_EW_LOOKUP = _ew_crime.load_lookup(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                _ew_crime.LOOKUP_FILE))
+_POLICEUK_LATEST: Dict[str, Any] = {"month": None, "at": 0.0}
+_EW_CSP_NAMES: Dict[str, Any] = {"names": None, "at": 0.0}
 
-    if lat is None or lng is None:
-        return metric_unavailable(
-            "Crime data not available: postcode could not be resolved to coordinates.",
-            base_sources,
-            retrieved,
-        )
 
-    url = f"https://data.police.uk/api/crimes-street/all-crime?lat={lat}&lng={lng}"
+def _policeuk_latest_month() -> Optional[str]:
+    """Latest month police.uk has published ('YYYY-MM'); cached 6h per worker."""
+    now = time.time()
+    if _POLICEUK_LATEST["month"] and now - _POLICEUK_LATEST["at"] < 6 * 3600:
+        return _POLICEUK_LATEST["month"]
     try:
-        status, crimes = _http_get_json(url, timeout=20)
-        if status != 200 or not isinstance(crimes, list):
-            # Governance: a failed/malformed fetch must NOT fall through to total=0,
-            # which downstream rendered as "-100% / Lower crime" (a fabricated safety
-            # claim). Report honest absence. A genuine HTTP 200 with an empty list is
-            # real "0 crimes this month" and still flows through below.
-            return metric_unavailable(
-                "Crime data temporarily unavailable (police.uk returned no valid response for this location).",
-                base_sources,
-                retrieved,
-            )
+        status, data = _http_get_json("https://data.police.uk/api/crime-last-updated", timeout=8)
+        d = str((data or {}).get("date") or "")[:7] if status == 200 and isinstance(data, dict) else ""
+        if re.match(r"^\d{4}-\d{2}$", d):
+            _POLICEUK_LATEST.update(month=d, at=now)
+            return d
+    except Exception as _e:
+        app.logger.warning("[crime] police.uk last-updated failed: %s", _e)
+    return _POLICEUK_LATEST["month"]
 
-        counts: Dict[str, int] = {}
-        for c in crimes:
-            cat = (c or {}).get("category") or "unknown"
-            counts[cat] = counts.get(cat, 0) + 1
 
-        summary = summarise_counts("Crimes (street-level)", counts)
-        bounded = crimes[:MAX_CRIMES]
+def _ew_csp_names() -> List[str]:
+    """CSP names present in ew.crime_by_csp (latest year); cached 1h per worker."""
+    now = time.time()
+    if _EW_CSP_NAMES["names"] and now - _EW_CSP_NAMES["at"] < 3600:
+        return _EW_CSP_NAMES["names"]
+    try:
+        rows = data_query(
+            "SELECT DISTINCT csp_name FROM ew.crime_by_csp "
+            "WHERE financial_year = (SELECT max(financial_year) FROM ew.crime_by_csp)")
+        names = [r["csp_name"] for r in rows or [] if r.get("csp_name")]
+    except Exception as _e:
+        app.logger.warning("[crime] ew.crime_by_csp names query failed: %s", _e)
+        names = []
+    if names:
+        _EW_CSP_NAMES.update(names=names, at=now)
+    return names
 
-        sources = [
-            {"label": "UK Police Data API (crimes-street)", "url": url},
-            {"label": "UK Police Data API docs", "url": docs_url},
-        ]
 
-        out = metric_ok(
-            summary if crimes else "No crime records returned for this location/time window.",
-            bounded,
-            sources,
-            retrieved,
-            MIN_VERIFIED if len(crimes) > 0 else 0.0,
-        )
-        out["metrics"] = {
-            "total": len(crimes),
-            "categories": counts,
-            "month": (crimes[0].get("month") if crimes else None),  # all-crime = latest single month
-            "window": "latest month",
-            "radius_hint": "Police API uses a fixed area around the point; see documentation.",
-        }
-        return out
+def _ew_district_crime(area_code: Optional[str]) -> Dict[str, Any]:
+    names = _ew_csp_names()
+    if not names:
+        return {"source": _ew_crime.DISTRICT_SOURCE, "source_url": _ew_crime.DATASET_PAGE,
+                "status": "unavailable", "name": None, "transient": True,
+                "note": "Home Office district crime data is not available right now."}
+    res = _ew_crime.resolve_district(area_code, _EW_LOOKUP, names)
+    rows: List[Dict[str, Any]] = []
+    if res.get("csps"):
+        try:
+            rows = data_query(
+                "SELECT financial_year, police_force, csp_name, offence_group, offences, quarters, "
+                "usable, quality_note, source_file, published FROM ew.crime_by_csp "
+                "WHERE financial_year = (SELECT max(financial_year) FROM ew.crime_by_csp) "
+                "AND csp_name = ANY(%s)", (list(res["csps"]),)) or []
+        except Exception as _e:
+            app.logger.warning("[crime] ew.crime_by_csp query failed for %s: %s", area_code, _e)
+            return {"source": _ew_crime.DISTRICT_SOURCE, "source_url": _ew_crime.DATASET_PAGE,
+                    "status": "unavailable", "name": res.get("lad_name"), "transient": True,
+                    "note": "Home Office district crime data is not available right now."}
+    return _ew_crime.district_block(res, rows)
 
-    except Exception as e:
-        return metric_unavailable(
-            f"Crime data fetch failed: {str(e)}",
-            base_sources,
-            retrieved,
-        )
+
+def get_crime_data(lat: Optional[float], lng: Optional[float],
+                   area_code: Optional[str] = None) -> Dict[str, Any]:
+    retrieved = now_iso()
+    district = _ew_district_crime(area_code)
+    if lat is None or lng is None:
+        street = {"status": "unavailable", "month": None, "total": None, "categories": {},
+                  "btp_excluded": 0, "records": [], "url": "",
+                  "note": "Street-level crime not available: the postcode could not be resolved to coordinates."}
+    else:
+        month = _policeuk_latest_month()
+        url = f"https://data.police.uk/api/crimes-street/all-crime?lat={lat}&lng={lng}" + (
+            f"&date={month}" if month else "")
+        try:
+            status, crimes = _http_get_json(url, timeout=20)
+        except Exception as _e:
+            app.logger.warning("[crime] police.uk street fetch failed: %s", _e)
+            status, crimes = None, None
+        street = _ew_crime.street_block(status, crimes, month, url)
+    return _ew_crime.assemble(street, district, retrieved, max_records=MAX_CRIMES)
+
+
+def _maybe_refresh_crime(deal_id: str, area: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """CRIME-EVID-1 read-time refresh (England & Wales only).
+
+    Re-fetches area_json.crime when it predates CRIME-EVID-1 or police.uk has published
+    a newer month than the one stored, and persists it with an optimistic lock on
+    updated_at (same pattern as the Census enrichment). A refresh that comes back with
+    neither source available is NOT written (the stored block is kept). Attempts are
+    rate-limited per deal per worker (10 min) so repeated page loads never hammer
+    police.uk or Hetzner. Never raises.
+    """
+    try:
+        if not isinstance(area, dict) or not supabase:
+            return area
+        crime = area.get("crime")
+        if _is_scotland_lsoa(str(area.get("lsoa_gss") or "")) or (
+                isinstance(crime, dict) and str((crime.get("metrics") or {}).get("jurisdiction") or "").lower() == "scotland"):
+            return area
+        if not _ew_crime.is_stale(crime, _policeuk_latest_month()):
+            return area
+        _k = f"crimeref:{deal_id}"
+        if geo_cache_get(_k):
+            return area
+        geo_cache_set(_k, {"at": now_iso()})
+        fresh = get_crime_data(safe_float(area.get("lat")), safe_float(area.get("lng")),
+                               (str(area.get("area_code") or "").strip() or None))
+        if fresh.get("status") != "ok":
+            return area
+        _fm = fresh.get("metrics") or {}
+        if _fm.get("street_status") == "unavailable" or (_fm.get("district") or {}).get("transient"):
+            # police.uk fetch failed, or Hetzner/ew.crime_by_csp could not be read (transient):
+            # never persist — that would freeze "unavailable" until the next police.uk month.
+            # Serve the fresh block for this response only unless the stored one already holds
+            # real data from either source; the next view (after the 10-min guard) retries.
+            _sm = ((crime or {}).get("metrics") or {}) if isinstance(crime, dict) else {}
+            if not (_sm.get("schema") == _ew_crime.SCHEMA_VERSION and (
+                    _sm.get("street_status") == "ok" or (_sm.get("district") or {}).get("status") == "ok")):
+                area["crime"] = fresh
+            return area
+        _snap = supabase.table("deals").select("updated_at, area_json").eq("id", deal_id).limit(1).execute()
+        _rows = _snap.data or []
+        if not _rows or not isinstance(_rows[0].get("area_json"), dict):
+            return area
+        latest = _rows[0]["area_json"]
+        latest["crime"] = fresh
+        _q = supabase.table("deals").update({"area_json": _json_sanitize(latest), "updated_at": now_iso()}).eq("id", deal_id)
+        if _rows[0].get("updated_at"):
+            _q = _q.eq("updated_at", _rows[0]["updated_at"])
+        _res = _q.execute()
+        if not _res.data:
+            app.logger.info("[crime-refresh] deal=%s optimistic lock lost; will retry on a later view", deal_id)
+            area["crime"] = fresh  # serve fresh this response; persist on a later view
+            return area
+        app.logger.info("[crime-refresh] deal=%s street=%s district=%s month=%s", deal_id,
+                        fresh["metrics"]["street_status"], fresh["metrics"]["district"]["status"],
+                        fresh["metrics"]["month"])
+        return latest
+    except Exception as _e:
+        app.logger.warning("[crime-refresh] deal=%s failed: %s", deal_id, _e)
+        return area
 
 
 # ── Scotland crime (Slice A) ─────────────────────────────────────────────
@@ -4519,7 +4611,8 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                         "source": "ONS PRMS",
                     },
                     "crime": {
-                        "local_total":      int(crime_total),
+                        # CRIME-EVID-1: None (not 0) when police.uk returned no force records.
+                        "local_total":      (int(crime_total) if ((area_data.get("crime") or {}).get("metrics") or {}).get("total") is not None else None),
                         "local_rate_per_1000": None,   # removed: mismatched-geography rate (governance: no fake values)
                         "national_rate_per_1000": None,
                         "crime_index":      crime_index,
@@ -7108,7 +7201,7 @@ def market_insights():
             "housing": get_housing_data(postcode),
             "transport": get_transport_data(lat, lng),
             "amenities": get_amenities_data(lat, lng),
-            "crime": (get_scotland_crime_data(postcode) if _is_scotland_lsoa(lsoa_gss) else get_crime_data(lat, lng)),
+            "crime": (get_scotland_crime_data(postcode) if _is_scotland_lsoa(lsoa_gss) else get_crime_data(lat, lng, area_code)),
             "broadband": get_broadband_data(postcode),
             "gp": get_gp_data(postcode),
             "flood": (get_scotland_flood_data(lat, lng) if _is_scotland_lsoa(lsoa_gss) else get_flood_risk(lat, lng, postcode)),
@@ -8015,6 +8108,11 @@ def get_deal(deal_id: str):
                         app.logger.warning(f"[get_deal] deal={deal_id} stale processing ({int(_age)}s) — flipped to error")
             except Exception as _sce:
                 app.logger.warning(f"[get_deal] stale-check failed for {deal_id}: {_sce}")
+
+        # CRIME-EVID-1: Verdict and Deal Report read area_json from this endpoint, so the
+        # crime read-time refresh runs here too (never while an analysis is running).
+        if deal.get("status") != "processing" and isinstance(deal.get("area_json"), dict):
+            deal["area_json"] = _maybe_refresh_crime(deal_id, deal["area_json"])
 
         # ── SCOTLAND read-time self-heal ───────────────────────────────────────
         # A Scottish deal has no E&W ceiling. If its scotland block is missing,
@@ -11242,6 +11340,7 @@ def get_area(deal_id: str):
             return jsonify({"error": "Deal not found"}), 404
         area = result.data.get("area_json")
         area = _maybe_enrich_census_demographics(deal_id, area)
+        area = _maybe_refresh_crime(deal_id, area)
         area = _maybe_heal_live_blocks(area)
         return jsonify({
             "ok":       True,
@@ -11790,6 +11889,7 @@ def save_area(deal_id: str):
             # Auto-enrich Census demographics on cached fast-path too —
             # picks up legacy + partial-failure rows on first read.
             cached = _maybe_enrich_census_demographics(deal_id, cached)
+            cached = _maybe_refresh_crime(deal_id, cached)
             return jsonify({
                 "ok":       True,
                 "area":     cached,
@@ -12268,7 +12368,7 @@ def save_area(deal_id: str):
             _area_task_specs = [
                 ("housing",   get_housing_data,         [_postcode],              {"property_type": _prop_type_code, "guide_price": _guide_price_gbp, "subject_tenure_hint": _prop.get("tenure"), "subject_address": _prop.get("address"), "subject_internal_area": _subject_gia_listing or safe_float(_prop.get("internal_area"))}),
                 ("crime",     (get_scotland_crime_data if _is_scotland_lsoa(lsoa_gss) else get_crime_data),
-                              ([_postcode] if _is_scotland_lsoa(lsoa_gss) else [lat, lng]), {}),
+                              ([_postcode] if _is_scotland_lsoa(lsoa_gss) else [lat, lng, area_code]), {}),
                 ("transport", get_transport_data,       [lat, lng],               {}),
                 ("amenities", get_amenities_data,       [lat, lng],               {}),
                 ("schools",   (get_scotland_schools_data if _is_scotland_lsoa(lsoa_gss) else get_schools_data),

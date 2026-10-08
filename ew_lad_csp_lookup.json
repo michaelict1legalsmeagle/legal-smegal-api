@@ -1,0 +1,2339 @@
+{
+"source": "ONS Open Geography Portal — Local Authority District to Community Safety Partnership to PFA (December 2024) Lookup in EW",
+"url": "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/LAD24_CSP24_PFA24_EW_LU/FeatureServer/0",
+"dataset_page": "https://www.data.gov.uk/dataset/5cc891f8-784b-44bb-814f-b6725e2357f9/local-authority-district-to-community-safety-partnership-to-pfa-december-2024-lookup-in-ew",
+"captured": "2026-10-08",
+"fields": [
+"LAD24CD",
+"LAD24NM",
+"CSP24CD",
+"CSP24NM",
+"PFA24NM"
+],
+"rows": [
+[
+"E06000001",
+"Hartlepool",
+"E22000027",
+"Hartlepool",
+"Cleveland"
+],
+[
+"E06000002",
+"Middlesbrough",
+"E22000029",
+"Middlesbrough",
+"Cleveland"
+],
+[
+"E06000003",
+"Redcar and Cleveland",
+"E22000028",
+"Redcar and Cleveland",
+"Cleveland"
+],
+[
+"E06000004",
+"Stockton-on-Tees",
+"E22000030",
+"Stockton-on-Tees",
+"Cleveland"
+],
+[
+"E06000005",
+"Darlington",
+"E22000072",
+"Darlington",
+"Durham"
+],
+[
+"E06000006",
+"Halton",
+"E22000023",
+"Halton",
+"Cheshire"
+],
+[
+"E06000007",
+"Warrington",
+"E22000026",
+"Warrington",
+"Cheshire"
+],
+[
+"E06000008",
+"Blackburn with Darwen",
+"E22000150",
+"Blackburn with Darwen",
+"Lancashire"
+],
+[
+"E06000009",
+"Blackpool",
+"E22000151",
+"Blackpool",
+"Lancashire"
+],
+[
+"E06000010",
+"Kingston upon Hull, City of",
+"E22000134",
+"Kingston upon Hull, City of",
+"Humberside"
+],
+[
+"E06000011",
+"East Riding of Yorkshire",
+"E22000133",
+"East Riding of Yorkshire",
+"Humberside"
+],
+[
+"E06000012",
+"North East Lincolnshire",
+"E22000135",
+"North East Lincolnshire",
+"Humberside"
+],
+[
+"E06000013",
+"North Lincolnshire",
+"E22000136",
+"North Lincolnshire",
+"Humberside"
+],
+[
+"E06000014",
+"York",
+"E22000371",
+"City of York",
+"North Yorkshire"
+],
+[
+"E06000015",
+"Derby",
+"E22000040",
+"Derby",
+"Derbyshire"
+],
+[
+"E06000016",
+"Leicester",
+"E22000168",
+"Leicester",
+"Leicestershire"
+],
+[
+"E06000017",
+"Rutland",
+"E22000172",
+"Rutland",
+"Leicestershire"
+],
+[
+"E06000018",
+"Nottingham",
+"E22000257",
+"Nottingham",
+"Nottinghamshire"
+],
+[
+"E06000019",
+"Herefordshire, County of",
+"E22000326",
+"Herefordshire, County of",
+"West Mercia"
+],
+[
+"E06000020",
+"Telford and Wrekin",
+"E22000333",
+"Telford and Wrekin",
+"West Mercia"
+],
+[
+"E06000021",
+"Stoke-on-Trent",
+"E22000270",
+"Stoke-on-Trent",
+"Staffordshire"
+],
+[
+"E06000022",
+"Bath and North East Somerset",
+"E22000001",
+"Bath and North East Somerset",
+"Avon and Somerset"
+],
+[
+"E06000023",
+"Bristol, City of",
+"E22000002",
+"Bristol, City of",
+"Avon and Somerset"
+],
+[
+"E06000024",
+"North Somerset",
+"E22000003",
+"North Somerset",
+"Avon and Somerset"
+],
+[
+"E06000025",
+"South Gloucestershire",
+"E22000006",
+"South Gloucestershire",
+"Avon and Somerset"
+],
+[
+"E06000026",
+"Plymouth",
+"E22000056",
+"Plymouth",
+"Devon & Cornwall"
+],
+[
+"E06000027",
+"Torbay",
+"E22000060",
+"Torbay",
+"Devon & Cornwall"
+],
+[
+"E06000030",
+"Swindon",
+"E22000350",
+"Swindon",
+"Wiltshire"
+],
+[
+"E06000031",
+"Peterborough",
+"E22000017",
+"Peterborough",
+"Cambridgeshire"
+],
+[
+"E06000032",
+"Luton",
+"E22000010",
+"Luton",
+"Bedfordshire"
+],
+[
+"E06000033",
+"Southend-on-Sea",
+"E22000089",
+"Southend-on-Sea",
+"Essex"
+],
+[
+"E06000034",
+"Thurrock",
+"E22000091",
+"Thurrock",
+"Essex"
+],
+[
+"E06000035",
+"Medway",
+"E22000143",
+"Medway",
+"Kent"
+],
+[
+"E06000036",
+"Bracknell Forest",
+"E22000304",
+"Bracknell Forest",
+"Thames Valley"
+],
+[
+"E06000037",
+"West Berkshire",
+"E22000314",
+"West Berkshire",
+"Thames Valley"
+],
+[
+"E06000038",
+"Reading",
+"E22000309",
+"Reading",
+"Thames Valley"
+],
+[
+"E06000039",
+"Slough",
+"E22000310",
+"Slough",
+"Thames Valley"
+],
+[
+"E06000040",
+"Windsor and Maidenhead",
+"E22000316",
+"Windsor and Maidenhead",
+"Thames Valley"
+],
+[
+"E06000041",
+"Wokingham",
+"E22000317",
+"Wokingham",
+"Thames Valley"
+],
+[
+"E06000042",
+"Milton Keynes",
+"E22000307",
+"Milton Keynes",
+"Thames Valley"
+],
+[
+"E06000043",
+"Brighton and Hove",
+"E22000292",
+"Brighton and Hove",
+"Sussex"
+],
+[
+"E06000044",
+"Portsmouth",
+"E22000118",
+"Portsmouth",
+"Hampshire"
+],
+[
+"E06000045",
+"Southampton",
+"E22000120",
+"Southampton",
+"Hampshire"
+],
+[
+"E06000046",
+"Isle of Wight",
+"E22000116",
+"Isle of Wight",
+"Hampshire"
+],
+[
+"E06000047",
+"County Durham",
+"E22000365",
+"County Durham",
+"Durham"
+],
+[
+"E06000049",
+"Cheshire East",
+"E22000354",
+"Cheshire East",
+"Cheshire"
+],
+[
+"E06000050",
+"Cheshire West and Chester",
+"E22000355",
+"Cheshire West and Chester",
+"Cheshire"
+],
+[
+"E06000051",
+"Shropshire",
+"E22000360",
+"Shropshire",
+"West Mercia"
+],
+[
+"E06000052",
+"Cornwall",
+"E22000356",
+"Cornwall",
+"Devon & Cornwall"
+],
+[
+"E06000053",
+"Isles of Scilly",
+"E22000050",
+"Isles of Scilly",
+"Devon & Cornwall"
+],
+[
+"E06000054",
+"Wiltshire",
+"E22000361",
+"Wiltshire",
+"Wiltshire"
+],
+[
+"E06000055",
+"Bedford",
+"E22000009",
+"Bedford",
+"Bedfordshire"
+],
+[
+"E06000056",
+"Central Bedfordshire",
+"E22000353",
+"Central Bedfordshire",
+"Bedfordshire"
+],
+[
+"E06000057",
+"Northumberland",
+"E22000358",
+"Northumberland",
+"Northumbria"
+],
+[
+"E06000058",
+"Bournemouth, Christchurch and Poole",
+"E22000063",
+"Bournemouth",
+"Dorset"
+],
+[
+"E06000058",
+"Bournemouth, Christchurch and Poole",
+"E22000067",
+"Poole",
+"Dorset"
+],
+[
+"E06000058",
+"Bournemouth, Christchurch and Poole",
+"E22000367",
+"Dorset",
+"Dorset"
+],
+[
+"E06000059",
+"Dorset",
+"E22000367",
+"Dorset",
+"Dorset"
+],
+[
+"E06000060",
+"Buckinghamshire",
+"E22000303",
+"Aylesbury Vale",
+"Thames Valley"
+],
+[
+"E06000060",
+"Buckinghamshire",
+"E22000306",
+"Chiltern",
+"Thames Valley"
+],
+[
+"E06000060",
+"Buckinghamshire",
+"E22000311",
+"South Bucks",
+"Thames Valley"
+],
+[
+"E06000060",
+"Buckinghamshire",
+"E22000318",
+"Wycombe",
+"Thames Valley"
+],
+[
+"E06000061",
+"North Northamptonshire",
+"E22000233",
+"Corby",
+"Northamptonshire"
+],
+[
+"E06000061",
+"North Northamptonshire",
+"E22000235",
+"East Northamptonshire",
+"Northamptonshire"
+],
+[
+"E06000061",
+"North Northamptonshire",
+"E22000236",
+"Kettering",
+"Northamptonshire"
+],
+[
+"E06000061",
+"North Northamptonshire",
+"E22000239",
+"Wellingborough",
+"Northamptonshire"
+],
+[
+"E06000062",
+"West Northamptonshire",
+"E22000237",
+"Northampton",
+"Northamptonshire"
+],
+[
+"E06000062",
+"West Northamptonshire",
+"E22000357",
+"Daventry and South Northamptonshire",
+"Northamptonshire"
+],
+[
+"E06000063",
+"Cumberland",
+"E22000031",
+"Allerdale",
+"Cumbria"
+],
+[
+"E06000063",
+"Cumberland",
+"E22000033",
+"Carlisle",
+"Cumbria"
+],
+[
+"E06000063",
+"Cumberland",
+"E22000034",
+"Copeland",
+"Cumbria"
+],
+[
+"E06000064",
+"Westmorland and Furness",
+"E22000032",
+"Barrow-in-Furness",
+"Cumbria"
+],
+[
+"E06000064",
+"Westmorland and Furness",
+"E22000035",
+"Eden",
+"Cumbria"
+],
+[
+"E06000064",
+"Westmorland and Furness",
+"E22000036",
+"South Lakeland",
+"Cumbria"
+],
+[
+"E06000065",
+"North Yorkshire",
+"E22000372",
+"North Yorkshire",
+"North Yorkshire"
+],
+[
+"E06000066",
+"Somerset",
+"E22000369",
+"Somerset",
+"Avon and Somerset"
+],
+[
+"E07000008",
+"Cambridge",
+"E22000013",
+"Cambridge",
+"Cambridgeshire"
+],
+[
+"E07000009",
+"East Cambridgeshire",
+"E22000014",
+"East Cambridgeshire",
+"Cambridgeshire"
+],
+[
+"E07000010",
+"Fenland",
+"E22000015",
+"Fenland",
+"Cambridgeshire"
+],
+[
+"E07000011",
+"Huntingdonshire",
+"E22000016",
+"Huntingdonshire",
+"Cambridgeshire"
+],
+[
+"E07000012",
+"South Cambridgeshire",
+"E22000018",
+"South Cambridgeshire",
+"Cambridgeshire"
+],
+[
+"E07000032",
+"Amber Valley",
+"E22000037",
+"Amber Valley",
+"Derbyshire"
+],
+[
+"E07000033",
+"Bolsover",
+"E22000038",
+"Bolsover",
+"Derbyshire"
+],
+[
+"E07000034",
+"Chesterfield",
+"E22000039",
+"Chesterfield",
+"Derbyshire"
+],
+[
+"E07000035",
+"Derbyshire Dales",
+"E22000041",
+"Derbyshire Dales",
+"Derbyshire"
+],
+[
+"E07000036",
+"Erewash",
+"E22000042",
+"Erewash",
+"Derbyshire"
+],
+[
+"E07000037",
+"High Peak",
+"E22000043",
+"High Peak",
+"Derbyshire"
+],
+[
+"E07000038",
+"North East Derbyshire",
+"E22000044",
+"North East Derbyshire",
+"Derbyshire"
+],
+[
+"E07000039",
+"South Derbyshire",
+"E22000045",
+"South Derbyshire",
+"Derbyshire"
+],
+[
+"E07000040",
+"East Devon",
+"E22000362",
+"East and Mid Devon",
+"Devon & Cornwall"
+],
+[
+"E07000041",
+"Exeter",
+"E22000049",
+"Exeter",
+"Devon & Cornwall"
+],
+[
+"E07000042",
+"Mid Devon",
+"E22000362",
+"East and Mid Devon",
+"Devon & Cornwall"
+],
+[
+"E07000043",
+"North Devon",
+"E22000363",
+"North Devon",
+"Devon & Cornwall"
+],
+[
+"E07000044",
+"South Hams",
+"E22000364",
+"South Devon and Dartmoor",
+"Devon & Cornwall"
+],
+[
+"E07000045",
+"Teignbridge",
+"E22000364",
+"South Devon and Dartmoor",
+"Devon & Cornwall"
+],
+[
+"E07000046",
+"Torridge",
+"E22000363",
+"North Devon",
+"Devon & Cornwall"
+],
+[
+"E07000047",
+"West Devon",
+"E22000364",
+"South Devon and Dartmoor",
+"Devon & Cornwall"
+],
+[
+"E07000061",
+"Eastbourne",
+"E22000295",
+"Eastbourne",
+"Sussex"
+],
+[
+"E07000062",
+"Hastings",
+"E22000296",
+"Hastings",
+"Sussex"
+],
+[
+"E07000063",
+"Lewes",
+"E22000298",
+"Lewes",
+"Sussex"
+],
+[
+"E07000064",
+"Rother",
+"E22000300",
+"Rother",
+"Sussex"
+],
+[
+"E07000065",
+"Wealden",
+"E22000301",
+"Wealden",
+"Sussex"
+],
+[
+"E07000066",
+"Basildon",
+"E22000079",
+"Basildon",
+"Essex"
+],
+[
+"E07000067",
+"Braintree",
+"E22000080",
+"Braintree",
+"Essex"
+],
+[
+"E07000068",
+"Brentwood",
+"E22000081",
+"Brentwood",
+"Essex"
+],
+[
+"E07000069",
+"Castle Point",
+"E22000082",
+"Castle Point",
+"Essex"
+],
+[
+"E07000070",
+"Chelmsford",
+"E22000083",
+"Chelmsford",
+"Essex"
+],
+[
+"E07000071",
+"Colchester",
+"E22000084",
+"Colchester",
+"Essex"
+],
+[
+"E07000072",
+"Epping Forest",
+"E22000085",
+"Epping Forest",
+"Essex"
+],
+[
+"E07000073",
+"Harlow",
+"E22000086",
+"Harlow",
+"Essex"
+],
+[
+"E07000074",
+"Maldon",
+"E22000087",
+"Maldon",
+"Essex"
+],
+[
+"E07000075",
+"Rochford",
+"E22000088",
+"Rochford",
+"Essex"
+],
+[
+"E07000076",
+"Tendring",
+"E22000090",
+"Tendring",
+"Essex"
+],
+[
+"E07000077",
+"Uttlesford",
+"E22000092",
+"Uttlesford",
+"Essex"
+],
+[
+"E07000078",
+"Cheltenham",
+"E22000093",
+"Cheltenham",
+"Gloucestershire"
+],
+[
+"E07000079",
+"Cotswold",
+"E22000094",
+"Cotswold",
+"Gloucestershire"
+],
+[
+"E07000080",
+"Forest of Dean",
+"E22000095",
+"Forest of Dean",
+"Gloucestershire"
+],
+[
+"E07000081",
+"Gloucester",
+"E22000096",
+"Gloucester",
+"Gloucestershire"
+],
+[
+"E07000082",
+"Stroud",
+"E22000097",
+"Stroud",
+"Gloucestershire"
+],
+[
+"E07000083",
+"Tewkesbury",
+"E22000098",
+"Tewkesbury",
+"Gloucestershire"
+],
+[
+"E07000084",
+"Basingstoke and Deane",
+"E22000374",
+"North Hampshire",
+"Hampshire"
+],
+[
+"E07000085",
+"East Hampshire",
+"E22000110",
+"East Hampshire",
+"Hampshire"
+],
+[
+"E07000086",
+"Eastleigh",
+"E22000111",
+"Eastleigh",
+"Hampshire"
+],
+[
+"E07000087",
+"Fareham",
+"E22000112",
+"Fareham",
+"Hampshire"
+],
+[
+"E07000088",
+"Gosport",
+"E22000113",
+"Gosport",
+"Hampshire"
+],
+[
+"E07000089",
+"Hart",
+"E22000374",
+"North Hampshire",
+"Hampshire"
+],
+[
+"E07000090",
+"Havant",
+"E22000115",
+"Havant",
+"Hampshire"
+],
+[
+"E07000091",
+"New Forest",
+"E22000117",
+"New Forest",
+"Hampshire"
+],
+[
+"E07000092",
+"Rushmoor",
+"E22000374",
+"North Hampshire",
+"Hampshire"
+],
+[
+"E07000093",
+"Test Valley",
+"E22000121",
+"Test Valley",
+"Hampshire"
+],
+[
+"E07000094",
+"Winchester",
+"E22000122",
+"Winchester",
+"Hampshire"
+],
+[
+"E07000095",
+"Broxbourne",
+"E22000123",
+"Broxbourne",
+"Hertfordshire"
+],
+[
+"E07000096",
+"Dacorum",
+"E22000124",
+"Dacorum",
+"Hertfordshire"
+],
+[
+"E07000098",
+"Hertsmere",
+"E22000126",
+"Hertsmere",
+"Hertfordshire"
+],
+[
+"E07000099",
+"North Hertfordshire",
+"E22000127",
+"North Hertfordshire",
+"Hertfordshire"
+],
+[
+"E07000102",
+"Three Rivers",
+"E22000130",
+"Three Rivers",
+"Hertfordshire"
+],
+[
+"E07000103",
+"Watford",
+"E22000131",
+"Watford",
+"Hertfordshire"
+],
+[
+"E07000105",
+"Ashford",
+"E22000137",
+"Ashford",
+"Kent"
+],
+[
+"E07000106",
+"Canterbury",
+"E22000138",
+"Canterbury",
+"Kent"
+],
+[
+"E07000107",
+"Dartford",
+"E22000352",
+"Dartford and Gravesham",
+"Kent"
+],
+[
+"E07000108",
+"Dover",
+"E22000140",
+"Dover",
+"Kent"
+],
+[
+"E07000109",
+"Gravesham",
+"E22000352",
+"Dartford and Gravesham",
+"Kent"
+],
+[
+"E07000110",
+"Maidstone",
+"E22000142",
+"Maidstone",
+"Kent"
+],
+[
+"E07000111",
+"Sevenoaks",
+"E22000144",
+"Sevenoaks",
+"Kent"
+],
+[
+"E07000112",
+"Folkestone and Hythe",
+"E22000145",
+"Shepway",
+"Kent"
+],
+[
+"E07000113",
+"Swale",
+"E22000146",
+"Swale",
+"Kent"
+],
+[
+"E07000114",
+"Thanet",
+"E22000147",
+"Thanet",
+"Kent"
+],
+[
+"E07000115",
+"Tonbridge and Malling",
+"E22000148",
+"Tonbridge and Malling",
+"Kent"
+],
+[
+"E07000116",
+"Tunbridge Wells",
+"E22000149",
+"Tunbridge Wells",
+"Kent"
+],
+[
+"E07000117",
+"Burnley",
+"E22000152",
+"Burnley",
+"Lancashire"
+],
+[
+"E07000118",
+"Chorley",
+"E22000153",
+"Chorley",
+"Lancashire"
+],
+[
+"E07000119",
+"Fylde",
+"E22000154",
+"Fylde",
+"Lancashire"
+],
+[
+"E07000120",
+"Hyndburn",
+"E22000155",
+"Hyndburn",
+"Lancashire"
+],
+[
+"E07000121",
+"Lancaster",
+"E22000156",
+"Lancaster",
+"Lancashire"
+],
+[
+"E07000122",
+"Pendle",
+"E22000157",
+"Pendle",
+"Lancashire"
+],
+[
+"E07000123",
+"Preston",
+"E22000158",
+"Preston",
+"Lancashire"
+],
+[
+"E07000124",
+"Ribble Valley",
+"E22000159",
+"Ribble Valley",
+"Lancashire"
+],
+[
+"E07000125",
+"Rossendale",
+"E22000160",
+"Rossendale",
+"Lancashire"
+],
+[
+"E07000126",
+"South Ribble",
+"E22000161",
+"South Ribble",
+"Lancashire"
+],
+[
+"E07000127",
+"West Lancashire",
+"E22000162",
+"West Lancashire",
+"Lancashire"
+],
+[
+"E07000128",
+"Wyre",
+"E22000163",
+"Wyre",
+"Lancashire"
+],
+[
+"E07000129",
+"Blaby",
+"E22000164",
+"Blaby",
+"Leicestershire"
+],
+[
+"E07000130",
+"Charnwood",
+"E22000165",
+"Charnwood",
+"Leicestershire"
+],
+[
+"E07000131",
+"Harborough",
+"E22000166",
+"Harborough",
+"Leicestershire"
+],
+[
+"E07000132",
+"Hinckley and Bosworth",
+"E22000167",
+"Hinckley and Bosworth",
+"Leicestershire"
+],
+[
+"E07000133",
+"Melton",
+"E22000169",
+"Melton",
+"Leicestershire"
+],
+[
+"E07000134",
+"North West Leicestershire",
+"E22000170",
+"North West Leicestershire",
+"Leicestershire"
+],
+[
+"E07000135",
+"Oadby and Wigston",
+"E22000171",
+"Oadby and Wigston",
+"Leicestershire"
+],
+[
+"E07000136",
+"Boston",
+"E22000173",
+"Boston",
+"Lincolnshire"
+],
+[
+"E07000137",
+"East Lindsey",
+"E22000174",
+"East Lindsey",
+"Lincolnshire"
+],
+[
+"E07000138",
+"Lincoln",
+"E22000175",
+"Lincoln",
+"Lincolnshire"
+],
+[
+"E07000139",
+"North Kesteven",
+"E22000176",
+"North Kesteven",
+"Lincolnshire"
+],
+[
+"E07000140",
+"South Holland",
+"E22000177",
+"South Holland",
+"Lincolnshire"
+],
+[
+"E07000141",
+"South Kesteven",
+"E22000178",
+"South Kesteven",
+"Lincolnshire"
+],
+[
+"E07000142",
+"West Lindsey",
+"E22000179",
+"West Lindsey",
+"Lincolnshire"
+],
+[
+"E07000143",
+"Breckland",
+"E22000218",
+"Breckland",
+"Norfolk"
+],
+[
+"E07000144",
+"Broadland",
+"E22000219",
+"Broadland",
+"Norfolk"
+],
+[
+"E07000145",
+"Great Yarmouth",
+"E22000220",
+"Great Yarmouth",
+"Norfolk"
+],
+[
+"E07000146",
+"King's Lynn and West Norfolk",
+"E22000221",
+"King's Lynn and West Norfolk",
+"Norfolk"
+],
+[
+"E07000147",
+"North Norfolk",
+"E22000222",
+"North Norfolk",
+"Norfolk"
+],
+[
+"E07000148",
+"Norwich",
+"E22000223",
+"Norwich",
+"Norfolk"
+],
+[
+"E07000149",
+"South Norfolk",
+"E22000224",
+"South Norfolk",
+"Norfolk"
+],
+[
+"E07000170",
+"Ashfield",
+"E22000251",
+"Ashfield",
+"Nottinghamshire"
+],
+[
+"E07000171",
+"Bassetlaw",
+"E22000252",
+"Bassetlaw",
+"Nottinghamshire"
+],
+[
+"E07000172",
+"Broxtowe",
+"E22000366",
+"South Nottinghamshire",
+"Nottinghamshire"
+],
+[
+"E07000173",
+"Gedling",
+"E22000366",
+"South Nottinghamshire",
+"Nottinghamshire"
+],
+[
+"E07000174",
+"Mansfield",
+"E22000255",
+"Mansfield",
+"Nottinghamshire"
+],
+[
+"E07000175",
+"Newark and Sherwood",
+"E22000256",
+"Newark and Sherwood",
+"Nottinghamshire"
+],
+[
+"E07000176",
+"Rushcliffe",
+"E22000366",
+"South Nottinghamshire",
+"Nottinghamshire"
+],
+[
+"E07000177",
+"Cherwell",
+"E22000305",
+"Cherwell",
+"Thames Valley"
+],
+[
+"E07000178",
+"Oxford",
+"E22000308",
+"Oxford",
+"Thames Valley"
+],
+[
+"E07000179",
+"South Oxfordshire",
+"E22000312",
+"South Oxfordshire",
+"Thames Valley"
+],
+[
+"E07000180",
+"Vale of White Horse",
+"E22000313",
+"Vale of White Horse",
+"Thames Valley"
+],
+[
+"E07000181",
+"West Oxfordshire",
+"E22000315",
+"West Oxfordshire",
+"Thames Valley"
+],
+[
+"E07000192",
+"Cannock Chase",
+"E22000263",
+"Cannock Chase",
+"Staffordshire"
+],
+[
+"E07000193",
+"East Staffordshire",
+"E22000264",
+"East Staffordshire",
+"Staffordshire"
+],
+[
+"E07000194",
+"Lichfield",
+"E22000265",
+"Lichfield",
+"Staffordshire"
+],
+[
+"E07000195",
+"Newcastle-under-Lyme",
+"E22000266",
+"Newcastle-under-Lyme",
+"Staffordshire"
+],
+[
+"E07000196",
+"South Staffordshire",
+"E22000267",
+"South Staffordshire",
+"Staffordshire"
+],
+[
+"E07000197",
+"Stafford",
+"E22000268",
+"Stafford",
+"Staffordshire"
+],
+[
+"E07000198",
+"Staffordshire Moorlands",
+"E22000269",
+"Staffordshire Moorlands",
+"Staffordshire"
+],
+[
+"E07000199",
+"Tamworth",
+"E22000271",
+"Tamworth",
+"Staffordshire"
+],
+[
+"E07000200",
+"Babergh",
+"E22000373",
+"Western Suffolk",
+"Suffolk"
+],
+[
+"E07000202",
+"Ipswich",
+"E22000273",
+"Ipswich",
+"Suffolk"
+],
+[
+"E07000203",
+"Mid Suffolk",
+"E22000373",
+"Western Suffolk",
+"Suffolk"
+],
+[
+"E07000207",
+"Elmbridge",
+"E22000279",
+"Elmbridge",
+"Surrey"
+],
+[
+"E07000208",
+"Epsom and Ewell",
+"E22000280",
+"Epsom and Ewell",
+"Surrey"
+],
+[
+"E07000209",
+"Guildford",
+"E22000281",
+"Guildford",
+"Surrey"
+],
+[
+"E07000210",
+"Mole Valley",
+"E22000282",
+"Mole Valley",
+"Surrey"
+],
+[
+"E07000211",
+"Reigate and Banstead",
+"E22000283",
+"Reigate and Banstead",
+"Surrey"
+],
+[
+"E07000212",
+"Runnymede",
+"E22000284",
+"Runnymede",
+"Surrey"
+],
+[
+"E07000213",
+"Spelthorne",
+"E22000285",
+"Spelthorne",
+"Surrey"
+],
+[
+"E07000214",
+"Surrey Heath",
+"E22000286",
+"Surrey Heath",
+"Surrey"
+],
+[
+"E07000215",
+"Tandridge",
+"E22000287",
+"Tandridge",
+"Surrey"
+],
+[
+"E07000216",
+"Waverley",
+"E22000288",
+"Waverley",
+"Surrey"
+],
+[
+"E07000217",
+"Woking",
+"E22000289",
+"Woking",
+"Surrey"
+],
+[
+"E07000218",
+"North Warwickshire",
+"E22000319",
+"North Warwickshire",
+"Warwickshire"
+],
+[
+"E07000219",
+"Nuneaton and Bedworth",
+"E22000320",
+"Nuneaton and Bedworth",
+"Warwickshire"
+],
+[
+"E07000220",
+"Rugby",
+"E22000321",
+"Rugby",
+"Warwickshire"
+],
+[
+"E07000221",
+"Stratford-on-Avon",
+"E22000359",
+"South Warwickshire",
+"Warwickshire"
+],
+[
+"E07000222",
+"Warwick",
+"E22000359",
+"South Warwickshire",
+"Warwickshire"
+],
+[
+"E07000223",
+"Adur",
+"E22000290",
+"Adur",
+"Sussex"
+],
+[
+"E07000224",
+"Arun",
+"E22000291",
+"Arun",
+"Sussex"
+],
+[
+"E07000225",
+"Chichester",
+"E22000293",
+"Chichester",
+"Sussex"
+],
+[
+"E07000226",
+"Crawley",
+"E22000294",
+"Crawley",
+"Sussex"
+],
+[
+"E07000227",
+"Horsham",
+"E22000297",
+"Horsham",
+"Sussex"
+],
+[
+"E07000228",
+"Mid Sussex",
+"E22000299",
+"Mid Sussex",
+"Sussex"
+],
+[
+"E07000229",
+"Worthing",
+"E22000302",
+"Worthing",
+"Sussex"
+],
+[
+"E07000234",
+"Bromsgrove",
+"E22000368",
+"North Worcestershire",
+"West Mercia"
+],
+[
+"E07000235",
+"Malvern Hills",
+"E22000332",
+"South Worcester",
+"West Mercia"
+],
+[
+"E07000236",
+"Redditch",
+"E22000368",
+"North Worcestershire",
+"West Mercia"
+],
+[
+"E07000237",
+"Worcester",
+"E22000332",
+"South Worcester",
+"West Mercia"
+],
+[
+"E07000238",
+"Wychavon",
+"E22000332",
+"South Worcester",
+"West Mercia"
+],
+[
+"E07000239",
+"Wyre Forest",
+"E22000368",
+"North Worcestershire",
+"West Mercia"
+],
+[
+"E07000240",
+"St Albans",
+"E22000128",
+"St Albans",
+"Hertfordshire"
+],
+[
+"E07000241",
+"Welwyn Hatfield",
+"E22000132",
+"Welwyn Hatfield",
+"Hertfordshire"
+],
+[
+"E07000242",
+"East Hertfordshire",
+"E22000125",
+"East Hertfordshire",
+"Hertfordshire"
+],
+[
+"E07000243",
+"Stevenage",
+"E22000129",
+"Stevenage",
+"Hertfordshire"
+],
+[
+"E07000244",
+"East Suffolk",
+"E22000274",
+"Suffolk Coastal",
+"Suffolk"
+],
+[
+"E07000244",
+"East Suffolk",
+"E22000278",
+"Waveney",
+"Suffolk"
+],
+[
+"E07000245",
+"West Suffolk",
+"E22000373",
+"Western Suffolk",
+"Suffolk"
+],
+[
+"E08000001",
+"Bolton",
+"E22000099",
+"Bolton",
+"Greater Manchester"
+],
+[
+"E08000002",
+"Bury",
+"E22000100",
+"Bury",
+"Greater Manchester"
+],
+[
+"E08000003",
+"Manchester",
+"E22000101",
+"Manchester",
+"Greater Manchester"
+],
+[
+"E08000004",
+"Oldham",
+"E22000102",
+"Oldham",
+"Greater Manchester"
+],
+[
+"E08000005",
+"Rochdale",
+"E22000103",
+"Rochdale",
+"Greater Manchester"
+],
+[
+"E08000006",
+"Salford",
+"E22000104",
+"Salford",
+"Greater Manchester"
+],
+[
+"E08000007",
+"Stockport",
+"E22000105",
+"Stockport",
+"Greater Manchester"
+],
+[
+"E08000008",
+"Tameside",
+"E22000106",
+"Tameside",
+"Greater Manchester"
+],
+[
+"E08000009",
+"Trafford",
+"E22000107",
+"Trafford",
+"Greater Manchester"
+],
+[
+"E08000010",
+"Wigan",
+"E22000108",
+"Wigan",
+"Greater Manchester"
+],
+[
+"E08000011",
+"Knowsley",
+"E22000181",
+"Knowsley",
+"Merseyside"
+],
+[
+"E08000012",
+"Liverpool",
+"E22000182",
+"Liverpool",
+"Merseyside"
+],
+[
+"E08000013",
+"St. Helens",
+"E22000184",
+"St. Helens",
+"Merseyside"
+],
+[
+"E08000014",
+"Sefton",
+"E22000183",
+"Sefton",
+"Merseyside"
+],
+[
+"E08000015",
+"Wirral",
+"E22000185",
+"Wirral",
+"Merseyside"
+],
+[
+"E08000016",
+"Barnsley",
+"E22000259",
+"Barnsley",
+"South Yorkshire"
+],
+[
+"E08000017",
+"Doncaster",
+"E22000260",
+"Doncaster",
+"South Yorkshire"
+],
+[
+"E08000018",
+"Rotherham",
+"E22000261",
+"Rotherham",
+"South Yorkshire"
+],
+[
+"E08000019",
+"Sheffield",
+"E22000262",
+"Sheffield",
+"South Yorkshire"
+],
+[
+"E08000021",
+"Newcastle upon Tyne",
+"E22000245",
+"Newcastle upon Tyne",
+"Northumbria"
+],
+[
+"E08000022",
+"North Tyneside",
+"E22000246",
+"North Tyneside",
+"Northumbria"
+],
+[
+"E08000023",
+"South Tyneside",
+"E22000247",
+"South Tyneside",
+"Northumbria"
+],
+[
+"E08000024",
+"Sunderland",
+"E22000248",
+"Sunderland",
+"Northumbria"
+],
+[
+"E08000025",
+"Birmingham",
+"E22000335",
+"Birmingham",
+"West Midlands"
+],
+[
+"E08000026",
+"Coventry",
+"E22000336",
+"Coventry",
+"West Midlands"
+],
+[
+"E08000027",
+"Dudley",
+"E22000337",
+"Dudley",
+"West Midlands"
+],
+[
+"E08000028",
+"Sandwell",
+"E22000338",
+"Sandwell",
+"West Midlands"
+],
+[
+"E08000029",
+"Solihull",
+"E22000339",
+"Solihull",
+"West Midlands"
+],
+[
+"E08000030",
+"Walsall",
+"E22000340",
+"Walsall",
+"West Midlands"
+],
+[
+"E08000031",
+"Wolverhampton",
+"E22000341",
+"Wolverhampton",
+"West Midlands"
+],
+[
+"E08000032",
+"Bradford",
+"E22000342",
+"Bradford",
+"West Yorkshire"
+],
+[
+"E08000033",
+"Calderdale",
+"E22000343",
+"Calderdale",
+"West Yorkshire"
+],
+[
+"E08000034",
+"Kirklees",
+"E22000344",
+"Kirklees",
+"West Yorkshire"
+],
+[
+"E08000035",
+"Leeds",
+"E22000345",
+"Leeds",
+"West Yorkshire"
+],
+[
+"E08000036",
+"Wakefield",
+"E22000346",
+"Wakefield",
+"West Yorkshire"
+],
+[
+"E08000037",
+"Gateshead",
+"E22000244",
+"Gateshead",
+"Northumbria"
+],
+[
+"E09000001",
+"City of London",
+"E22000180",
+"City of London",
+"London, City of"
+],
+[
+"E09000002",
+"Barking and Dagenham",
+"E22000186",
+"Barking and Dagenham",
+"Metropolitan Police"
+],
+[
+"E09000003",
+"Barnet",
+"E22000187",
+"Barnet",
+"Metropolitan Police"
+],
+[
+"E09000004",
+"Bexley",
+"E22000188",
+"Bexley",
+"Metropolitan Police"
+],
+[
+"E09000005",
+"Brent",
+"E22000189",
+"Brent",
+"Metropolitan Police"
+],
+[
+"E09000006",
+"Bromley",
+"E22000190",
+"Bromley",
+"Metropolitan Police"
+],
+[
+"E09000007",
+"Camden",
+"E22000191",
+"Camden",
+"Metropolitan Police"
+],
+[
+"E09000008",
+"Croydon",
+"E22000193",
+"Croydon",
+"Metropolitan Police"
+],
+[
+"E09000009",
+"Ealing",
+"E22000194",
+"Ealing",
+"Metropolitan Police"
+],
+[
+"E09000010",
+"Enfield",
+"E22000195",
+"Enfield",
+"Metropolitan Police"
+],
+[
+"E09000011",
+"Greenwich",
+"E22000196",
+"Greenwich",
+"Metropolitan Police"
+],
+[
+"E09000012",
+"Hackney",
+"E22000197",
+"Hackney",
+"Metropolitan Police"
+],
+[
+"E09000013",
+"Hammersmith and Fulham",
+"E22000198",
+"Hammersmith and Fulham",
+"Metropolitan Police"
+],
+[
+"E09000014",
+"Haringey",
+"E22000199",
+"Haringey",
+"Metropolitan Police"
+],
+[
+"E09000015",
+"Harrow",
+"E22000200",
+"Harrow",
+"Metropolitan Police"
+],
+[
+"E09000016",
+"Havering",
+"E22000201",
+"Havering",
+"Metropolitan Police"
+],
+[
+"E09000017",
+"Hillingdon",
+"E22000202",
+"Hillingdon",
+"Metropolitan Police"
+],
+[
+"E09000018",
+"Hounslow",
+"E22000203",
+"Hounslow",
+"Metropolitan Police"
+],
+[
+"E09000019",
+"Islington",
+"E22000204",
+"Islington",
+"Metropolitan Police"
+],
+[
+"E09000020",
+"Kensington and Chelsea",
+"E22000205",
+"Kensington and Chelsea",
+"Metropolitan Police"
+],
+[
+"E09000021",
+"Kingston upon Thames",
+"E22000206",
+"Kingston upon Thames",
+"Metropolitan Police"
+],
+[
+"E09000022",
+"Lambeth",
+"E22000207",
+"Lambeth",
+"Metropolitan Police"
+],
+[
+"E09000023",
+"Lewisham",
+"E22000208",
+"Lewisham",
+"Metropolitan Police"
+],
+[
+"E09000024",
+"Merton",
+"E22000209",
+"Merton",
+"Metropolitan Police"
+],
+[
+"E09000025",
+"Newham",
+"E22000210",
+"Newham",
+"Metropolitan Police"
+],
+[
+"E09000026",
+"Redbridge",
+"E22000211",
+"Redbridge",
+"Metropolitan Police"
+],
+[
+"E09000027",
+"Richmond upon Thames",
+"E22000212",
+"Richmond upon Thames",
+"Metropolitan Police"
+],
+[
+"E09000028",
+"Southwark",
+"E22000213",
+"Southwark",
+"Metropolitan Police"
+],
+[
+"E09000029",
+"Sutton",
+"E22000214",
+"Sutton",
+"Metropolitan Police"
+],
+[
+"E09000030",
+"Tower Hamlets",
+"E22000215",
+"Tower Hamlets",
+"Metropolitan Police"
+],
+[
+"E09000031",
+"Waltham Forest",
+"E22000216",
+"Waltham Forest",
+"Metropolitan Police"
+],
+[
+"E09000032",
+"Wandsworth",
+"E22000217",
+"Wandsworth",
+"Metropolitan Police"
+],
+[
+"E09000033",
+"Westminster",
+"E22000192",
+"Westminster",
+"Metropolitan Police"
+],
+[
+"W06000001",
+"Isle of Anglesey",
+"W14000001",
+"Isle of Anglesey",
+"North Wales"
+],
+[
+"W06000002",
+"Gwynedd",
+"W14000002",
+"Gwynedd",
+"North Wales"
+],
+[
+"W06000003",
+"Conwy",
+"W14000003",
+"Conwy",
+"North Wales"
+],
+[
+"W06000004",
+"Denbighshire",
+"W14000004",
+"Denbighshire",
+"North Wales"
+],
+[
+"W06000005",
+"Flintshire",
+"W14000005",
+"Flintshire",
+"North Wales"
+],
+[
+"W06000006",
+"Wrexham",
+"W14000006",
+"Wrexham",
+"North Wales"
+],
+[
+"W06000008",
+"Ceredigion",
+"W14000008",
+"Ceredigion",
+"Dyfed-Powys"
+],
+[
+"W06000009",
+"Pembrokeshire",
+"W14000009",
+"Pembrokeshire",
+"Dyfed-Powys"
+],
+[
+"W06000010",
+"Carmarthenshire",
+"W14000010",
+"Carmarthenshire",
+"Dyfed-Powys"
+],
+[
+"W06000011",
+"Swansea",
+"W14000011",
+"Swansea",
+"South Wales"
+],
+[
+"W06000012",
+"Neath Port Talbot",
+"W14000012",
+"Neath Port Talbot",
+"South Wales"
+],
+[
+"W06000013",
+"Bridgend",
+"W14000013",
+"Bridgend",
+"South Wales"
+],
+[
+"W06000014",
+"Vale of Glamorgan",
+"W14000014",
+"Vale of Glamorgan",
+"South Wales"
+],
+[
+"W06000015",
+"Cardiff",
+"W14000015",
+"Cardiff",
+"South Wales"
+],
+[
+"W06000016",
+"Rhondda Cynon Taf",
+"W14000023",
+"Cwm Taf",
+"South Wales"
+],
+[
+"W06000018",
+"Caerphilly",
+"W14000018",
+"Caerphilly",
+"Gwent"
+],
+[
+"W06000019",
+"Blaenau Gwent",
+"W14000019",
+"Blaenau Gwent",
+"Gwent"
+],
+[
+"W06000020",
+"Torfaen",
+"W14000020",
+"Torfaen",
+"Gwent"
+],
+[
+"W06000021",
+"Monmouthshire",
+"W14000021",
+"Monmouthshire",
+"Gwent"
+],
+[
+"W06000022",
+"Newport",
+"W14000022",
+"Newport",
+"Gwent"
+],
+[
+"W06000023",
+"Powys",
+"W14000007",
+"Powys",
+"Dyfed-Powys"
+],
+[
+"W06000024",
+"Merthyr Tydfil",
+"W14000023",
+"Cwm Taf",
+"South Wales"
+]
+]
+}

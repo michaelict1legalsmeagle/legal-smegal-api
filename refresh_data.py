@@ -517,6 +517,40 @@ def backfill_price_paid(years: list):
 
 
 # ── MATERIALIZED VIEW ─────────────────────────────────────────────────────────
+def refresh_crime_csp():
+    """CRIME-EVID-1: reload ew.crime_by_csp (Hetzner) when gov.uk has published a newer
+    Home Office CSP file than the one loaded. Cheap no-op otherwise. Isolated: a failure
+    here is logged and never stops the other refreshes."""
+    try:
+        import ew_crime
+        import load_crime_by_csp
+        page = requests.get(ew_crime.DATASET_PAGE, timeout=60)
+        page.raise_for_status()
+        found = ew_crime.latest_csp_file_url(page.text)
+        if not found:
+            log.warning("[crime-csp] no CSP .ods link found on the gov.uk dataset page — skipped")
+            return
+        url, name = found
+        with _get_hetzner_conn() as conn:
+            row = conn.execute("SELECT 1 AS hit FROM ew.crime_by_csp WHERE source_file = %s LIMIT 1",
+                               (name,)).fetchone()
+        if row:
+            log.info(f"[crime-csp] already loaded: {name}")
+            return
+        path, name = load_crime_by_csp.download_latest(log.info)
+        try:
+            parsed = ew_crime.parse_csp_ods(path)
+            with _get_hetzner_conn() as conn:
+                load_crime_by_csp.load_parsed(conn, parsed, name, log.info)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    except Exception as e:
+        log.exception(f"[crime-csp] refresh failed (other refreshes unaffected): {e}")
+
+
 def refresh_materialized_view():
     """No-op — price_paid_geo matview not used by API. Kept for backfill compatibility."""
     log.info("Materialized view refresh skipped — API queries price_paid_raw_2025 directly.")
@@ -582,6 +616,11 @@ if __name__ == "__main__":
         log.info("Schools-only refresh triggered manually")
         refresh_schools()
         log.info("Schools refresh complete")
+    elif "--crime" in args:
+        # Manual crime-only refresh: python refresh_data.py --crime
+        log.info("Crime (Home Office CSP) refresh triggered manually")
+        refresh_crime_csp()
+        log.info("Crime refresh complete")
     elif "--prms" in args:
         # Manual PRMS-only refresh: python refresh_data.py --prms
         log.info("PRMS-only refresh triggered manually")
@@ -593,6 +632,7 @@ if __name__ == "__main__":
         refresh_prms()
         refresh_price_paid()
         refresh_materialized_view()
+        refresh_crime_csp()   # CRIME-EVID-1: loads only when gov.uk publishes a newer file
         month = datetime.utcnow().month
         if month in (1, 4, 9):
             refresh_schools()
