@@ -40,6 +40,7 @@ from processing_staleness import seconds_since as _ps_seconds_since, \
 # CRIME-EVID-1: two-source England & Wales crime (police.uk street + Home Office district).
 # Module-level so a missing module/lookup fails the deploy loudly, never silently.
 import ew_crime as _ew_crime
+import ew_flood as _ew_flood
 from pathlib import Path
 import jwt as pyjwt
 import io
@@ -2942,6 +2943,85 @@ def _maybe_refresh_crime(deal_id: str, area: Optional[Dict[str, Any]]) -> Option
         return area
 
 
+def _amenities_is_current(block: Any) -> bool:
+    """Amenities built from the local osm.poi table (get_amenities_data since Sep 2026).
+    Older Overpass-era blocks - including false 'ok' blocks with nothing in them - are not."""
+    if not isinstance(block, dict) or block.get("status") != "ok":
+        return False
+    return any((s or {}).get("label") == "OpenStreetMap POIs (local)" for s in (block.get("sources") or []))
+
+
+def _maybe_refresh_flood_amenities(deal_id: str, area: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """FLOOD-EVID-1 read-time refresh (England & Wales only).
+
+    flood:     re-fetched when the stored block predates FLOOD-EVID-1 (those came from the
+               wrong EA dataset and showed Zone 1 everywhere) or is not ok.
+    amenities: re-built from the local osm.poi table when the stored block predates it
+               (Overpass era) or is not ok.
+    Good results are persisted once with an optimistic lock on updated_at (same pattern as
+    the crime and Census refreshes). A transient failure is served for this response only
+    and never written. A pre-FLOOD-EVID-1 flood block is never served as a zone: if the
+    re-check fails it is replaced in the response by the honest 'unavailable' block.
+    Rate-limited per deal per worker (10 min). Never raises."""
+    try:
+        if not isinstance(area, dict) or not supabase:
+            return area
+        if _is_scotland_lsoa(str(area.get("lsoa_gss") or "")):
+            return area
+        crime = area.get("crime")
+        if isinstance(crime, dict) and str((crime.get("metrics") or {}).get("jurisdiction") or "").lower() == "scotland":
+            return area
+        need_flood = not _ew_flood.is_current(area.get("flood"))
+        need_amen = not _amenities_is_current(area.get("amenities"))
+        if not (need_flood or need_amen):
+            return area
+        lat, lng = safe_float(area.get("lat")), safe_float(area.get("lng"))
+        _k = f"floodamenref:{deal_id}"
+        if geo_cache_get(_k):
+            if need_flood and isinstance(area.get("flood"), dict) and \
+                    (area["flood"].get("metrics") or {}).get("schema") != _ew_flood.SCHEMA_VERSION:
+                area["flood"] = _ew_flood.pending_recheck(now_iso())
+            return area
+        geo_cache_set(_k, {"at": now_iso()})
+        fresh: Dict[str, Any] = {}
+        if need_flood:
+            fresh["flood"] = get_flood_risk(lat, lng, str(area.get("postcode") or ""))
+        if need_amen and lat is not None and lng is not None:
+            try:
+                fresh["amenities"] = get_amenities_data(lat, lng)
+            except Exception as _ae:
+                app.logger.warning("[area-refresh] deal=%s amenities rebuild failed: %s", deal_id, _ae)
+        # Serve fresh flood even when unavailable (the old block is wrong); serve fresh
+        # amenities only when they are a real current result.
+        for k, v in fresh.items():
+            if k == "flood" or _amenities_is_current(v):
+                area[k] = v
+        persist = {k: v for k, v in fresh.items()
+                   if (k == "flood" and _ew_flood.is_current(v)) or (k == "amenities" and _amenities_is_current(v))}
+        if not persist:
+            return area
+        _snap = supabase.table("deals").select("updated_at, area_json").eq("id", deal_id).limit(1).execute()
+        _rows = _snap.data or []
+        if not _rows or not isinstance(_rows[0].get("area_json"), dict):
+            return area
+        latest = _rows[0]["area_json"]
+        latest.update(persist)
+        _q = supabase.table("deals").update({"area_json": _json_sanitize(latest), "updated_at": now_iso()}).eq("id", deal_id)
+        if _rows[0].get("updated_at"):
+            _q = _q.eq("updated_at", _rows[0]["updated_at"])
+        _res = _q.execute()
+        if not _res.data:
+            app.logger.info("[area-refresh] deal=%s optimistic lock lost; will retry on a later view", deal_id)
+            return area
+        app.logger.info("[area-refresh] deal=%s flood=%s amenities=%s", deal_id,
+                        (persist.get("flood") or {}).get("metrics", {}).get("flood_zone", "-"),
+                        ((persist.get("amenities") or {}).get("metrics") or {}).get("total", "-"))
+        return latest
+    except Exception as _e:
+        app.logger.warning("[area-refresh] deal=%s failed: %s", deal_id, _e)
+        return area
+
+
 # ── Scotland crime (Slice A) ─────────────────────────────────────────────
 # Ward-level Police Scotland crime for Scottish deals. Resolves postcode -> multi-member
 # ward via postcodes.io (codes.admin_ward), reads scotland.crime_by_area (Hetzner) via the
@@ -4817,68 +4897,28 @@ def get_planning_data(lat: Optional[float], lng: Optional[float], postcode: str 
 
 
 def get_flood_risk(lat: Optional[float], lng: Optional[float], postcode: str = "") -> Dict[str, Any]:
-    """
-    Environment Agency Flood Map for Planning API — free, no key required.
-    Returns flood risk zone (1=low, 2=medium, 3=high) for given coordinates.
-    Zone 1: <0.1% annual probability. Zone 2: 0.1-1%. Zone 3: >1%.
-    """
+    """FLOOD-EVID-1 (9 Oct 2026): England flood zone from the Environment Agency's official
+    Flood Map for Planning - Flood Zones (OGC API - Features, OGL v3.0): exact
+    point-in-polygon at the deal's point. Replaces the flood-monitoring floodAreas call,
+    which returned flood ALERT/WARNING areas (no zone) and so labelled every deal Zone 1.
+    Pure logic lives in ew_flood.py (unit-tested). A failed or incomplete answer is
+    'unavailable' with metrics.transient=True and is never persisted by the read-time
+    refresh; it is never turned into a zone."""
     retrieved = now_iso()
-    sources = [{"label": "Environment Agency Flood Map", "url": "https://environment.data.gov.uk/flood-monitoring/"}]
-
     if lat is None or lng is None:
-        return metric_unavailable("Flood risk data not available: coordinates not resolved.", sources, retrieved)
-
-    try:
-        # EA Flood Zone endpoint — returns flood zone polygons containing the point
-        url = f"https://environment.data.gov.uk/flood-monitoring/id/floodAreas?lat={lat}&long={lng}&dist=0.5"
-        # LATENCY BOUND (2026-09-16): was timeout=10 and hit it live (flood=10.18s,
-        # H2-TIMING). A healthy EA response returns in <2s; 6s still tolerates a
-        # slow response but caps the wait. Env-tunable. On timeout the existing
-        # except-branch degrades to graceful unavailable, so this cannot break it.
-        status, payload = _http_get_json(url, timeout=float(os.getenv("FLOOD_TIMEOUT", "6")))
-
-        if status == 200 and isinstance(payload, dict):
-            items = payload.get("items") or []
-            if isinstance(items, list) and len(items) > 0:
-                # Find highest risk zone
-                zones = []
-                for item in items:
-                    label = str(item.get("label","") or item.get("notation","") or "")
-                    if "3" in label or "high" in label.lower():
-                        zones.append(3)
-                    elif "2" in label or "medium" in label.lower():
-                        zones.append(2)
-                    elif "1" in label or "low" in label.lower():
-                        zones.append(1)
-                max_zone = max(zones) if zones else 1
-                zone_desc = {
-                    1: "Zone 1 — annual flood probability below 0.1%. Minimal insurance impact.",
-                    2: "Zone 2 — annual flood probability 0.1%–1%. Standard flood insurance recommended.",
-                    3: "Zone 3 — annual flood probability above 1%. Significant insurance cost implications. May affect mortgage availability."
-                }.get(max_zone, "Zone 1")
-                out = metric_ok(
-                    zone_desc,
-                    [{"zone": max_zone, "areas": len(items)}],
-                    sources, retrieved, 0.9
-                )
-                out["metrics"] = {"zone": max_zone, "flood_areas": len(items)}
-                return out
-            else:
-                # No flood areas — Zone 1 (minimal risk)
-                out = metric_ok(
-                    "Zone 1 — no flood risk areas recorded at this location. Annual probability below 0.1%.",
-                    [{"zone": 1, "areas": 0}],
-                    sources, retrieved, 0.85
-                )
-                out["metrics"] = {"zone": 1, "flood_areas": 0}
-                return out
-    except Exception as e:
-        print(f"[WARN] Flood risk fetch failed for {lat},{lng}: {e}")
-
-    return metric_unavailable(
-        f"Flood risk data temporarily unavailable. Verify via Environment Agency Flood Map before bidding.",
-        sources, retrieved
-    )
+        return _ew_flood.no_coordinates(retrieved)
+    params = _ew_flood.query_params(lat, lng)
+    timeout = float(os.getenv("FLOOD_TIMEOUT", "10"))
+    status, payload = None, None
+    for _attempt in range(2):          # one retry on a timeout / non-200
+        try:
+            status, payload = _http_get_json(_ew_flood.ITEMS_URL, params=params, timeout=timeout)
+            if status == 200:
+                break
+        except Exception as e:
+            print(f"[WARN] Flood zone fetch failed for {lat},{lng} (attempt {_attempt + 1}): {e}")
+            status, payload = None, None
+    return _ew_flood.flood_block(status, payload, lat, lng, retrieved, _ew_flood.ITEMS_URL)
 
 
 def _haversine_km(la1: float, lo1: float, la2: float, lo2: float) -> float:
@@ -8113,6 +8153,7 @@ def get_deal(deal_id: str):
         # crime read-time refresh runs here too (never while an analysis is running).
         if deal.get("status") != "processing" and isinstance(deal.get("area_json"), dict):
             deal["area_json"] = _maybe_refresh_crime(deal_id, deal["area_json"])
+            deal["area_json"] = _maybe_refresh_flood_amenities(deal_id, deal["area_json"])
 
         # ── SCOTLAND read-time self-heal ───────────────────────────────────────
         # A Scottish deal has no E&W ceiling. If its scotland block is missing,
@@ -11341,6 +11382,7 @@ def get_area(deal_id: str):
         area = result.data.get("area_json")
         area = _maybe_enrich_census_demographics(deal_id, area)
         area = _maybe_refresh_crime(deal_id, area)
+        area = _maybe_refresh_flood_amenities(deal_id, area)
         area = _maybe_heal_live_blocks(area)
         return jsonify({
             "ok":       True,
@@ -11890,6 +11932,7 @@ def save_area(deal_id: str):
             # picks up legacy + partial-failure rows on first read.
             cached = _maybe_enrich_census_demographics(deal_id, cached)
             cached = _maybe_refresh_crime(deal_id, cached)
+            cached = _maybe_refresh_flood_amenities(deal_id, cached)
             return jsonify({
                 "ok":       True,
                 "area":     cached,
