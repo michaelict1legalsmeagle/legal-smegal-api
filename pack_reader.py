@@ -30,6 +30,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from flag_evidence import (FLAG_RULES, _words, compute_deal_score, dedupe_flags,
                            flag_counts, locate_quote, verify_flags)
 import asset_router
+import pack_costs
 import pack_integrity
 
 # fullread-3 (PACK-INTEG-1, 2026-10-04): documents about another property are
@@ -354,6 +355,17 @@ def analyse_pack(documents: List[Dict], call_llm: Callable[[str, str], Dict],
     flags = ver["flags"]
     counts = flag_counts(flags)
     facts = merge_facts(results)
+    # PACK-COSTS-1: buyer costs stated in the pack, read from the clauses themselves
+    # (quoted verbatim, clause-numbered) so a stated premium/fee never depends on the
+    # model noticing it. Empty model fields are filled only from unambiguous items.
+    try:
+        _costs = pack_costs.find_costs(documents)
+        _sc = facts.setdefault("special_conditions", {})
+        _ct = facts.setdefault("completion_terms", {})
+        _sc["stated_costs"] = _costs
+        _sc["stated_costs_filled"] = pack_costs.backfill_fields(_sc, _ct, _costs)
+    except Exception as e:  # never fails the analysis; the model's fields stand
+        log(f"[pack-costs] failed: {e}")
 
     # ROUTE-1: which pipeline this deal belongs to (fail closed — see asset_router).
     # Each quote is traced to the document(s) it comes from, so evidence about

@@ -41,6 +41,7 @@ from processing_staleness import seconds_since as _ps_seconds_since, \
 # Module-level so a missing module/lookup fails the deploy loudly, never silently.
 import ew_crime as _ew_crime
 import ew_flood as _ew_flood
+import pack_costs as _pack_costs
 from pathlib import Path
 import jwt as pyjwt
 import io
@@ -3020,6 +3021,45 @@ def _maybe_refresh_flood_amenities(deal_id: str, area: Optional[Dict[str, Any]])
     except Exception as _e:
         app.logger.warning("[area-refresh] deal=%s failed: %s", deal_id, _e)
         return area
+
+
+def _maybe_attach_stated_costs(deal_id: str, deal: Dict[str, Any]) -> Dict[str, Any]:
+    """PACK-COSTS-1 read-time heal: a deal analysed before PACK-COSTS-1 has no
+    special_conditions.stated_costs. Compute it from the deal's own documents (already
+    selected by get_deal), fill empty fields from unambiguous items, and persist once with
+    an optimistic lock on updated_at. Skipped while an analysis is running. Never raises."""
+    try:
+        sj = deal.get("summary_json")
+        if not isinstance(sj, dict) or deal.get("status") == "processing" or not supabase:
+            return deal
+        sc = sj.get("special_conditions")
+        if not isinstance(sc, dict):
+            return deal
+        if ((sc.get("stated_costs") or {}).get("version")) == _pack_costs.VERSION:
+            return deal
+        docs = [d for d in (deal.get("documents") or []) if (d.get("extracted_text") or "").strip()]
+        if not docs:
+            return deal
+        costs = _pack_costs.find_costs(docs)
+        ct = sj.get("completion_terms")
+        if not isinstance(ct, dict):
+            ct = {}
+            sj["completion_terms"] = ct
+        sc["stated_costs"] = costs
+        sc["stated_costs_filled"] = _pack_costs.backfill_fields(sc, ct, costs)
+        q = supabase.table("deals").update({"summary_json": _json_sanitize(sj), "updated_at": now_iso()}).eq("id", deal_id)
+        if deal.get("updated_at"):
+            q = q.eq("updated_at", deal["updated_at"])
+        res = q.execute()
+        if res.data:
+            app.logger.info("[pack-costs] deal=%s items=%d deposits=%d filled=%s", deal_id,
+                            len(costs["items"]), len(costs["deposit_terms"]), sc["stated_costs_filled"])
+        else:
+            app.logger.info("[pack-costs] deal=%s optimistic lock lost; served unsaved", deal_id)
+        return deal
+    except Exception as _e:
+        app.logger.warning("[pack-costs] deal=%s failed: %s", deal_id, _e)
+        return deal
 
 
 # ── Scotland crime (Slice A) ─────────────────────────────────────────────
@@ -8154,6 +8194,8 @@ def get_deal(deal_id: str):
         if deal.get("status") != "processing" and isinstance(deal.get("area_json"), dict):
             deal["area_json"] = _maybe_refresh_crime(deal_id, deal["area_json"])
             deal["area_json"] = _maybe_refresh_flood_amenities(deal_id, deal["area_json"])
+        # PACK-COSTS-1: stated buyer costs for deals analysed before it existed.
+        deal = _maybe_attach_stated_costs(deal_id, deal)
 
         # ── SCOTLAND read-time self-heal ───────────────────────────────────────
         # A Scottish deal has no E&W ceiling. If its scotland block is missing,
