@@ -13909,6 +13909,20 @@ def home():
 
 
 
+# HEALTH-1 (10 Oct 2026): liveness probe for Render's HTTP health check (Settings ->
+# Health Check Path = /healthz). Until now the service had no health check path, so
+# Render only probed the TCP port: a process whose workers were hung still "passed".
+# This answers 200 only when a gunicorn worker can actually run a request. It
+# deliberately checks NO dependency (Supabase, Hetzner, Anthropic): Render restarts the
+# instance after 60 s of failures, and restarting cannot fix an outside outage — it
+# would only kill in-flight background analyses. Unauthenticated, no data, exempt from
+# the global rate limit (Render probes every few seconds).
+@app.route("/healthz", methods=["GET", "HEAD"])
+@limiter.exempt
+def healthz():
+    return jsonify({"status": "ok"}), 200
+
+
 @app.route("/api/auction-triangulation", methods=["GET"])
 @require_auth
 def auction_triangulation():
