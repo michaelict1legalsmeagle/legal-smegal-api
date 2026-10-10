@@ -2,8 +2,8 @@
 LegalSmegal — Monthly Data Refresh
 ===================================
 Runs on the 21st of each month via Render Cron Job.
-Downloads latest Land Registry HPI and Price Paid data.
-HPI + Schools → Supabase. Price Paid → Hetzner.
+Downloads latest Land Registry HPI and Price Paid data, and ONS Price Index of Private
+Rents (RENT-PIPR-1). HPI + rents + Schools → Supabase. Price Paid → Hetzner.
 
 Render Cron Job config:
   Command: python refresh_data.py
@@ -165,129 +165,62 @@ def refresh_hpi():
     log.info(f"HPI refresh complete: {monthly_count} monthly rows, {by_type_count} by-type rows")
 
 
-# ── ONS PRMS (Private Rental Market Statistics) ──────────────────────────────
-# Writes to Supabase uk_prms_monthly: area_code, date, region_name, rent_price_gbp,
-# rent_yoy_pct. Source: ONS private rental index CSV (England, LAD level).
-PRMS_URL = (
-    "https://www.ons.gov.uk/generator?format=csv"
-    "&uri=/economy/inflationandpriceindices/bulletins"
-    "/privaterentalmarketsummarystatisticsinengland/latest"
-)
-# Stable direct CSV: ONS publish median rent by local authority
-PRMS_LA_URL = (
-    "https://www.ons.gov.uk/file?uri=/economy/inflationandpriceindices"
-    "/datasets/privaterentalmarketsummarystatisticsinengland"
-    "/current/prt1a.csv"
-)
+# ── ONS PRIVATE RENTS (Price Index of Private Rents, PIPR) ───────────────────
+# RENT-PIPR-1 (10 Oct 2026): the old source ("Private Rental Market Summary Statistics
+# in England") is discontinued — its ONS URLs return 404/502, so uk_prms_monthly was never
+# refreshed after the one-off May 2026 load. PIPR is ONS's monthly replacement and the
+# source that load came from. The newest edition's .xlsx is found on the dataset page
+# (file names change per edition), streamed to a temp file, parsed by pipr_rents (stdlib,
+# ~50 MB peak) and the WHOLE series is upserted, because ONS revises back months.
 PRMS_TABLE = "uk_prms_monthly"
+PRMS_UPSERT_BATCH = 1000
 
 
 def refresh_prms():
-    """
-    Download ONS Private Rental Market Statistics (England, local authority level).
-    Upserts into Supabase uk_prms_monthly.
-    ONS publish annually (typically March) covering the previous 12 months.
-    Table columns: area_code, date, region_name, rent_price_gbp, rent_yoy_pct.
-    """
-    log.info("Starting ONS PRMS refresh...")
-    urls_to_try = [PRMS_LA_URL, PRMS_URL]
-    r = None
-    used_url = None
-    for url in urls_to_try:
-        try:
-            resp = requests.get(url, timeout=60, allow_redirects=True)
-            if resp.status_code == 200 and len(resp.content) > 500:
-                r = resp
-                used_url = url
-                break
-            else:
-                log.warning(f"PRMS URL {resp.status_code}: {url}")
-        except Exception as e:
-            log.warning(f"PRMS URL failed ({url}): {e}")
-
-    if not r:
-        log.error("PRMS: no working URL found — skipping.")
-        return
-
-    log.info(f"PRMS: downloaded from {used_url}")
-    # Stream line-by-line — avoids loading full CSV into memory
-    reader = csv.DictReader(r.iter_lines(decode_unicode=True))
-
-    batch = []
-    count = 0
-    skipped = 0
-
-    # Build case-insensitive column lookup from first row
-    _col_norm = {}  # lowercase_no_special -> actual header
-
-    for row in reader:
-        # Build normalised column map once from first row
-        if not _col_norm:
-            for k in row.keys():
-                _col_norm[k.lower().replace(" ", "_").replace("-", "_")] = k
-
-        def _get(*keys):
-            for k in keys:
-                # Try exact key first
-                v = row.get(k)
-                if v is not None and str(v).strip():
-                    return str(v).strip()
-                # Try normalised lookup
-                norm = k.lower().replace(" ", "_").replace("-", "_")
-                actual = _col_norm.get(norm)
-                if actual:
-                    v = row.get(actual)
-                    if v is not None and str(v).strip():
-                        return str(v).strip()
-            return ""
-
-        try:
-            # ONS prt1a.csv columns: Area_Code, Area_Name, Year_ending_Month, Median
-            # Also handles older variants and alternative column names
-            area_code   = _get("area_code", "Area_Code", "LACODE", "Code", "geography_code")
-            region_name = _get("area_name", "Area_Name", "LANAME", "Area", "Name", "geography")
-            date_str    = _get("date", "Date", "Period", "Year_ending_Month", "year_ending_month", "Time")
-            rent_raw    = _get("median_rent", "Median", "median", "rent_price_gbp", "Value", "value") or None
-            yoy_raw     = _get("annual_change", "Annual_Change", "YoY", "rent_yoy_pct") or None
-
-            if not area_code or not date_str:
-                skipped += 1
-                continue
-
-            # Normalise date
-            if "/" in date_str:
-                parts = date_str.split("/")
-                if len(parts) == 3:
-                    date_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
-            elif len(date_str) == 7 and "-" in date_str:
-                date_str = date_str + "-01"
-
-            rent = float(str(rent_raw).replace(",", "")) if rent_raw else None
-            yoy  = float(str(yoy_raw).replace("%", "").replace(",", "")) if yoy_raw else None
-
-            batch.append({
-                "area_code":    area_code,
-                "period":       date_str,
-                "region_name":  region_name or area_code,
-                "rent_price_gbp": rent,
-                "rent_yoy_pct": yoy,
-            })
-
-            if len(batch) >= BATCH_SIZE:
-                supabase.table(PRMS_TABLE).upsert(batch, on_conflict="area_code,period").execute()
-                count += len(batch)
-                batch = []
-                log.info(f"PRMS: {count} rows upserted")
-        except Exception as e:
-            log.warning(f"PRMS row error: {e} — row: {dict(list(row.items())[:4])}")
-            skipped += 1
-            continue
-
-    if batch:
-        supabase.table(PRMS_TABLE).upsert(batch, on_conflict="area_code,period").execute()
-        count += len(batch)
-
-    log.info(f"PRMS refresh complete: {count} rows upserted, {skipped} skipped")
+    """Load ONS PIPR into Supabase uk_prms_monthly (all published periods and geographies:
+    UK, GB, countries, English regions, local authorities, Scottish BRMAs). Isolated: a
+    failure is logged and never stops the other refreshes."""
+    import tempfile
+    import pipr_rents
+    path = None
+    try:
+        log.info("Starting ONS private rents (PIPR) refresh...")
+        page = requests.get(pipr_rents.DATASET_PAGE, timeout=60,
+                            headers={"User-Agent": "LegalSmegal-data-refresh/1.0"})
+        page.raise_for_status()
+        found = pipr_rents.latest_xlsx_url(page.text)
+        if not found:
+            log.error("[pipr] no .xlsx link found on the ONS dataset page — skipped")
+            return
+        url, edition = found
+        log.info(f"[pipr] edition {edition.isoformat()}: {url}")
+        fd, path = tempfile.mkstemp(suffix=".xlsx")
+        with os.fdopen(fd, "wb") as fh, requests.get(url, timeout=300, stream=True,
+                                                     headers={"User-Agent": "LegalSmegal-data-refresh/1.0"}) as r:
+            r.raise_for_status()
+            for chunk in r.iter_content(1 << 20):
+                fh.write(chunk)
+        parsed = pipr_rents.parse_workbook(path)
+        rows = parsed["rows"]
+        if not rows:
+            log.error("[pipr] workbook parsed to 0 rows — nothing written")
+            return
+        count = 0
+        for i in range(0, len(rows), PRMS_UPSERT_BATCH):
+            supabase.table(PRMS_TABLE).upsert(rows[i:i + PRMS_UPSERT_BATCH],
+                                              on_conflict="period,area_code").execute()
+            count += len(rows[i:i + PRMS_UPSERT_BATCH])
+        log.info(f"[pipr] PRMS refresh complete: {count} rows upserted, latest period "
+                 f"{parsed['latest_period']}, {parsed['areas']} areas, {parsed['skipped']} skipped "
+                 f"(edition {edition.isoformat()})")
+    except Exception as e:
+        log.exception(f"[pipr] refresh failed (other refreshes unaffected): {e}")
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 # ── LAND REGISTRY PRICE PAID ──────────────────────────────────────────────────

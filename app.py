@@ -3023,6 +3023,100 @@ def _maybe_refresh_flood_amenities(deal_id: str, area: Optional[Dict[str, Any]])
         return area
 
 
+# ── RENT-PIPR-1: rent benchmarks on the deal's inference ─────────────────────
+RENT_SCHEMA = "rent-pipr-1"
+_RENT_LATEST: Dict[str, Any] = {"at": 0.0, "period": None}
+_RENT_LATEST_TTL = 3600
+
+
+def _rent_month_label(period: Optional[str]) -> str:
+    try:
+        return datetime.strptime(str(period)[:10], "%Y-%m-%d").strftime("%b %Y")
+    except Exception:
+        return str(period or "")
+
+
+def _rent_latest_period() -> Optional[str]:
+    """Newest month in uk_prms_monthly (cached per worker for 1 h). None if unreadable."""
+    now = time.time()
+    if _RENT_LATEST["period"] and now - _RENT_LATEST["at"] < _RENT_LATEST_TTL:
+        return _RENT_LATEST["period"]
+    try:
+        rows = supabase_data_query(
+            "SELECT MAX(period) AS p FROM public.uk_prms_monthly WHERE area_code = %s", ("E92000001",))
+        p = str((rows[0] or {}).get("p") or "")[:10] if rows else ""
+        if p:
+            _RENT_LATEST.update({"at": now, "period": p})
+            return p
+    except Exception as _e:
+        app.logger.warning("[rent-refresh] latest period read failed: %s", _e)
+    return None
+
+
+def _rent_inference_is_current(inference: Any, latest: Optional[str]) -> bool:
+    if not isinstance(inference, dict):
+        return True                      # no inference yet: the existing patch path builds it
+    basis = inference.get("rent_basis") or {}
+    if basis.get("schema") != RENT_SCHEMA:
+        return False
+    return not latest or str(basis.get("as_of") or "") >= latest
+
+
+def _maybe_refresh_rent_inference(deal_id: str, area: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """RENT-PIPR-1 read-time heal (England & Wales). area_json.inference built before
+    RENT-PIPR-1 carries Dec-2018 local rent growth (and a Demand signal / trajectory
+    driven by it), or was built on an older rents month than the table now holds. Rebuild
+    the inference from the deal's own stored area data and persist ONLY the inference key
+    with an optimistic lock (same pattern as the flood/crime refreshes). A rebuild that
+    errors is never served or written. Rate-limited per deal per worker (10 min).
+    Never raises."""
+    try:
+        if not isinstance(area, dict) or not supabase or not isinstance(area.get("inference"), dict):
+            return area
+        if _is_scotland_lsoa(str(area.get("lsoa_gss") or "")):
+            return area
+        crime = area.get("crime")
+        if isinstance(crime, dict) and str((crime.get("metrics") or {}).get("jurisdiction") or "").lower() == "scotland":
+            return area
+        latest = _rent_latest_period()
+        if _rent_inference_is_current(area.get("inference"), latest):
+            return area
+        postcode = str(area.get("postcode") or "").strip()
+        if not postcode:
+            return area
+        _k = f"rentinfref:{deal_id}"
+        if geo_cache_get(_k):
+            return area
+        geo_cache_set(_k, {"at": now_iso()})
+        fresh = (build_area_inference(area, postcode) or {}).get("inference")
+        if not isinstance(fresh, dict) or fresh.get("error") or \
+                (fresh.get("rent_basis") or {}).get("schema") != RENT_SCHEMA:
+            app.logger.warning("[rent-refresh] deal=%s rebuild unusable; stored inference kept", deal_id)
+            return area
+        area["inference"] = fresh
+        _snap = supabase.table("deals").select("updated_at, area_json").eq("id", deal_id).limit(1).execute()
+        _rows = _snap.data or []
+        if not _rows or not isinstance(_rows[0].get("area_json"), dict):
+            return area
+        latest_aj = _rows[0]["area_json"]
+        latest_aj["inference"] = fresh
+        _q = supabase.table("deals").update({"area_json": _json_sanitize(latest_aj), "updated_at": now_iso()}).eq("id", deal_id)
+        if _rows[0].get("updated_at"):
+            _q = _q.eq("updated_at", _rows[0]["updated_at"])
+        _res = _q.execute()
+        _b = ((fresh.get("benchmarks") or {}).get("rental") or {})
+        if not _res.data:
+            app.logger.info("[rent-refresh] deal=%s optimistic lock lost; served unsaved", deal_id)
+            return area
+        app.logger.info("[rent-refresh] deal=%s as_of=%s local=%s regional=%s national=%s demand=%s trajectory=%s",
+                        deal_id, _b.get("as_of"), _b.get("local_yoy"), _b.get("regional_yoy"),
+                        _b.get("national_yoy"), (fresh.get("signals") or {}).get("demand"), fresh.get("trajectory"))
+        return latest_aj
+    except Exception as _e:
+        app.logger.warning("[rent-refresh] deal=%s failed: %s", deal_id, _e)
+        return area
+
+
 def _maybe_attach_stated_costs(deal_id: str, deal: Dict[str, Any]) -> Dict[str, Any]:
     """PACK-COSTS-1 read-time heal: a deal analysed before PACK-COSTS-1 has no
     special_conditions.stated_costs. Compute it from the deal's own documents (already
@@ -3977,10 +4071,15 @@ def _get_rental_trend(lad_code: str) -> Dict[str, Any]:
     Returns direction: Increasing / Stable / Declining and 36-month series.
     """
     try:
+        # RENT-PIPR-1: the LATEST 48 months. This read "ORDER BY period ASC LIMIT 48", which
+        # returned Jan 2015 - Dec 2018, so the stored "local" rent growth and the Demand
+        # signal were 2018 figures (HU9: -0.8% shown, +7.1% actual Mar 2026). It also
+        # never selected rent_index, so the demand chart line was always empty.
         rows = supabase_data_query(
-            "SELECT period, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period ASC LIMIT 48",
+            "SELECT period, rent_index, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 48",
             (lad_code,)
         )
+        rows = list(reversed(rows or []))
         if not rows:
             return {"direction": "Unknown", "series": [], "latest_yoy": None}
 
@@ -4059,7 +4158,7 @@ def _get_national_rental_benchmark() -> Dict[str, Any]:
     """
     try:
         rows = supabase_data_query(
-            "SELECT period, rent_yoy_pct FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 48",
+            "SELECT period, rent_yoy_pct FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 12",
             ("E92000001",)
         )
         if not rows:
@@ -4072,7 +4171,8 @@ def _get_national_rental_benchmark() -> Dict[str, Any]:
         yoys = [safe_float(r.get("rent_yoy_pct")) for r in rows if r.get("rent_yoy_pct") is not None]
         latest = yoys[0] if yoys else None
         avg12  = round(sum(yoys) / len(yoys), 2) if yoys else None
-        return {"latest_yoy": latest, "avg_12m": avg12}
+        return {"latest_yoy": latest, "avg_12m": avg12, "name": "England",
+                "period": str(rows[0].get("period") or "")[:10] or None}
     except Exception as e:
         print(f"[WARN] National rental benchmark failed: {e}")
         return {"latest_yoy": None, "avg_12m": None}
@@ -4137,27 +4237,57 @@ def _get_regional_price_benchmark(lad_code: str) -> Dict[str, Any]:
     return {"avg_price": None, "yoy_pct": None}
 
 
-def _get_regional_rental_benchmark(lad_code: str) -> Dict[str, Any]:
-    """
-    Regional rental growth from uk_prms_monthly for LAD.
-    Returns latest YoY % and direction.
-    """
+def _get_local_rental_benchmark(lad_code: str) -> Dict[str, Any]:
+    """RENT-PIPR-1: the deal's local authority, latest ONS PIPR month (rent £ and annual %)."""
     try:
         rows = supabase_data_query(
-            "SELECT period, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 3",
+            "SELECT period, area_name, rent_yoy_pct, rent_price_gbp FROM public.uk_prms_monthly WHERE area_code = %s ORDER BY period DESC LIMIT 1",
             (lad_code,)
         )
         if not rows:
-            return {"latest_yoy": None, "avg_rent_gbp": None}
-        yoys = [safe_float(r.get("rent_yoy_pct")) for r in rows if r.get("rent_yoy_pct") is not None]
-        rents = [safe_float(r.get("rent_price_gbp")) for r in rows if r.get("rent_price_gbp") is not None]
+            return {"latest_yoy": None, "rent_gbp": None, "name": None, "period": None}
+        r = rows[0]
+        yoy = safe_float(r.get("rent_yoy_pct"))
+        rent = safe_float(r.get("rent_price_gbp"))
+        return {"latest_yoy": round(yoy, 1) if yoy is not None else None,
+                "rent_gbp": round(rent) if rent is not None else None,
+                "name": r.get("area_name"), "period": str(r.get("period") or "")[:10] or None}
+    except Exception as e:
+        print(f"[WARN] Local rental benchmark failed for {lad_code}: {e}")
+        return {"latest_yoy": None, "rent_gbp": None, "name": None, "period": None}
+
+
+def _get_regional_rental_benchmark(lad_code: str) -> Dict[str, Any]:
+    """
+    RENT-PIPR-1: the TRUE region of the deal's local authority — the English region (E12)
+    or Wales (W92) that ONS PIPR names in "Region or country name" — same month.
+    Before RENT-PIPR-1 this returned the local authority itself (mean of its last 3
+    months), so "regional" and "local" were the same area.
+    """
+    try:
+        rows = supabase_data_query(
+            "SELECT r.period, r.area_code, r.area_name, r.rent_yoy_pct, r.rent_price_gbp "
+            "FROM public.uk_prms_monthly l JOIN public.uk_prms_monthly r "
+            "ON r.area_name = l.region_name AND r.period = l.period "
+            "AND (r.area_code LIKE 'E12%%' OR r.area_code LIKE 'W92%%') "
+            "WHERE l.area_code = %s ORDER BY l.period DESC LIMIT 1",
+            (lad_code,)
+        )
+        if not rows:
+            return {"latest_yoy": None, "avg_rent_gbp": None, "name": None, "area_code": None, "period": None}
+        r = rows[0]
+        yoy = safe_float(r.get("rent_yoy_pct"))
+        rent = safe_float(r.get("rent_price_gbp"))
         return {
-            "latest_yoy":   round(yoys[0], 2) if yoys else None,
-            "avg_rent_gbp": round(sum(rents) / len(rents), 0) if rents else None,
+            "latest_yoy":   round(yoy, 1) if yoy is not None else None,
+            "avg_rent_gbp": round(rent) if rent is not None else None,
+            "name":         r.get("area_name"),
+            "area_code":    r.get("area_code"),
+            "period":       str(r.get("period") or "")[:10] or None,
         }
     except Exception as e:
         print(f"[WARN] Regional rental benchmark failed for {lad_code}: {e}")
-        return {"latest_yoy": None, "avg_rent_gbp": None}
+        return {"latest_yoy": None, "avg_rent_gbp": None, "name": None, "area_code": None, "period": None}
 
 
 def _get_transaction_liquidity(postcode: str, lad_code: str) -> Dict[str, Any]:
@@ -4237,7 +4367,7 @@ def _get_yield_benchmarks(lad_code: str) -> Dict[str, Any]:
         results["local_rent_gbp"]    = local_rent
         results["local_price_gbp"]   = local_price
         results["national_rent_gbp"] = nat_rent
-        results["source"] = "ONS PRMS · Land Registry HPI"
+        results["source"] = "ONS Price Index of Private Rents · Land Registry HPI"
         return results
 
     except Exception as e:
@@ -4388,6 +4518,7 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         reg_price    = _get_regional_price_benchmark(lad_code)
         nat_rental   = _get_national_rental_benchmark()
         reg_rental   = _get_regional_rental_benchmark(lad_code)
+        loc_rental   = _get_local_rental_benchmark(lad_code)
         liquidity    = _get_transaction_liquidity(postcode, lad_code)
 
         # Crime "vs national" REMOVED - governance: no fake values.
@@ -4557,6 +4688,7 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
         chart_data = {
             "price":   price_index,
             "demand":  demand_index,
+            "rental":  demand_index,   # RENT-PIPR-1: verdict sparkline reads chart_data.rental
             "growth":  growth_index,
         }
 
@@ -4573,14 +4705,14 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
             return f"{v:+.1f}%"
 
         # Rental growth — local vs regional vs national
-        if rental.get("latest_yoy") is not None:
-            local_r  = rental["latest_yoy"]
+        if loc_rental.get("latest_yoy") is not None:
+            local_r  = loc_rental["latest_yoy"]
             reg_r    = reg_rental.get("latest_yoy")
             nat_r    = nat_rental.get("latest_yoy")
-            parts    = [f"Rental {_fmt_pct(local_r)} YoY"]
-            if reg_r is not None: parts.append(f"reg {_fmt_pct(reg_r)}")
-            if nat_r is not None: parts.append(f"nat {_fmt_pct(nat_r)}")
-            parts.append("· ONS PRMS")
+            parts    = [f"Rent {_fmt_pct(local_r)} a year ({loc_rental.get('name') or 'local authority'})"]
+            if reg_r is not None: parts.append(f"{reg_rental.get('name') or 'region'} {_fmt_pct(reg_r)}")
+            if nat_r is not None: parts.append(f"England {_fmt_pct(nat_r)}")
+            parts.append("ONS Price Index of Private Rents" + (f", {_rent_month_label(loc_rental.get('period'))}" if loc_rental.get("period") else ""))
             sign = "+" if local_r > 0 else "-"
             drivers.append({"sign": sign, "text": " · ".join(parts)})
 
@@ -4650,8 +4782,8 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
             local_y  = yield_data["local_yield"]
             nat_y    = yield_data.get("national_yield")
             parts    = [f"Gross yield {local_y:.1f}%"]
-            if nat_y: parts.append(f"nat {nat_y:.1f}%")
-            parts.append("· ONS PRMS · Land Registry HPI")
+            if nat_y: parts.append(f"England {nat_y:.1f}%")
+            parts.append("ONS Price Index of Private Rents · Land Registry HPI")
             sign = "+" if (nat_y and local_y > nat_y) else ("~" if nat_y else "~")
             drivers.append({"sign": sign, "text": " · ".join(parts)})
 
@@ -4724,11 +4856,19 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                         "source": "Land Registry HPI",
                     },
                     "rental": {
-                        "local_yoy":    rental.get("latest_yoy"),
-                        "regional_yoy": reg_rental.get("latest_yoy"),
-                        "national_yoy": nat_rental.get("latest_yoy"),
+                        # RENT-PIPR-1: local = the deal's local authority (latest month);
+                        # regional = its English region / Wales; national = England.
+                        "local_yoy":         loc_rental.get("latest_yoy"),
+                        "local_rent_gbp":    loc_rental.get("rent_gbp"),
+                        "local_name":        loc_rental.get("name"),
+                        "regional_yoy":      reg_rental.get("latest_yoy"),
                         "regional_rent_gbp": reg_rental.get("avg_rent_gbp"),
-                        "source": "ONS PRMS",
+                        "regional_name":     reg_rental.get("name"),
+                        "national_yoy":      nat_rental.get("latest_yoy"),
+                        "national_name":     nat_rental.get("name"),
+                        "as_of":             loc_rental.get("period"),
+                        "source":            "ONS Price Index of Private Rents",
+                        "schema":            RENT_SCHEMA,
                     },
                     "crime": {
                         # CRIME-EVID-1: None (not 0) when police.uk returned no force records.
@@ -4756,7 +4896,7 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                         "national_pct": yield_data.get("national_yield"),
                         "local_rent_gbp":    yield_data.get("local_rent_gbp"),
                         "local_price_gbp":   yield_data.get("local_price_gbp"),
-                        "source": "ONS PRMS · Land Registry HPI",
+                        "source": "ONS Price Index of Private Rents · Land Registry HPI",
                     },
                     "deprivation": {
                         "imd_decile": imd_data.get("decile"),
@@ -4768,7 +4908,8 @@ def build_area_inference(area_data: Dict[str, Any], postcode: str) -> Dict[str, 
                         "source": "ONS Census 2021 TS054",
                     },
                 },
-                "provenance":     "Land Registry · ONS Population · ONS PRMS · OSM · PlanningAlerts · Police.uk · MHCLG EPC · ONS Census 2021",
+                "provenance":     "Land Registry · ONS Population · ONS Price Index of Private Rents · OSM · PlanningAlerts · Police.uk · MHCLG EPC · ONS Census 2021",
+                "rent_basis":     {"schema": RENT_SCHEMA, "as_of": loc_rental.get("period")},
                 "lad_code":       lad_code,
                 "computed_at":    now_iso(),
                 "data_availability_pct": round(_data_availability_pct, 2),
@@ -8194,6 +8335,7 @@ def get_deal(deal_id: str):
         if deal.get("status") != "processing" and isinstance(deal.get("area_json"), dict):
             deal["area_json"] = _maybe_refresh_crime(deal_id, deal["area_json"])
             deal["area_json"] = _maybe_refresh_flood_amenities(deal_id, deal["area_json"])
+            deal["area_json"] = _maybe_refresh_rent_inference(deal_id, deal["area_json"])
         # PACK-COSTS-1: stated buyer costs for deals analysed before it existed.
         deal = _maybe_attach_stated_costs(deal_id, deal)
 
@@ -11425,6 +11567,7 @@ def get_area(deal_id: str):
         area = _maybe_enrich_census_demographics(deal_id, area)
         area = _maybe_refresh_crime(deal_id, area)
         area = _maybe_refresh_flood_amenities(deal_id, area)
+        area = _maybe_refresh_rent_inference(deal_id, area)
         area = _maybe_heal_live_blocks(area)
         return jsonify({
             "ok":       True,
@@ -11975,6 +12118,7 @@ def save_area(deal_id: str):
             cached = _maybe_enrich_census_demographics(deal_id, cached)
             cached = _maybe_refresh_crime(deal_id, cached)
             cached = _maybe_refresh_flood_amenities(deal_id, cached)
+            cached = _maybe_refresh_rent_inference(deal_id, cached)
             return jsonify({
                 "ok":       True,
                 "area":     cached,
